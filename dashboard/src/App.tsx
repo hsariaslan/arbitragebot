@@ -18,10 +18,19 @@ export default function App() {
   const {
     state, connected, authenticated, authError,
     attemptsRemaining, blocked, retryAfter, authLoading,
-    captchaRequired, captchaSiteKey,
+    captchaRequired, captchaSiteKey, ipDenied,
     login, logout, send,
   } = useWebSocket();
   const [activeTab, setActiveTab] = useState<'dashboard' | 'ranking' | 'settings' | 'auth_log'>('dashboard');
+
+  // IP denied — dead end, no login, no reconnect
+  if (ipDenied) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <p className="text-slate-500 text-lg">You are not allowed here.</p>
+      </div>
+    );
+  }
 
   // Not connected
   if (!connected && !blocked) {

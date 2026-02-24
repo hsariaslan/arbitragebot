@@ -28,6 +28,7 @@ export function useWebSocket() {
   const [authLoading, setAuthLoading] = useState(false);
   const [captchaRequired, setCaptchaRequired] = useState(false);
   const [captchaSiteKey, setCaptchaSiteKey] = useState<string | null>(null);
+  const [ipDenied, setIpDenied] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout>>();
@@ -115,8 +116,11 @@ export function useWebSocket() {
 
         if (data.type === 'auth_denied') {
           setAuthenticated(false);
+          setBlocked(true);
+          blockedRef.current = true;
           setAuthError(data.reason || 'IP not allowed');
           setAuthLoading(false);
+          setIpDenied(true);
           return;
         }
 
@@ -201,7 +205,7 @@ export function useWebSocket() {
   return {
     state, connected, authenticated, authError,
     attemptsRemaining, blocked, retryAfter, authLoading,
-    captchaRequired, captchaSiteKey,
+    captchaRequired, captchaSiteKey, ipDenied,
     login, logout, send,
   };
 }
