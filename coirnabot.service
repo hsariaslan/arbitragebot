@@ -1,0 +1,16 @@
+[Unit]
+Description=CoirnaBot Crypto Arbitrage Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/coirnabot
+ExecStart=/root/coirnabot/.venv/bin/python run.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

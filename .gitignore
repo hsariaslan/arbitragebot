@@ -1,0 +1,32 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime data
+logs/
+data/
+xlsx/
+screenshots/
+
+# Settings with potential secrets
+settings.json
+api_keys.json
+
+# Dashboard build artifacts & dependencies
+dashboard/node_modules/
+dashboard/dist/
+dashboard/tsconfig.app.tsbuildinfo
+
+# Root-level npm artifacts (not used)
+package-lock.json
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

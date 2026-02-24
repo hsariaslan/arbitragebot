@@ -1,0 +1,19 @@
+{
+  "trade_amount_usd": 100,
+  "total_capital": 1800,
+  "auto_rotate": true,
+  "num_active_symbols": 3,
+  "max_active_symbols": 8,
+  "scoring_window": 1800,
+  "evaluation_interval": 300,
+  "safety_multiplier": 2,
+  "min_rebalance_score": 0.01,
+  "confirmation_period": 300,
+  "promotion_threshold": 0.01,
+  "demotion_threshold": 0.005,
+  "demotion_period": 600,
+  "min_net_profit_pct": 0.03,
+  "rebalance_cooldown": 60,
+  "rebalance_roi_horizon": 1800,
+  "adaptive_mode": true
+}

@@ -1,0 +1,817 @@
+"""
+Cross-exchange arbitrage monitor with trade simulation.
+
+Reads live price state from all registered fetchers, compares prices
+across exchanges, simulates trades when profitable after fees, and
+tracks cumulative P&L. Prints a comprehensive discovery report on shutdown.
+"""
+
+import asyncio
+import logging
+import time
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+LOCAL_TZ = timezone(timedelta(hours=3))  # UTC+3
+from typing import TYPE_CHECKING
+
+from balance import BalanceTracker
+from config import (
+    ACTIVE_EXCHANGES,
+    ACTIVE_SYMBOLS,
+    EXCHANGE_TAKER_FEES,
+    MAX_DATA_AGE_SECONDS,
+    MONITOR_INTERVAL_SECONDS,
+    TRADE_AMOUNT_USD,
+    USDT_WITHDRAWAL_FEES,
+)
+
+if TYPE_CHECKING:
+    from fetchers.base import BaseFetcher
+    from optimizer import SymbolOptimizer
+
+logger = logging.getLogger(__name__)
+
+
+
+@dataclass
+class ConfigSnapshot:
+    """Record of configuration state at a point in time."""
+
+    timestamp: float
+    reason: str  # "initial", "settings_applied", "adaptive_update"
+    trade_amount: float
+    adaptive_mode: bool
+    min_net_profit_pct: float
+    rebalance_cooldown: float
+    rebalance_roi_horizon: int
+    total_capital: float
+    num_active_symbols: int
+    max_active_symbols: int
+    avg_trade_size: float
+    estimated_profit_per_trade: float
+
+
+@dataclass
+class SimulatedTrade:
+    """Record of a single simulated trade."""
+
+    timestamp: float
+    symbol: str
+    buy_exchange: str
+    sell_exchange: str
+    buy_price: float
+    sell_price: float
+    spread_pct: float
+    fee_pct: float
+    net_pct: float
+    profit_usd: float
+    trade_amount: float = 0.0
+
+
+class ArbitrageMonitor:
+    """
+    Centralized cross-exchange price comparison and trade simulator.
+
+    Every second:
+    1. Scans all fetcher states for cross-exchange spread opportunities
+    2. If spread > total fees, simulates a $10 trade and records profit
+    3. Prints a live table sorted by net profit (after fees)
+
+    On shutdown: prints a comprehensive discovery report.
+    """
+
+    def __init__(
+        self,
+        fetchers: list["BaseFetcher"],
+        balance: BalanceTracker | None = None,
+        symbols: list[str] | None = None,
+        exchanges: list[str] | None = None,
+        trade_amount: float | None = None,
+        min_net_profit_pct: float = 0.02,
+        rebalance_roi_horizon: int = 1800,
+        total_capital: float = 1800.0,
+        adaptive_mode: bool = True,
+        log_file: "Path | None" = None,
+    ) -> None:
+        self._fetchers = fetchers
+        self._balance = balance
+        self._log_file = log_file
+        self._running: bool = False
+        self._paused: bool = False
+        self._symbols: list[str] = symbols or ACTIVE_SYMBOLS
+        self._trade_amount: float = trade_amount or TRADE_AMOUNT_USD
+        self._active_exchanges: set[str] = set(exchanges or ACTIVE_EXCHANGES)
+        self._min_net_profit_pct: float = min_net_profit_pct
+        self._rebalance_roi_horizon: int = rebalance_roi_horizon
+        self._total_capital: float = total_capital
+        self._adaptive_mode: bool = adaptive_mode
+
+        self._optimizer: "SymbolOptimizer | None" = None
+        self._trades: list[SimulatedTrade] = []
+        self._low_profit_skips: int = 0
+        self._start_time: float = 0.0
+        self._tick_count: int = 0
+
+        # Configuration history tracking
+        self._config_history: list[ConfigSnapshot] = []
+
+        # Consecutive miss tracking: only rebalance after N consecutive
+        # profitable ticks that couldn't execute due to insufficient balance.
+        # Key: "sym:buy_ex:sell_ex" → consecutive miss count
+        self._miss_streak: dict[str, int] = {}
+        self._min_misses_before_rebalance: int = 15
+
+        # Track all spread observations (even non-profitable) per symbol
+        # Each entry: (spread_pct, fee_pct, net_pct, buy_ex, sell_ex)
+        self._all_observations: list[tuple[str, float, float, float, str, str]] = []
+
+        # Data freshness tracking
+        self._stale_skips: dict[str, int] = defaultdict(int)
+        self._fresh_samples: dict[str, int] = defaultdict(int)
+        self._exchange_age_sum: dict[str, float] = defaultdict(float)
+        self._exchange_age_max: dict[str, float] = defaultdict(float)
+        self._exchange_age_count: dict[str, int] = defaultdict(int)
+
+        # Depth filtering tracking
+        self._depth_skips: int = 0
+
+        # Per-exchange internal spread tracking (bid-ask on same exchange)
+        self._exchange_spread_sum: dict[str, float] = defaultdict(float)
+        self._exchange_spread_max: dict[str, float] = defaultdict(float)
+        self._exchange_spread_count: dict[str, int] = defaultdict(int)
+
+    def set_optimizer(self, optimizer: "SymbolOptimizer") -> None:
+        """Store optimizer reference for score-based rebalance gating."""
+        self._optimizer = optimizer
+
+    def _output(self, text: str) -> None:
+        """Print to console and append to log file."""
+        print(text)
+        if self._log_file:
+            with open(self._log_file, "a") as f:
+                f.write(text + "\n")
+
+    def get_net_profit_stats(self) -> dict:
+        """Compute rolling hourly net profit stats."""
+        now = time.time()
+        elapsed_hours = max((now - self._start_time) / 3600, 1 / 3600) if self._start_time else 1 / 3600
+
+        trading_pnl = sum(t.profit_usd for t in self._trades)
+        transfer_fees = self._balance.total_transfer_fees if self._balance else 0.0
+        net_profit = trading_pnl - transfer_fees
+
+        # Rolling 1-hour window
+        one_hour_ago = now - 3600
+        recent_profit = sum(t.profit_usd for t in self._trades if t.timestamp >= one_hour_ago)
+        recent_fees = sum(
+            tr.fee_usd for tr in (self._balance.transfers if self._balance else [])
+            if tr.timestamp >= one_hour_ago
+        )
+
+        hourly_net = recent_profit - recent_fees
+        session_hourly_rate = net_profit / elapsed_hours
+
+        return {
+            "net_profit": round(net_profit, 4),
+            "hourly_net": round(hourly_net, 4),
+            "session_hourly_rate": round(session_hourly_rate, 4),
+            "trading_pnl": round(trading_pnl, 4),
+            "transfer_fees": round(transfer_fees, 4),
+            "is_profitable": net_profit > 0,
+        }
+
+    def _should_rebalance(self, buy_ex: str, sell_ex: str) -> bool:
+        """Check if rebalancing is worthwhile based on ROI and net P&L."""
+        if not self._balance or not self._adaptive_mode:
+            return True
+
+        # Block when net P&L is negative (after warm-up period)
+        if len(self._trades) >= 10:
+            trading_pnl = sum(t.profit_usd for t in self._trades)
+            if trading_pnl < self._balance.total_transfer_fees:
+                return False
+
+        # ROI gate: estimated rebalance cost vs expected profit from enabled trades
+        rebal_amount = self._trade_amount * 3
+        buy_fee = EXCHANGE_TAKER_FEES.get(buy_ex, 0.001)
+        sell_fee = EXCHANGE_TAKER_FEES.get(sell_ex, 0.001)
+        est_cost = rebal_amount * (buy_fee + sell_fee)  # two internal transfers
+        trades_enabled = rebal_amount / max(self._trade_amount, 1)
+        est_profit = trades_enabled * self._balance._estimated_profit_per_trade
+        if est_profit < est_cost * 1.5:
+            return False
+
+        return True
+
+    def _compute_trade_size(
+        self, buy_ex: str, sell_ex: str, symbol: str,
+        net_pct: float, sell_price: float,
+    ) -> float:
+        """Compute optimal trade size based on available balance, symbol score, and spread quality."""
+        if not self._balance or not self._balance.initialized:
+            return self._trade_amount
+
+        # Per-symbol multiplier from optimizer (better symbols get more capital)
+        symbol_mult = 1.0
+        if self._optimizer:
+            sym_score = self._optimizer.get_symbol_score(symbol)
+            if sym_score:
+                symbol_mult = sym_score.trade_multiplier
+
+        # Max by available USDT on buy exchange (keep 20% buffer)
+        usdt_available = self._balance.usdt.get(buy_ex, 0.0)
+        max_by_usdt = usdt_available * 0.80
+
+        # Max by available crypto value on sell exchange (keep 20% buffer)
+        crypto_qty = self._balance.crypto.get(sell_ex, {}).get(symbol, 0.0)
+        crypto_value = crypto_qty * sell_price
+        max_by_crypto = crypto_value * 0.80
+
+        # Tick quality factor (narrow range — symbol_mult does the heavy lifting)
+        if net_pct >= 0.10:
+            tick_factor = 1.0
+        elif net_pct >= 0.05:
+            tick_factor = 0.90
+        else:
+            tick_factor = 0.85
+
+        # Capital-proportional floor
+        min_trade = max(5.0, self._total_capital * 0.003)
+
+        base = self._trade_amount * symbol_mult * tick_factor
+        trade_size = min(max_by_usdt, max_by_crypto, base)
+
+        if trade_size < min_trade:
+            return 0.0
+
+        return round(trade_size, 2)
+
+    def record_config_snapshot(self, reason: str) -> None:
+        """Record current configuration state for history tracking."""
+        recent = self._trades[-100:] if self._trades else []
+        sizes = [t.trade_amount for t in recent if t.trade_amount > 0]
+        self._config_history.append(ConfigSnapshot(
+            timestamp=time.time(),
+            reason=reason,
+            trade_amount=self._trade_amount,
+            adaptive_mode=self._adaptive_mode,
+            min_net_profit_pct=self._min_net_profit_pct,
+            rebalance_cooldown=self._balance._rebalance_cooldown if self._balance else 0,
+            rebalance_roi_horizon=self._rebalance_roi_horizon,
+            total_capital=self._total_capital,
+            num_active_symbols=len(self._optimizer.active_symbols) if self._optimizer else 0,
+            max_active_symbols=self._optimizer._max_active_symbols if self._optimizer else 0,
+            avg_trade_size=sum(sizes) / len(sizes) if sizes else 0,
+            estimated_profit_per_trade=(
+                self._balance._estimated_profit_per_trade if self._balance else 0
+            ),
+        ))
+
+    def stop(self) -> None:
+        """Signal the monitor to stop."""
+        self._running = False
+
+    def update_symbols(self, symbols: list[str]) -> None:
+        """Update active symbols list (called by SymbolOptimizer)."""
+        self._symbols = list(symbols)
+        logger.info(f"[Monitor] Symbols updated: {symbols}")
+
+    def reset(
+        self,
+        symbols: list[str] | None = None,
+        exchanges: list[str] | None = None,
+        trade_amount: float | None = None,
+        balance: BalanceTracker | None = None,
+        min_net_profit_pct: float | None = None,
+        rebalance_roi_horizon: int | None = None,
+    ) -> None:
+        """Reset simulation state, optionally with new configuration."""
+        if symbols is not None:
+            self._symbols = symbols
+        if exchanges is not None:
+            self._active_exchanges = set(exchanges)
+        if trade_amount is not None:
+            self._trade_amount = trade_amount
+        if balance is not None:
+            self._balance = balance
+        if min_net_profit_pct is not None:
+            self._min_net_profit_pct = min_net_profit_pct
+        if rebalance_roi_horizon is not None:
+            self._rebalance_roi_horizon = rebalance_roi_horizon
+
+        self._trades.clear()
+        self._all_observations.clear()
+        self._low_profit_skips = 0
+        self._stale_skips.clear()
+        self._fresh_samples.clear()
+        self._exchange_age_sum.clear()
+        self._exchange_age_max.clear()
+        self._exchange_age_count.clear()
+        self._depth_skips = 0
+        self._exchange_spread_sum.clear()
+        self._exchange_spread_max.clear()
+        self._exchange_spread_count.clear()
+        self._miss_streak.clear()
+        self._tick_count = 0
+        self._start_time = time.time()
+        logger.info(
+            f"[Monitor] Reset: {len(self._symbols)} symbols, "
+            f"{len(self._active_exchanges)} exchanges, ${self._trade_amount}/trade"
+        )
+
+    async def run(self) -> None:
+        """Main loop: periodically scan prices, simulate trades, print table."""
+        self._running = True
+        self._start_time = time.time()
+        exchange_names = [f.exchange_name for f in self._fetchers]
+        logger.info(
+            f"[Monitor] Starting simulation: {', '.join(exchange_names)} "
+            f"| {len(self._symbols)} symbols | ${self._trade_amount} per trade"
+        )
+
+        while self._running:
+            if not self._paused:
+                self._tick()
+            await asyncio.sleep(MONITOR_INTERVAL_SECONDS)
+
+        logger.info("[Monitor] Simulation stopped")
+
+    def _tick(self) -> None:
+        """One simulation tick: scan prices, simulate trades, print."""
+        now = time.time()
+        dt = datetime.fromtimestamp(now, tz=LOCAL_TZ)
+        self._tick_count += 1
+
+        # Initialize balance tracker as soon as prices are available
+        if self._balance and not self._balance.initialized:
+            self._balance.initialize_crypto(self._get_current_prices())
+
+        rows: list[tuple[str, str, float, str, float, float, float, float, float]] = []
+
+        # Track per-exchange data age for this tick's display
+        tick_age_lists: dict[str, list[float]] = defaultdict(list)
+
+        for symbol in self._symbols:
+            exchange_prices: list[tuple[str, float, float]] = []
+
+            for fetcher in self._fetchers:
+                if fetcher.exchange_name not in self._active_exchanges:
+                    continue
+                state = fetcher.get_state()
+                ps = state.get(symbol)
+                if ps is None or not ps.bid or not ps.ask:
+                    continue
+
+                # Check data freshness
+                if ps.received_at > 0:
+                    age = now - ps.received_at
+                    tick_age_lists[fetcher.exchange_name].append(age)
+
+                    # Track running stats for summary report
+                    self._exchange_age_sum[fetcher.exchange_name] += age
+                    self._exchange_age_count[fetcher.exchange_name] += 1
+                    if age > self._exchange_age_max[fetcher.exchange_name]:
+                        self._exchange_age_max[fetcher.exchange_name] = age
+
+                    # Skip stale data
+                    if age > MAX_DATA_AGE_SECONDS:
+                        self._stale_skips[fetcher.exchange_name] += 1
+                        continue
+
+                    self._fresh_samples[fetcher.exchange_name] += 1
+
+                try:
+                    bid_f = float(ps.bid)
+                    ask_f = float(ps.ask)
+                except (ValueError, TypeError):
+                    continue
+
+                if bid_f <= 0 or ask_f <= 0:
+                    continue
+
+                # Compute depth in USD at best bid/ask
+                try:
+                    bid_qty_f = float(ps.bid_qty) if ps.bid_qty else 0.0
+                    ask_qty_f = float(ps.ask_qty) if ps.ask_qty else 0.0
+                except (ValueError, TypeError):
+                    bid_qty_f = 0.0
+                    ask_qty_f = 0.0
+
+                bid_depth = bid_f * bid_qty_f if bid_qty_f > 0 else float("inf")
+                ask_depth = ask_f * ask_qty_f if ask_qty_f > 0 else float("inf")
+
+                exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, bid_depth, ask_depth))
+
+            if len(exchange_prices) < 2:
+                continue
+
+            # Track per-exchange internal spread (bid-ask on same exchange)
+            for ex_name, ex_bid, ex_ask, _, _ in exchange_prices:
+                if ex_bid > 0:
+                    internal_spread = (ex_ask - ex_bid) / ex_bid * 100
+                    self._exchange_spread_sum[ex_name] += internal_spread
+                    self._exchange_spread_count[ex_name] += 1
+                    if internal_spread > self._exchange_spread_max[ex_name]:
+                        self._exchange_spread_max[ex_name] = internal_spread
+
+            best_net = float("-inf")
+            best_row = None
+
+            for i, (ex_buy, _, ask_i, _, ask_depth_i) in enumerate(exchange_prices):
+                for j, (ex_sell, bid_j, _, bid_depth_j, _) in enumerate(exchange_prices):
+                    if i == j:
+                        continue
+
+                    # Skip if insufficient depth (use min_trade as threshold)
+                    min_depth = max(5.0, self._total_capital * 0.003) if self._adaptive_mode else self._trade_amount
+                    if ask_depth_i < min_depth or bid_depth_j < min_depth:
+                        self._depth_skips += 1
+                        continue
+
+                    spread_pct = (bid_j - ask_i) / ask_i * 100
+                    buy_fee = EXCHANGE_TAKER_FEES.get(ex_buy, 0.001)
+                    sell_fee = EXCHANGE_TAKER_FEES.get(ex_sell, 0.001)
+                    fee_pct = (buy_fee + sell_fee) * 100
+                    net_pct = spread_pct - fee_pct
+                    profit_usd = self._trade_amount * (net_pct / 100)
+
+                    if net_pct > best_net:
+                        best_net = net_pct
+                        best_row = (symbol, ex_buy, ask_i, ex_sell, bid_j,
+                                    spread_pct, fee_pct, net_pct, profit_usd)
+
+            if best_row is not None:
+                rows.append(best_row)
+                sym, buy_ex, ask_p, sell_ex, bid_p, spread, fee, net, profit = best_row
+
+                # Record observation (all, not just profitable)
+                self._all_observations.append((sym, spread, fee, net, buy_ex, sell_ex))
+
+                # Minimum net% threshold (net is already after fees)
+                pair_min_net = self._min_net_profit_pct
+
+                # Simulate trade if profitable and above minimum threshold
+                if net > 0 and net >= pair_min_net:
+                    can_trade = True
+
+                    # Compute trade size (adaptive or static)
+                    if self._adaptive_mode:
+                        trade_size = self._compute_trade_size(
+                            buy_ex, sell_ex, sym, net, bid_p,
+                        )
+                    else:
+                        trade_size = self._trade_amount
+
+                    if self._balance and self._balance.initialized:
+                        # Track miss-streak for rebalancing (even when trade_size is 0)
+                        if trade_size <= 0:
+                            miss_key = f"{sym}:{buy_ex}:{sell_ex}"
+                            self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
+                            can_trade = False
+                        else:
+                            has_usdt, has_crypto = self._balance.can_execute(
+                                buy_ex, sell_ex, sym, trade_size, bid_p
+                            )
+                            if not has_usdt or not has_crypto:
+                                miss_key = f"{sym}:{buy_ex}:{sell_ex}"
+                                self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
+                                can_trade = False
+
+                        # Try rebalancing when miss-streak is high enough
+                        miss_key = f"{sym}:{buy_ex}:{sell_ex}"
+                        if not can_trade and self._miss_streak.get(miss_key, 0) >= self._min_misses_before_rebalance:
+                            # Gates: optimizer score + ROI + net P&L
+                            if (self._optimizer and self._optimizer.should_allow_rebalance(sym)
+                                    and self._should_rebalance(buy_ex, sell_ex)):
+                                prices = self._get_current_prices()
+                                self._balance.try_rebalance(
+                                    buy_ex, sell_ex, sym, self._trade_amount, prices
+                                )
+                                self._miss_streak[miss_key] = 0
+
+                                # Retry trade after rebalancing
+                                trade_size = self._compute_trade_size(
+                                    buy_ex, sell_ex, sym, net, bid_p,
+                                ) if self._adaptive_mode else self._trade_amount
+                                if trade_size > 0:
+                                    has_usdt, has_crypto = self._balance.can_execute(
+                                        buy_ex, sell_ex, sym, trade_size, bid_p
+                                    )
+                                    can_trade = has_usdt and has_crypto
+
+                        # Execute the trade or count the skip
+                        if can_trade:
+                            miss_key = f"{sym}:{buy_ex}:{sell_ex}"
+                            self._miss_streak[miss_key] = 0
+                            buy_fee_rate = EXCHANGE_TAKER_FEES.get(buy_ex, 0.001)
+                            sell_fee_rate = EXCHANGE_TAKER_FEES.get(sell_ex, 0.001)
+                            self._balance.execute_trade(
+                                buy_ex, sell_ex, sym, trade_size,
+                                ask_p, bid_p, buy_fee_rate, sell_fee_rate,
+                            )
+                        else:
+                            self._balance.skipped_trades += 1
+                    elif self._balance:
+                        self._balance.skipped_trades += 1
+                        can_trade = False
+
+                    if can_trade:
+                        actual_profit = trade_size * (net / 100)
+                        trade = SimulatedTrade(
+                            timestamp=now, symbol=sym,
+                            buy_exchange=buy_ex, sell_exchange=sell_ex,
+                            buy_price=ask_p, sell_price=bid_p,
+                            spread_pct=spread, fee_pct=fee,
+                            net_pct=net, profit_usd=actual_profit,
+                            trade_amount=trade_size,
+                        )
+                        self._trades.append(trade)
+                elif net > 0:
+                    # Positive but below threshold — still track miss-streak
+                    # so rebalancing can trigger for generally-profitable symbols
+                    self._low_profit_skips += 1
+                    if self._balance and self._balance.initialized:
+                        miss_key = f"{sym}:{buy_ex}:{sell_ex}"
+                        self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
+
+                        if self._miss_streak.get(miss_key, 0) >= self._min_misses_before_rebalance:
+                            if (self._optimizer and self._optimizer.should_allow_rebalance(sym)
+                                    and self._should_rebalance(buy_ex, sell_ex)):
+                                prices = self._get_current_prices()
+                                self._balance.try_rebalance(
+                                    buy_ex, sell_ex, sym, self._trade_amount, prices
+                                )
+                                self._miss_streak[miss_key] = 0
+
+                # Periodically update estimated profit on balance + record config
+                if self._tick_count % 60 == 0 and self._balance and self._trades:
+                    recent_profits = [t.profit_usd for t in self._trades[-100:]]
+                    avg_profit = sum(recent_profits) / len(recent_profits)
+                    self._balance._estimated_profit_per_trade = max(0.005, avg_profit)
+                if self._adaptive_mode and self._tick_count % 300 == 0 and self._tick_count > 0:
+                    self.record_config_snapshot("adaptive_update")
+
+        rows.sort(key=lambda r: r[7], reverse=True)
+
+        # Compute average age per exchange for display
+        tick_ages: dict[str, float] = {}
+        for ex, ages in tick_age_lists.items():
+            tick_ages[ex] = sum(ages) / len(ages)
+
+        self._print_table(dt, rows, tick_ages)
+
+    def _get_current_prices(self) -> dict[str, float]:
+        """Get current mid prices for all active symbols from fetcher states."""
+        prices: dict[str, float] = {}
+        for sym in self._symbols:
+            for fetcher in self._fetchers:
+                if fetcher.exchange_name not in self._active_exchanges:
+                    continue
+                state = fetcher.get_state()
+                ps = state.get(sym)
+                if ps and ps.bid and ps.ask:
+                    try:
+                        mid = (float(ps.bid) + float(ps.ask)) / 2.0
+                        if mid > 0:
+                            prices[sym] = mid
+                            break
+                    except (ValueError, TypeError):
+                        continue
+        return prices
+
+    def _print_table(self, dt: datetime,
+                     rows: list[tuple[str, str, float, str, float, float, float, float, float]],
+                     tick_ages: dict[str, float] | None = None) -> None:
+        """Print the live arbitrage + simulation table."""
+        total_profit = sum(t.profit_usd for t in self._trades)
+        total_trades = len(self._trades)
+
+        lines: list[str] = []
+        connected = sum(
+            1 for f in self._fetchers
+            if f._ws_connected and f.exchange_name in self._active_exchanges
+        )
+        active_count = len(self._active_exchanges)
+        skipped = self._balance.skipped_trades if self._balance else 0
+        lines.append(
+            f"\n[{dt.strftime('%H:%M:%S')}] "
+            f"{connected}/{active_count} ex | "
+            f"{total_trades} trades | "
+            f"{skipped} skip | "
+            f"P&L ${total_profit:+.4f}"
+        )
+
+        # Only show stale exchanges
+        if tick_ages:
+            stale = [
+                f"{ex} {tick_ages[ex]:.0f}s"
+                for f in self._fetchers
+                if (ex := f.exchange_name) in tick_ages and tick_ages[ex] > MAX_DATA_AGE_SECONDS
+            ]
+            if stale:
+                lines.append(f"  STALE: {', '.join(stale)}")
+
+        # Balance summary line
+        if self._balance and self._balance.initialized:
+            prices = self._get_current_prices()
+            for bl in self._balance.get_balance_lines(prices):
+                lines.append(bl)
+
+        if not rows:
+            lines.append("  (waiting for data...)")
+        else:
+            for sym, buy_ex, _, sell_ex, _, spread, fee, net, profit in rows:
+                marker = " <--" if net > 0 else ""
+                lines.append(
+                    f"  {sym:<10} {buy_ex:>7}>{sell_ex:<7} "
+                    f"{spread:>+.4f}% -{fee:.3f}% ={net:>+.4f}% ${profit:+.4f}{marker}"
+                )
+
+        self._output("\n".join(lines))
+
+    # ── Summary Report ──────────────────────────────────────────────────
+
+    def print_summary(self) -> None:
+        """Print discovery report. Called on shutdown."""
+        elapsed = time.time() - self._start_time if self._start_time else 0
+        minutes = elapsed / 60
+        total_trades = len(self._trades)
+        trading_pnl = sum(t.profit_usd for t in self._trades)
+        transfer_fees = self._balance.total_transfer_fees if self._balance else 0.0
+
+        lines: list[str] = []
+        lines.append(f"\n=== REPORT ({minutes:.1f}min, {self._tick_count} ticks) ===")
+        lines.append(
+            f"  {len(self._symbols)} symbols, {len(self._fetchers)} exchanges, "
+            f"{total_trades} trades ({total_trades / minutes:.1f}/min)"
+            if minutes > 0 else
+            f"  {len(self._symbols)} symbols, {len(self._fetchers)} exchanges, {total_trades} trades"
+        )
+        lines.append(
+            f"  P&L: ${trading_pnl:+.4f} trading, "
+            f"${-transfer_fees:+.4f} fees, "
+            f"${trading_pnl - transfer_fees:+.4f} net"
+        )
+        if self._low_profit_skips > 0:
+            lines.append(f"  Low-profit skips: {self._low_profit_skips}")
+
+        self._section_symbol_ranking_net(lines)
+        self._section_exchange_pair_ranking(lines)
+        self._section_top_trades(lines)
+        if self._balance:
+            self._section_balance_overview(lines)
+        if self._balance:
+            self._section_transfer_log(lines)
+
+        self._output("\n".join(lines))
+
+    # Removed sections: exchange spreads, data freshness, trade projections
+    # (redundant with net rankings and XLSX export)
+
+    def _section_symbol_ranking_net(self, lines: list[str]) -> None:
+        """Symbol ranking sorted by net profit (fees included)."""
+        lines.append(f"\n--- Symbols (net profit) ---")
+
+        # Aggregate per symbol from trades
+        sym_data: dict[str, list[SimulatedTrade]] = defaultdict(list)
+        for t in self._trades:
+            sym_data[t.symbol].append(t)
+
+        if not sym_data:
+            lines.append("  (no profitable trades detected)")
+            return
+
+        # Sort by total net_pct sum (= total profit potential)
+        ranked = sorted(
+            sym_data.items(),
+            key=lambda x: sum(t.net_pct for t in x[1]),
+            reverse=True,
+        )
+
+        for rank, (sym, trades) in enumerate(ranked, 1):
+            n = len(trades)
+            total_net = sum(t.net_pct for t in trades)
+            avg_net = total_net / n
+            best_net = max(t.net_pct for t in trades)
+            p100 = total_net / 100 * self._trade_amount
+            lines.append(
+                f"  {rank}. {sym:<10} {n} trades, avg {avg_net:+.4f}%, "
+                f"best {best_net:+.4f}%, P&L ${p100:+.4f}"
+            )
+
+        # Show symbols with 0 trades
+        zero = [s for s in self._symbols if s not in sym_data]
+        if zero:
+            lines.append(f"  No trades: {', '.join(zero[:15])}")
+
+    def _section_exchange_pair_ranking(self, lines: list[str]) -> None:
+        """Rank buy@X -> sell@Y exchange pair combinations."""
+        lines.append(f"\n--- Exchange pairs ---")
+
+        # Aggregate from trades
+        pair_data: dict[tuple[str, str], list[float]] = defaultdict(list)
+        for t in self._trades:
+            pair_data[(t.buy_exchange, t.sell_exchange)].append(t.net_pct)
+
+        if not pair_data:
+            lines.append("  (no profitable trades detected)")
+            return
+
+        ranked = sorted(
+            pair_data.items(),
+            key=lambda x: sum(x[1]),
+            reverse=True,
+        )
+
+        for rank, ((buy_ex, sell_ex), nets) in enumerate(ranked, 1):
+            n = len(nets)
+            total_net = sum(nets)
+            avg_net = total_net / n
+            p = total_net / 100 * self._trade_amount
+            lines.append(
+                f"  {rank}. {buy_ex}>{sell_ex} {n} trades, avg {avg_net:+.4f}%, P&L ${p:+.4f}"
+            )
+
+    def _section_top_trades(self, lines: list[str]) -> None:
+        """Top 10 most profitable individual trades."""
+        if not self._trades:
+            return
+
+        lines.append(f"\n--- Top 10 trades ---")
+        top = sorted(self._trades, key=lambda t: t.net_pct, reverse=True)[:10]
+        for t in top:
+            trade_dt = datetime.fromtimestamp(t.timestamp, tz=LOCAL_TZ)
+            p = t.net_pct / 100 * t.trade_amount
+            lines.append(
+                f"  {trade_dt.strftime('%H:%M:%S')} {t.symbol:<10} "
+                f"{t.buy_exchange}>{t.sell_exchange} "
+                f"net {t.net_pct:+.4f}% ${p:+.4f}"
+            )
+
+    def _section_balance_overview(self, lines: list[str]) -> None:
+        """Show final balance state across all exchanges."""
+        if not self._balance:
+            return
+
+        prices = self._get_current_prices()
+        lines.append(f"\n--- Balances ---")
+
+        grand_total = 0.0
+        for ex in self._balance._exchanges:
+            usdt = self._balance.usdt[ex]
+            ex_total = usdt
+            crypto_parts = []
+            for sym in self._balance._symbols:
+                qty = self._balance.crypto[ex].get(sym, 0.0)
+                val = qty * prices.get(sym, 0.0)
+                ex_total += val
+                if val >= 0.01:
+                    crypto_parts.append(f"{sym.replace('USDT', '')} ${val:.2f}")
+            grand_total += ex_total
+            crypto_str = f" + {', '.join(crypto_parts)}" if crypto_parts else ""
+            lines.append(f"  {ex:<8} ${usdt:.2f} USDT{crypto_str} = ${ex_total:.2f}")
+
+        initial = self._balance._initial_investment
+        trading_pnl = sum(t.profit_usd for t in self._trades)
+        transfer_fees = self._balance.total_transfer_fees
+        lines.append(
+            f"  Total: ${grand_total:.2f} (init ${initial:.0f}, "
+            f"trade ${trading_pnl:+.4f}, fees ${-transfer_fees:+.4f}, "
+            f"net ${grand_total - initial:+.4f})"
+        )
+        if self._balance.skipped_trades > 0:
+            lines.append(f"  Skipped: {self._balance.skipped_trades} (insufficient balance)")
+
+    def _section_transfer_log(self, lines: list[str]) -> None:
+        """Show transfer/rebalancing summary."""
+        if not self._balance:
+            return
+
+        lines.append(f"\n--- Transfers ---")
+
+        transfers = self._balance.transfers
+        if not transfers:
+            lines.append("  None")
+            return
+
+        # Aggregate by type
+        by_type: dict[str, list] = defaultdict(list)
+        for t in transfers:
+            by_type[t.transfer_type].append(t)
+
+        type_labels = {
+            "internal_sell": "Int sell",
+            "internal_buy": "Int buy",
+            "external_usdt": "Ext USDT",
+            "external_crypto": "Ext crypto",
+        }
+        for ttype, label in type_labels.items():
+            group = by_type.get(ttype, [])
+            if group:
+                total_fee = sum(t.fee_usd for t in group)
+                lines.append(f"  {label}: {len(group)}, fees ${total_fee:.4f}")
+        lines.append(
+            f"  Total: {len(transfers)} transfers, ${self._balance.total_transfer_fees:.4f} fees"
+        )
