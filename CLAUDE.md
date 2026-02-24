@@ -364,8 +364,8 @@ Full authentication system for the WebSocket dashboard:
 - **IP whitelist**: Optional, configurable from Settings page
 - **reCAPTCHA v2**: "I'm not a robot" checkbox appears after 3 failed attempts (requires Google reCAPTCHA v2 keys in `.env`)
 - **Email notifications**: Gmail SMTP alerts on successful login and IP block (requires Gmail App Password in `.env`)
-- **Auth log**: All auth events stored in memory (500 max), viewable in Auth Log tab
-- **Dedicated auth logger**: Writes to `logs/auth/auth_YYYY-MM-DD.log`
+- **Auth log**: All auth events persisted to `logs/auth/auth_events.jsonl`, loaded on startup (500 max), viewable in Auth Log tab. Logs username, password, IP, browser, OS for each login attempt.
+- **Dedicated auth logger**: Human-readable log at `logs/auth/auth.log`
 
 ### XLSX Export
 
