@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import type { DashboardState } from '../types';
 
-const WS_URL = 'ws://localhost:8765';
+const WS_URL =
+  window.location.hostname === 'localhost'
+    ? 'ws://localhost:8765'
+    : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 const RECONNECT_DELAY = 2000;
 
 export function useWebSocket() {
