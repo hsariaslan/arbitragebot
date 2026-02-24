@@ -359,14 +359,18 @@ React/TypeScript SPA served by the Python backend via WebSocket.
 
 Full authentication system for the WebSocket dashboard:
 
-- **Login**: Username/password from `.env` (`DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`)
-- **Sessions**: Token-based with remember-me support (localStorage/sessionStorage)
-- **Rate limiting**: 10 attempts per IP, 1-hour block after exhaustion
-- **IP whitelist**: Optional, configurable from Settings page
-- **reCAPTCHA v2**: "I'm not a robot" checkbox appears after 3 failed attempts (requires Google reCAPTCHA v2 keys in `.env`)
-- **Email notifications**: Gmail SMTP alerts on successful login and IP block (requires Gmail App Password in `.env`)
-- **Auth log**: All auth events persisted to `logs/auth/auth_events.jsonl`, loaded on startup (500 max), viewable in Auth Log tab. Logs username, password, IP, browser, OS for each login attempt.
+- **Login**: Username + bcrypt-hashed password. Set `DASHBOARD_PASSWORD_HASH` in `.env` (preferred) or legacy `DASHBOARD_PASSWORD` (auto-hashed at runtime with deprecation warning). Default password `changeme` is rejected at startup.
+- **Sessions**: Token-based with remember-me support. Remember-me → localStorage (30-day absolute expiry). Non-remember → sessionStorage (24h idle / 48h absolute expiry). All sessions have `created_at` for absolute lifetime enforcement.
+- **Rate limiting**: 10 attempts per IP, 1-hour block after exhaustion. State persisted to `logs/auth/rate_limits.json` (survives restarts). CAPTCHA failures also count toward rate limit.
+- **IP whitelist**: Optional, configurable from Settings page. Validated with `ipaddress` module.
+- **reCAPTCHA v2**: "I'm not a robot" checkbox appears after 3 failed attempts (requires Google reCAPTCHA v2 keys in `.env`). Warning logged at startup if keys not configured.
+- **Email notifications**: Gmail SMTP alerts on successful login and IP block (requires Gmail App Password in `.env`). All user-controlled values HTML-escaped.
+- **Auth log**: All auth events persisted to `logs/auth/auth_events.jsonl` (5MB rotation, 2 backup files), loaded on startup (500 max), viewable in Auth Log tab. Passwords masked (first 2 chars + asterisks). Legacy plaintext passwords stripped on load.
 - **Dedicated auth logger**: Human-readable log at `logs/auth/auth.log`
+- **X-Forwarded-For**: Only trusted from IPs in `TRUSTED_PROXIES` (default: `127.0.0.1,::1`). Prevents IP spoofing to bypass rate limits/whitelist.
+- **Origin validation**: When `ALLOWED_ORIGINS` is set, WebSocket connections from unknown origins are rejected (CSRF protection).
+- **Settings validation**: All settings validated against schema (type, min/max ranges). Unknown keys rejected. IP whitelist entries validated. 5s cooldown between settings saves.
+- **Bind host**: Default `127.0.0.1` (behind nginx). Override with `DASHBOARD_BIND_HOST=0.0.0.0` for direct access.
 
 ### XLSX Export
 

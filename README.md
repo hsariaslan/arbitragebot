@@ -1,6 +1,6 @@
 # CoirnaBot
 
-**v0.1.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard.
+**v0.2.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard.
 
 Monitors real-time prices across multiple crypto exchanges via WebSocket, detects price discrepancies, and simulates simultaneous buy/sell orders to profit from the spread.
 
@@ -25,7 +25,7 @@ Monitors real-time prices across multiple crypto exchanges via WebSocket, detect
 ```bash
 git clone <repo-url> coirnabot
 cd coirnabot
-pip install websockets
+pip install -r requirements.txt
 ```
 
 ### 2. Configure environment
@@ -37,9 +37,9 @@ cp .env.example .env
 Edit `.env` with your credentials:
 
 ```env
-# Required
+# Required — generate hash: python -c "import bcrypt; print(bcrypt.hashpw(b'YOUR_PASSWORD', bcrypt.gensalt()).decode())"
 DASHBOARD_USERNAME=admin
-DASHBOARD_PASSWORD=your-secure-password
+DASHBOARD_PASSWORD_HASH=$2b$12$YOUR_BCRYPT_HASH_HERE
 
 # Optional: Email notifications (Gmail SMTP)
 SMTP_EMAIL=your-email@gmail.com
@@ -49,6 +49,11 @@ NOTIFICATION_EMAIL=your-email@gmail.com
 # Optional: reCAPTCHA v2 (appears after 3 failed login attempts)
 RECAPTCHA_SITE_KEY=your-recaptcha-site-key
 RECAPTCHA_SECRET_KEY=your-recaptcha-secret-key
+
+# Optional: Security hardening
+TRUSTED_PROXIES=127.0.0.1,::1
+ALLOWED_ORIGINS=https://your-domain.com
+DASHBOARD_BIND_HOST=127.0.0.1
 ```
 
 **Gmail App Password**: Google Account > Security > 2-Step Verification > App Passwords
