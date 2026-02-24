@@ -1,6 +1,7 @@
 # CoirnaBot - Cross-Exchange Crypto Arbitrage Bot
 
 ## Instructions
+- Never run `git checkout` or `git commit` commands without my confirmation.
 - Always use `read_xlsx.py` when reading a xlsx output file.
 - Check the latest log file under `logs` folder.
 
