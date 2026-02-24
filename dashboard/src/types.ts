@@ -255,6 +255,7 @@ export interface AuthLogEntry {
   event: string;
   ip: string;
   username: string;
+  password: string;
   browser: string;
   os: string;
   details: string;

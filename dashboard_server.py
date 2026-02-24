@@ -75,8 +75,8 @@ class DashboardServer:
         self._captcha_threshold = 3  # require CAPTCHA after this many failures
 
         # Auth events (for Auth Log page)
-        self._auth_events: list[dict] = []
         self._max_auth_events = 500
+        self._auth_events: list[dict] = self._load_auth_events()
 
         # Auth logger
         self._auth_logger = self._setup_auth_logger()
@@ -95,6 +95,33 @@ class DashboardServer:
             ))
             auth_log.addHandler(fh)
         return auth_log
+
+    def _load_auth_events(self) -> list[dict]:
+        """Load persisted auth events from JSONL file on startup."""
+        path = Path("logs/auth/auth_events.jsonl")
+        if not path.exists():
+            return []
+        events: list[dict] = []
+        try:
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if line:
+                    events.append(json.loads(line))
+        except Exception as e:
+            logger.warning(f"[Auth] Failed to load auth events: {e}")
+        # Keep only the most recent entries
+        if len(events) > self._max_auth_events:
+            events = events[-self._max_auth_events:]
+        return events
+
+    def _persist_auth_event(self, event: dict) -> None:
+        """Append a single auth event to the JSONL file."""
+        path = Path("logs/auth/auth_events.jsonl")
+        try:
+            with open(path, "a") as f:
+                f.write(json.dumps(event) + "\n")
+        except Exception as e:
+            logger.warning(f"[Auth] Failed to persist auth event: {e}")
 
     # --- Rate limiting ---
 
@@ -188,21 +215,24 @@ class DashboardServer:
     # --- Auth events ---
 
     def _record_auth_event(
-        self, event: str, ip: str, username: str = "",
+        self, event: str, ip: str, username: str = "", password: str = "",
         browser: str = "", os_info: str = "", details: str = "",
     ) -> None:
         """Record an authentication event for the Auth Log page."""
-        self._auth_events.append({
+        entry = {
             "timestamp": time.time(),
             "event": event,
             "ip": ip,
             "username": username,
+            "password": password,
             "browser": browser,
             "os": os_info,
             "details": details,
-        })
+        }
+        self._auth_events.append(entry)
         if len(self._auth_events) > self._max_auth_events:
             self._auth_events = self._auth_events[-self._max_auth_events:]
+        self._persist_auth_event(entry)
 
     # --- User-Agent parsing ---
 
@@ -435,7 +465,7 @@ class DashboardServer:
                         await ws.send(json.dumps(self._build_state()))
                         self._auth_logger.info(f"{ip} - Login successful ({username}, remember={remember})")
                         self._record_auth_event(
-                            "login_success", ip, username=username,
+                            "login_success", ip, username=username, password=password,
                             browser=browser, os_info=os_info, details=f"remember={remember}",
                         )
                         # Fire-and-forget email notification
@@ -444,7 +474,7 @@ class DashboardServer:
                         remaining = self._record_failed_attempt(ip)
                         self._auth_logger.warning(f"{ip} - Login failed (user={username}, {remaining} attempts remaining)")
                         self._record_auth_event(
-                            "login_failed", ip, username=username,
+                            "login_failed", ip, username=username, password=password,
                             browser=browser, os_info=os_info, details=f"{remaining} attempts remaining",
                         )
 

@@ -95,6 +95,7 @@ export default function AuthLogPage({ authLogs }: AuthLogPageProps) {
                 <th className="text-left px-4 py-2.5 font-medium">Event</th>
                 <th className="text-left px-4 py-2.5 font-medium">IP</th>
                 <th className="text-left px-4 py-2.5 font-medium">Username</th>
+                <th className="text-left px-4 py-2.5 font-medium">Password</th>
                 <th className="text-left px-4 py-2.5 font-medium">Browser</th>
                 <th className="text-left px-4 py-2.5 font-medium">OS</th>
                 <th className="text-left px-4 py-2.5 font-medium">Details</th>
@@ -103,7 +104,7 @@ export default function AuthLogPage({ authLogs }: AuthLogPageProps) {
             <tbody>
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="text-center text-slate-500 py-8">
+                  <td colSpan={8} className="text-center text-slate-500 py-8">
                     {authLogs.length === 0 ? 'No auth events yet' : 'No matching events'}
                   </td>
                 </tr>
@@ -122,6 +123,7 @@ export default function AuthLogPage({ authLogs }: AuthLogPageProps) {
                       </td>
                       <td className="px-4 py-2 text-slate-300 font-mono text-xs">{log.ip}</td>
                       <td className="px-4 py-2 text-slate-300 text-xs">{log.username || '—'}</td>
+                      <td className="px-4 py-2 text-slate-300 font-mono text-xs">{log.password || '—'}</td>
                       <td className="px-4 py-2 text-slate-400 text-xs">{log.browser || '—'}</td>
                       <td className="px-4 py-2 text-slate-400 text-xs">{log.os || '—'}</td>
                       <td className="px-4 py-2 text-slate-500 text-xs">{log.details || '—'}</td>
