@@ -75,16 +75,26 @@ export function useWebSocket() {
           blockedRef.current = false;
           setRetryAfter(0);
           setCaptchaRequired(false);
-          // Store token based on how the login was initiated
-          // If reconnecting with existing token, keep where it was
+          // Store token: respect remember-me preference
           if (data.token) {
             const wasInLocal = localStorage.getItem(TOKEN_KEY);
-            if (wasInLocal) {
-              localStorage.setItem(TOKEN_KEY, data.token);
+            const wasInSession = sessionStorage.getItem(TOKEN_KEY);
+            const rememberPref = localStorage.getItem(TOKEN_KEY + '_remember');
+
+            if (wasInLocal || wasInSession) {
+              // Reconnecting: keep in same storage type
+              if (wasInLocal) {
+                localStorage.setItem(TOKEN_KEY, data.token);
+              } else {
+                sessionStorage.setItem(TOKEN_KEY, data.token);
+              }
             } else {
-              // New login: check pending remember preference
-              // Default to localStorage if no pending (token reconnect)
-              localStorage.setItem(TOKEN_KEY, data.token);
+              // Fresh login: use remember preference
+              if (rememberPref === '1') {
+                localStorage.setItem(TOKEN_KEY, data.token);
+              } else {
+                sessionStorage.setItem(TOKEN_KEY, data.token);
+              }
             }
           }
           return;
