@@ -84,6 +84,9 @@ export interface Settings {
   rebalance_cooldown?: number;
   rebalance_roi_horizon?: number;
   adaptive_mode?: boolean;
+  // Security
+  ip_whitelist_enabled?: boolean;
+  ip_whitelist?: string[];
   // Legacy fields (may be present in old settings)
   active_exchanges?: string[];
   active_symbols?: string[];
@@ -247,6 +250,16 @@ export interface ProfitStats {
   is_profitable: boolean;
 }
 
+export interface AuthLogEntry {
+  timestamp: number;
+  event: string;
+  ip: string;
+  username: string;
+  browser: string;
+  os: string;
+  details: string;
+}
+
 export interface DashboardState {
   timestamp: number;
   uptime_seconds: number;
@@ -267,4 +280,5 @@ export interface DashboardState {
   adaptive_config: AdaptiveConfig;
   all_config_history: ConfigSnapshot[];
   profit_stats: ProfitStats;
+  auth_logs?: AuthLogEntry[];
 }

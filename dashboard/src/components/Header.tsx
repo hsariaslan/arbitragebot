@@ -5,11 +5,12 @@ interface HeaderProps {
   uptimeSeconds: number;
   connectedExchanges: number;
   totalExchanges: number;
-  activeTab: 'dashboard' | 'ranking' | 'settings';
-  onTabChange: (tab: 'dashboard' | 'ranking' | 'settings') => void;
+  activeTab: 'dashboard' | 'ranking' | 'settings' | 'auth_log';
+  onTabChange: (tab: 'dashboard' | 'ranking' | 'settings' | 'auth_log') => void;
   portfolio: Portfolio | null;
   simulation: Simulation | null;
   profitStats: ProfitStats | null;
+  onLogout: () => void;
 }
 
 function formatUptime(seconds: number): string {
@@ -27,7 +28,7 @@ function PnlText({ value, prefix = '$' }: { value: number; prefix?: string }) {
   return <span className={`font-mono font-medium ${color}`}>{sign}{prefix}{value.toFixed(2)}</span>;
 }
 
-export default function Header({ connected, uptimeSeconds, connectedExchanges, totalExchanges, activeTab, onTabChange, portfolio, simulation, profitStats }: HeaderProps) {
+export default function Header({ connected, uptimeSeconds, connectedExchanges, totalExchanges, activeTab, onTabChange, portfolio, simulation, profitStats, onLogout }: HeaderProps) {
   return (
     <header className="bg-slate-900 border-b border-slate-700">
       {/* Top row: title, tabs, connection */}
@@ -65,6 +66,16 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
             >
               Settings
             </button>
+            <button
+              onClick={() => onTabChange('auth_log')}
+              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                activeTab === 'auth_log'
+                  ? 'bg-slate-700 text-white'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              Auth Log
+            </button>
           </nav>
         </div>
         <div className="flex items-center gap-6 text-sm">
@@ -80,6 +91,13 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
               {connected ? 'Connected' : 'Disconnected'}
             </span>
           </div>
+          <button
+            onClick={onLogout}
+            className="text-slate-500 hover:text-slate-300 text-sm transition-colors"
+            title="Logout"
+          >
+            Logout
+          </button>
         </div>
       </div>
 

@@ -5,9 +5,10 @@ interface SettingsPageProps {
   currentSettings: Settings;
   onSave: (settings: Settings) => void;
   onApply: (settings: Settings) => void;
+  onSendMessage: (msg: object) => void;
 }
 
-export default function SettingsPage({ currentSettings, onSave, onApply }: SettingsPageProps) {
+export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage }: SettingsPageProps) {
   const [tradeAmount, setTradeAmount] = useState(currentSettings.trade_amount_usd);
   const [totalCapital, setTotalCapital] = useState(currentSettings.total_capital ?? 1800);
   const [showConfirm, setShowConfirm] = useState(false);
@@ -28,6 +29,9 @@ export default function SettingsPage({ currentSettings, onSave, onApply }: Setti
   const [rebalanceCooldown, setRebalanceCooldown] = useState(currentSettings.rebalance_cooldown ?? 30);
   const [rebalanceRoiHorizon, setRebalanceRoiHorizon] = useState(currentSettings.rebalance_roi_horizon ?? 1800);
   const [adaptiveMode, setAdaptiveMode] = useState(currentSettings.adaptive_mode ?? true);
+  const [ipWhitelistEnabled, setIpWhitelistEnabled] = useState(currentSettings.ip_whitelist_enabled ?? false);
+  const [ipWhitelist, setIpWhitelist] = useState((currentSettings.ip_whitelist ?? []).join(', '));
+  const [securityStatus, setSecurityStatus] = useState<string | null>(null);
 
   // Sync from server when not dirty
   const settingsKey = JSON.stringify(currentSettings);
@@ -50,6 +54,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply }: Setti
       setRebalanceCooldown(currentSettings.rebalance_cooldown ?? 30);
       setRebalanceRoiHorizon(currentSettings.rebalance_roi_horizon ?? 1800);
       setAdaptiveMode(currentSettings.adaptive_mode ?? true);
+      setIpWhitelistEnabled(currentSettings.ip_whitelist_enabled ?? false);
+      setIpWhitelist((currentSettings.ip_whitelist ?? []).join(', '));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsKey]);
@@ -232,6 +238,48 @@ export default function SettingsPage({ currentSettings, onSave, onApply }: Setti
             <input type="number" value={rebalanceRoiHorizon} min={0} onChange={d(setRebalanceRoiHorizon, 1800)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
             <p className="text-xs text-slate-500 mt-1">Max seconds to recoup rebalance cost</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Security */}
+      <div className="bg-slate-800/50 rounded-lg p-5">
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Security</h2>
+        <div className="space-y-4">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" checked={ipWhitelistEnabled}
+              onChange={e => setIpWhitelistEnabled(e.target.checked)}
+              className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
+            <span className="text-sm text-slate-300">Enable IP Whitelist</span>
+          </label>
+          <p className="text-xs text-slate-500 ml-7 -mt-2">
+            Only allow connections from specific IP addresses. Leave empty to allow all.
+          </p>
+          {ipWhitelistEnabled && (
+            <div>
+              <label className="block text-xs text-slate-500 mb-1">Allowed IPs (comma-separated)</label>
+              <input type="text" value={ipWhitelist}
+                onChange={e => setIpWhitelist(e.target.value)}
+                placeholder="e.g. 212.253.218.204, 10.0.0.1"
+                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500 placeholder-slate-500" />
+            </div>
+          )}
+          <div className="flex items-center gap-3">
+            <button onClick={() => {
+              const ips = ipWhitelist.split(',').map(s => s.trim()).filter(Boolean);
+              onSendMessage({
+                type: 'save_security_settings',
+                settings: { ip_whitelist_enabled: ipWhitelistEnabled, ip_whitelist: ips },
+              });
+              setSecurityStatus('Saved!');
+              setTimeout(() => setSecurityStatus(null), 2000);
+            }}
+              className="px-4 py-2 bg-slate-600 hover:bg-slate-500 text-white rounded-lg text-sm font-medium transition-colors">
+              Save Security
+            </button>
+            {securityStatus && (
+              <span className="text-emerald-400 text-sm font-medium">{securityStatus}</span>
+            )}
           </div>
         </div>
       </div>

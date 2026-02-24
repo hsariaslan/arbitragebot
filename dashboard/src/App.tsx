@@ -11,18 +11,54 @@ import SymbolRankings from './components/SymbolRankings';
 import RotationLog from './components/RotationLog';
 import RankingPage from './components/RankingPage';
 import SettingsPage from './components/SettingsPage';
+import LoginPage from './components/LoginPage';
+import AuthLogPage from './components/AuthLogPage';
 
 export default function App() {
-  const { state, connected, send } = useWebSocket();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'ranking' | 'settings'>('dashboard');
+  const {
+    state, connected, authenticated, authError,
+    attemptsRemaining, blocked, retryAfter, authLoading,
+    captchaRequired, captchaSiteKey,
+    login, logout, send,
+  } = useWebSocket();
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'ranking' | 'settings' | 'auth_log'>('dashboard');
 
-  if (!state) {
+  // Not connected
+  if (!connected && !blocked) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
           <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           <p className="text-slate-400 text-lg">Connecting to CoirnaBot...</p>
           <p className="text-slate-500 text-sm mt-2">Make sure <code className="text-slate-400">python run.py</code> is running</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Not authenticated
+  if (!authenticated) {
+    return (
+      <LoginPage
+        onLogin={login}
+        error={authError}
+        attemptsRemaining={attemptsRemaining}
+        blocked={blocked}
+        retryAfter={retryAfter}
+        loading={authLoading}
+        captchaRequired={captchaRequired}
+        captchaSiteKey={captchaSiteKey}
+      />
+    );
+  }
+
+  // Waiting for first state
+  if (!state) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-slate-400 text-lg">Loading dashboard...</p>
         </div>
       </div>
     );
@@ -52,6 +88,7 @@ export default function App() {
         portfolio={state.portfolio}
         simulation={state.simulation}
         profitStats={state.profit_stats ?? null}
+        onLogout={logout}
       />
 
       <main className="flex-1 p-6 max-w-[1600px] mx-auto w-full">
@@ -111,12 +148,15 @@ export default function App() {
             allTransfers={state.all_transfers}
             allConfigHistory={state.all_config_history}
           />
-        ) : (
+        ) : activeTab === 'settings' ? (
           <SettingsPage
             currentSettings={state.settings}
             onSave={handleSaveSettings}
             onApply={handleApplySettings}
+            onSendMessage={send}
           />
+        ) : (
+          <AuthLogPage authLogs={state.auth_logs ?? []} />
         )}
       </main>
     </div>

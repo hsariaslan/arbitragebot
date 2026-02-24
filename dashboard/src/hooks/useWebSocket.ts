@@ -6,12 +6,33 @@ const WS_URL =
     ? 'ws://localhost:8765'
     : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 const RECONNECT_DELAY = 2000;
+const TOKEN_KEY = 'coirnabot_token';
+
+function getStoredToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);
+}
+
+function clearStoredToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
+}
 
 export function useWebSocket() {
   const [state, setState] = useState<DashboardState | null>(null);
   const [connected, setConnected] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [attemptsRemaining, setAttemptsRemaining] = useState<number | null>(null);
+  const [blocked, setBlocked] = useState(false);
+  const [retryAfter, setRetryAfter] = useState(0);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [captchaRequired, setCaptchaRequired] = useState(false);
+  const [captchaSiteKey, setCaptchaSiteKey] = useState<string | null>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout>>();
+  const blockedRef = useRef(false);
+  const pendingCredentials = useRef<{ username: string; password: string; remember: boolean; captchaToken?: string } | null>(null);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -25,7 +46,88 @@ export function useWebSocket() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        // Only update state for broadcast messages (not responses to commands)
+
+        if (data.type === 'auth_required') {
+          if (data.captcha_required) {
+            setCaptchaRequired(true);
+            if (data.captcha_site_key) setCaptchaSiteKey(data.captcha_site_key);
+          }
+          const savedToken = getStoredToken();
+          if (savedToken) {
+            setAuthLoading(true);
+            ws.send(JSON.stringify({ type: 'auth', token: savedToken }));
+          } else if (pendingCredentials.current) {
+            const { username, password, remember, captchaToken } = pendingCredentials.current;
+            pendingCredentials.current = null;
+            setAuthLoading(true);
+            ws.send(JSON.stringify({ type: 'auth', username, password, remember, captcha_token: captchaToken }));
+          }
+          return;
+        }
+
+        if (data.type === 'auth_ok') {
+          setAuthenticated(true);
+          setAuthError(null);
+          setAttemptsRemaining(null);
+          setAuthLoading(false);
+          setBlocked(false);
+          blockedRef.current = false;
+          setRetryAfter(0);
+          setCaptchaRequired(false);
+          // Store token based on how the login was initiated
+          // If reconnecting with existing token, keep where it was
+          if (data.token) {
+            const wasInLocal = localStorage.getItem(TOKEN_KEY);
+            if (wasInLocal) {
+              localStorage.setItem(TOKEN_KEY, data.token);
+            } else {
+              // New login: check pending remember preference
+              // Default to localStorage if no pending (token reconnect)
+              localStorage.setItem(TOKEN_KEY, data.token);
+            }
+          }
+          return;
+        }
+
+        if (data.type === 'auth_failed') {
+          setAuthenticated(false);
+          setAuthError(data.reason);
+          setAttemptsRemaining(data.attempts_remaining ?? null);
+          setAuthLoading(false);
+          clearStoredToken();
+          if (data.captcha_required) {
+            setCaptchaRequired(true);
+            if (data.captcha_site_key) setCaptchaSiteKey(data.captcha_site_key);
+          }
+          return;
+        }
+
+        if (data.type === 'auth_blocked') {
+          setAuthenticated(false);
+          setBlocked(true);
+          blockedRef.current = true;
+          setRetryAfter(data.retry_after ?? 3600);
+          setAuthError(data.reason);
+          setAuthLoading(false);
+          clearStoredToken();
+          return;
+        }
+
+        if (data.type === 'auth_denied') {
+          setAuthenticated(false);
+          setAuthError(data.reason || 'IP not allowed');
+          setAuthLoading(false);
+          return;
+        }
+
+        if (data.type === 'logged_out') {
+          setAuthenticated(false);
+          setState(null);
+          clearStoredToken();
+          return;
+        }
+
+        // Normal state broadcast
         if (data.timestamp && data.portfolio) {
           setState(data as DashboardState);
         }
@@ -37,7 +139,14 @@ export function useWebSocket() {
     ws.onclose = () => {
       setConnected(false);
       wsRef.current = null;
-      reconnectRef.current = setTimeout(connect, RECONNECT_DELAY);
+      // Keep authenticated if we have a token (avoid login flash on reconnect)
+      if (!getStoredToken()) {
+        setAuthenticated(false);
+      }
+      setAuthLoading(false);
+      if (!blockedRef.current) {
+        reconnectRef.current = setTimeout(connect, RECONNECT_DELAY);
+      }
     };
 
     ws.onerror = () => {
@@ -45,6 +154,34 @@ export function useWebSocket() {
     };
 
     wsRef.current = ws;
+  }, []);
+
+  const login = useCallback((username: string, password: string, remember: boolean, captchaToken?: string) => {
+    // Store remember preference for token storage on auth_ok
+    if (remember) {
+      localStorage.setItem(TOKEN_KEY + '_remember', '1');
+    } else {
+      localStorage.removeItem(TOKEN_KEY + '_remember');
+    }
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setAuthLoading(true);
+      setAuthError(null);
+      wsRef.current.send(JSON.stringify({ type: 'auth', username, password, remember, captcha_token: captchaToken }));
+    } else {
+      pendingCredentials.current = { username, password, remember, captchaToken };
+      connect();
+    }
+  }, [connect]);
+
+  const logout = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'logout' }));
+    }
+    clearStoredToken();
+    localStorage.removeItem(TOKEN_KEY + '_remember');
+    setAuthenticated(false);
+    setState(null);
   }, []);
 
   const send = useCallback((msg: object) => {
@@ -61,5 +198,10 @@ export function useWebSocket() {
     };
   }, [connect]);
 
-  return { state, connected, send };
+  return {
+    state, connected, authenticated, authError,
+    attemptsRemaining, blocked, retryAfter, authLoading,
+    captchaRequired, captchaSiteKey,
+    login, logout, send,
+  };
 }
