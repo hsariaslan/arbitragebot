@@ -13,8 +13,10 @@ Press Ctrl+C to stop gracefully.
 
 import asyncio
 import logging
+import logging.handlers
 import os
 import signal
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -35,7 +37,7 @@ load_env()
 
 from balance import BalanceTracker
 from config import ACTIVE_SYMBOLS, MIN_WARMUP_TICKS, SYMBOLS
-from dashboard_server import DashboardServer
+from dashboard_server import DashboardLogHandler, DashboardServer
 from fetchers.binance import BinanceFetcher
 from fetchers.bitget import BitgetFetcher
 from fetchers.bybit import BybitFetcher
@@ -46,29 +48,38 @@ from optimizer import SymbolOptimizer
 from settings import load_settings
 
 
-def setup_logging() -> Path:
-    """Configure logging to console and timestamped log file under logs/."""
+def setup_logging() -> tuple[Path, DashboardLogHandler]:
+    """Configure logging to console, daily-rotating file (UTC), and dashboard handler."""
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_file = logs_dir / f"coirnabot_{ts}.log"
+    log_file = logs_dir / "coirnabot.log"
 
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    fmt.converter = time.gmtime  # UTC timestamps
+
     console = logging.StreamHandler()
     console.setFormatter(fmt)
-    file_h = logging.FileHandler(log_file)
+
+    # Daily rotation at 00:00 UTC, keep 30 days
+    file_h = logging.handlers.TimedRotatingFileHandler(
+        log_file, when="midnight", utc=True, backupCount=30,
+    )
+    file_h.suffix = "%Y-%m-%d"
     file_h.setFormatter(fmt)
+
+    dashboard_h = DashboardLogHandler(maxlen=500)
 
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     root.addHandler(console)
     root.addHandler(file_h)
-    return log_file
+    root.addHandler(dashboard_h)
+    return log_file, dashboard_h
 
 
 async def main() -> None:
     """Run all exchange fetchers and arbitrage monitor concurrently."""
-    log_file = setup_logging()
+    log_file, log_handler = setup_logging()
     logger = logging.getLogger(__name__)
 
     # Load settings from settings.json (or create defaults)
@@ -149,7 +160,7 @@ async def main() -> None:
     )
     monitor.set_optimizer(optimizer)
     monitor.record_config_snapshot("initial")
-    dashboard = DashboardServer(monitor, balance, fetchers, settings, optimizer=optimizer)
+    dashboard = DashboardServer(monitor, balance, fetchers, settings, optimizer=optimizer, log_handler=log_handler)
 
     loop = asyncio.get_running_loop()
 

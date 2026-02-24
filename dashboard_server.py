@@ -15,6 +15,7 @@ import secrets
 import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,44 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class DashboardLogHandler(logging.Handler):
+    """Captures recent log entries in memory for dashboard broadcast and export."""
+
+    _COMPONENT_RE = re.compile(r"^\[(\w+)\]\s*(.*)$", re.DOTALL)
+
+    def __init__(self, maxlen: int = 500):
+        super().__init__()
+        self._entries: deque[dict] = deque(maxlen=maxlen)
+        self._all_entries: list[dict] = []  # full session for export
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()
+            component = ""
+            m = self._COMPONENT_RE.match(msg)
+            if m:
+                component = m.group(1)
+                msg = m.group(2)
+            entry = {
+                "timestamp": record.created,
+                "level": record.levelname,
+                "component": component,
+                "message": msg,
+            }
+            self._entries.append(entry)
+            self._all_entries.append(entry)
+        except Exception:
+            pass
+
+    def get_recent(self) -> list[dict]:
+        """Return last N entries for live broadcast."""
+        return list(self._entries)
+
+    def get_entries_range(self, start: float, end: float) -> list[dict]:
+        """Return all session entries within a time range (for export)."""
+        return [e for e in self._all_entries if start <= e["timestamp"] <= end]
+
+
 class DashboardServer:
     """WebSocket server that broadcasts live state to dashboard clients."""
 
@@ -55,12 +94,14 @@ class DashboardServer:
         fetchers: list["BaseFetcher"],
         settings: dict | None = None,
         optimizer: "SymbolOptimizer | None" = None,
+        log_handler: DashboardLogHandler | None = None,
     ) -> None:
         self._monitor = monitor
         self._balance = balance
         self._fetchers = fetchers
         self._settings = settings or {}
         self._optimizer = optimizer
+        self._log_handler = log_handler
         if optimizer:
             optimizer.set_dashboard(self)
         self._running = False
@@ -816,6 +857,99 @@ class DashboardServer:
             await ws.send(json.dumps({"type": "security_settings_saved", "ok": True}))
             logger.info("[Dashboard] Security settings saved")
 
+        elif msg_type == "export_bot_logs":
+            start_ts = msg.get("start", 0)
+            end_ts = msg.get("end", time.time())
+            entries = await asyncio.to_thread(self._read_bot_logs_from_disk, start_ts, end_ts)
+            await ws.send(json.dumps({"type": "export_bot_logs_result", "logs": entries}))
+
+        elif msg_type == "export_auth_logs":
+            start_ts = msg.get("start", 0)
+            end_ts = msg.get("end", time.time())
+            entries = await asyncio.to_thread(self._read_auth_logs_from_disk, start_ts, end_ts)
+            await ws.send(json.dumps({"type": "export_auth_logs_result", "logs": entries}))
+
+    # --- Log export from disk ---
+
+    _LOG_LINE_RE = re.compile(
+        r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] (.*)$"
+    )
+
+    def _read_bot_logs_from_disk(self, start_ts: float, end_ts: float) -> list[dict]:
+        """Read bot log entries from disk log files within time range."""
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        entries: list[dict] = []
+        log_dir = Path("logs")
+
+        # Collect rotated files (oldest first) + current log file
+        rotated = sorted(log_dir.glob("coirnabot.log.*"))
+        main = log_dir / "coirnabot.log"
+        log_files = rotated + ([main] if main.exists() else [])
+
+        for log_file in log_files:
+            try:
+                with open(log_file) as f:
+                    for line in f:
+                        m = self._LOG_LINE_RE.match(line.rstrip())
+                        if not m:
+                            continue
+                        ts_str, level, msg = m.groups()
+                        ts = _dt.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(
+                            tzinfo=_tz.utc
+                        ).timestamp()
+                        if ts < start_ts:
+                            continue
+                        if ts > end_ts:
+                            break  # entries are chronological within a file
+                        component = ""
+                        cm = DashboardLogHandler._COMPONENT_RE.match(msg)
+                        if cm:
+                            component = cm.group(1)
+                            msg = cm.group(2)
+                        entries.append({
+                            "timestamp": ts,
+                            "level": level,
+                            "component": component,
+                            "message": msg,
+                        })
+            except Exception:
+                continue
+        return entries
+
+    def _read_auth_logs_from_disk(self, start_ts: float, end_ts: float) -> list[dict]:
+        """Read auth log entries from JSONL files within time range."""
+        entries: list[dict] = []
+        auth_dir = Path("logs/auth")
+
+        # Rotated files (oldest first) + main
+        jsonl_files: list[Path] = []
+        for i in range(self._AUTH_LOG_MAX_ROTATIONS, 0, -1):
+            rotated = auth_dir / f"auth_events.jsonl.{i}"
+            if rotated.exists():
+                jsonl_files.append(rotated)
+        main = auth_dir / "auth_events.jsonl"
+        if main.exists():
+            jsonl_files.append(main)
+
+        for jf in jsonl_files:
+            try:
+                for line in jf.read_text().splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    event = json.loads(line)
+                    ts = event.get("timestamp", 0)
+                    if start_ts <= ts <= end_ts:
+                        pw = event.get("password", "")
+                        if pw and not pw.endswith("*"):
+                            event["password"] = DashboardServer._mask_password(pw)
+                        entries.append(event)
+            except Exception:
+                continue
+        return entries
+
     def _apply_settings(self, settings: dict) -> None:
         """Apply new settings: restart discovery with updated parameters."""
         trade_amount = settings.get("trade_amount_usd", self._monitor._trade_amount)
@@ -1094,6 +1228,7 @@ class DashboardServer:
             ],
             "profit_stats": self._monitor.get_net_profit_stats(),
             "auth_logs": self._auth_events,
+            "bot_logs": self._log_handler.get_recent() if self._log_handler else [],
         }
 
     def _build_adaptive_config(self) -> dict[str, Any]:
