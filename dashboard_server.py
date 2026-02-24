@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from fetchers.base import BaseFetcher
     from monitor import ArbitrageMonitor
     from optimizer import SymbolOptimizer
+    from state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ class DashboardServer:
         settings: dict | None = None,
         optimizer: "SymbolOptimizer | None" = None,
         log_handler: DashboardLogHandler | None = None,
+        state_manager: "StateManager | None" = None,
     ) -> None:
         self._monitor = monitor
         self._balance = balance
@@ -102,6 +104,7 @@ class DashboardServer:
         self._settings = settings or {}
         self._optimizer = optimizer
         self._log_handler = log_handler
+        self._state_manager = state_manager
         if optimizer:
             optimizer.set_dashboard(self)
         self._running = False
@@ -869,6 +872,21 @@ class DashboardServer:
             entries = await asyncio.to_thread(self._read_auth_logs_from_disk, start_ts, end_ts)
             await ws.send(json.dumps({"type": "export_auth_logs_result", "logs": entries}))
 
+        elif msg_type == "restart":
+            logger.info("[Dashboard] Fresh restart requested from dashboard")
+            if self._state_manager:
+                self._state_manager.clear()
+            await ws.send(json.dumps({"type": "restart_ack"}))
+            asyncio.get_event_loop().call_later(1.0, self._trigger_restart)
+
+    def _trigger_restart(self) -> None:
+        """Restart the bot process by replacing it with a fresh one."""
+        import os as _os
+        import sys as _sys
+
+        logger.info("[Dashboard] Restarting process via execv...")
+        _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
+
     # --- Log export from disk ---
 
     _LOG_LINE_RE = re.compile(
@@ -1054,8 +1072,8 @@ class DashboardServer:
         )
 
         # Portfolio
-        portfolio_value = self._balance.get_portfolio_value(prices) if self._balance.initialized else 0.0
         initial = self._balance._initial_investment
+        portfolio_value = self._balance.get_portfolio_value(prices) if self._balance.initialized else initial
         trading_pnl = sum(t.profit_usd for t in self._monitor._trades)
         transfer_fees = self._balance.total_transfer_fees
 

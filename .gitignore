@@ -9,6 +9,7 @@ logs/
 data/
 xlsx/
 screenshots/
+state/
 
 # Settings with potential secrets
 settings.json

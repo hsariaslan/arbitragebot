@@ -614,3 +614,46 @@ class BalanceTracker:
             f"Transfers: {transfer_count} (${self.total_transfer_fees:.2f} fees) | "
             f"Portfolio: ${portfolio:.0f}"
         ]
+
+    # ── State persistence ────────────────────────────────────────────────
+
+    def to_state_dict(self) -> dict:
+        """Serialize all mutable state to a JSON-serializable dict."""
+        from dataclasses import asdict
+
+        return {
+            "usdt": dict(self.usdt),
+            "crypto": {ex: dict(syms) for ex, syms in self.crypto.items()},
+            "_crypto_usd": {ex: dict(syms) for ex, syms in self._crypto_usd.items()},
+            "_initial_investment": self._initial_investment,
+            "_initialized": self._initialized,
+            "transfers": [asdict(t) for t in self.transfers],
+            "total_transfer_fees": self.total_transfer_fees,
+            "skipped_trades": self.skipped_trades,
+            "_last_rebalance": dict(self._last_rebalance),
+            "_estimated_profit_per_trade": self._estimated_profit_per_trade,
+        }
+
+    def from_state_dict(self, data: dict) -> None:
+        """Restore mutable state from a previously saved dict."""
+        self.usdt = data["usdt"]
+        self.crypto = data["crypto"]
+        self._crypto_usd = data["_crypto_usd"]
+        self._initial_investment = data["_initial_investment"]
+        self._initialized = data["_initialized"]
+        self.transfers = [
+            Transfer(
+                timestamp=t["timestamp"],
+                transfer_type=t["transfer_type"],
+                from_exchange=t["from_exchange"],
+                to_exchange=t["to_exchange"],
+                symbol=t["symbol"],
+                amount_usd=t["amount_usd"],
+                fee_usd=t["fee_usd"],
+            )
+            for t in data.get("transfers", [])
+        ]
+        self.total_transfer_fees = data.get("total_transfer_fees", 0.0)
+        self.skipped_trades = data.get("skipped_trades", 0)
+        self._last_rebalance = data.get("_last_rebalance", {})
+        self._estimated_profit_per_trade = data.get("_estimated_profit_per_trade", 0.02)

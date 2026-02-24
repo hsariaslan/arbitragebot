@@ -46,6 +46,7 @@ from fetchers.okx import OKXFetcher
 from monitor import ArbitrageMonitor
 from optimizer import SymbolOptimizer
 from settings import load_settings
+from state_manager import StateManager
 
 
 def setup_logging() -> tuple[Path, DashboardLogHandler]:
@@ -160,12 +161,36 @@ async def main() -> None:
     )
     monitor.set_optimizer(optimizer)
     monitor.record_config_snapshot("initial")
-    dashboard = DashboardServer(monitor, balance, fetchers, settings, optimizer=optimizer, log_handler=log_handler)
+
+    state_mgr = StateManager()
+    saved = state_mgr.load()
+    if saved:
+        balance.from_state_dict(saved["balance"])
+        monitor.from_state_dict(saved["monitor"])
+        optimizer.from_state_dict(saved["optimizer"])
+        # Sync symbols across components to match restored optimizer state
+        if optimizer._active_symbols:
+            monitor.update_symbols(optimizer._active_symbols)
+            balance.update_symbols(optimizer._active_symbols)
+        logger.info(
+            f"[State] Restored: {len(monitor._trades)} trades, "
+            f"{len(balance.transfers)} transfers, "
+            f"{len(optimizer._active_symbols)} active symbols"
+        )
+    else:
+        logger.info("[State] Starting fresh session")
+
+    dashboard = DashboardServer(
+        monitor, balance, fetchers, settings,
+        optimizer=optimizer, log_handler=log_handler, state_manager=state_mgr,
+    )
 
     loop = asyncio.get_running_loop()
 
     def shutdown_handler():
-        logger.info("Shutdown signal received, stopping all fetchers...")
+        logger.info("Shutdown signal received, saving state...")
+        state_mgr.save(balance, monitor, optimizer)
+        state_mgr.stop()
         for fetcher in fetchers:
             fetcher.stop()
         monitor.stop()
@@ -179,6 +204,7 @@ async def main() -> None:
     tasks.append(asyncio.create_task(monitor.run()))
     tasks.append(asyncio.create_task(optimizer.run()))
     tasks.append(asyncio.create_task(dashboard.run()))
+    tasks.append(asyncio.create_task(state_mgr.periodic_save(balance, monitor, optimizer)))
 
     try:
         await asyncio.gather(*tasks)

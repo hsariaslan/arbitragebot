@@ -324,7 +324,8 @@ class ArbitrageMonitor:
     async def run(self) -> None:
         """Main loop: periodically scan prices, simulate trades, print table."""
         self._running = True
-        self._start_time = time.time()
+        if not self._start_time:
+            self._start_time = time.time()
         exchange_names = [f.exchange_name for f in self._fetchers]
         logger.info(
             f"[Monitor] Starting simulation: {', '.join(exchange_names)} "
@@ -814,4 +815,58 @@ class ArbitrageMonitor:
                 lines.append(f"  {label}: {len(group)}, fees ${total_fee:.4f}")
         lines.append(
             f"  Total: {len(transfers)} transfers, ${self._balance.total_transfer_fees:.4f} fees"
+        )
+
+    # ── State persistence ────────────────────────────────────────────────
+
+    def to_state_dict(self) -> dict:
+        """Serialize all mutable session state."""
+        from dataclasses import asdict
+
+        return {
+            "trades": [asdict(t) for t in self._trades],
+            "config_history": [asdict(c) for c in self._config_history],
+            "_tick_count": self._tick_count,
+            "_start_time": self._start_time,
+            "_miss_streak": dict(self._miss_streak),
+            "_all_observations": self._all_observations[-100000:],
+            "_low_profit_skips": self._low_profit_skips,
+            "_stale_skips": dict(self._stale_skips),
+            "_fresh_samples": dict(self._fresh_samples),
+            "_depth_skips": self._depth_skips,
+            "_exchange_age_sum": dict(self._exchange_age_sum),
+            "_exchange_age_max": dict(self._exchange_age_max),
+            "_exchange_age_count": dict(self._exchange_age_count),
+            "_exchange_spread_sum": dict(self._exchange_spread_sum),
+            "_exchange_spread_max": dict(self._exchange_spread_max),
+            "_exchange_spread_count": dict(self._exchange_spread_count),
+        }
+
+    def from_state_dict(self, data: dict) -> None:
+        """Restore session state from a saved dict."""
+        self._trades = [SimulatedTrade(**t) for t in data.get("trades", [])]
+        self._config_history = [
+            ConfigSnapshot(**c) for c in data.get("config_history", [])
+        ]
+        self._tick_count = data.get("_tick_count", 0)
+        self._start_time = data.get("_start_time", 0.0)
+        self._miss_streak = data.get("_miss_streak", {})
+        self._all_observations = [
+            tuple(obs) for obs in data.get("_all_observations", [])
+        ]
+        self._low_profit_skips = data.get("_low_profit_skips", 0)
+        self._stale_skips = defaultdict(int, data.get("_stale_skips", {}))
+        self._fresh_samples = defaultdict(int, data.get("_fresh_samples", {}))
+        self._depth_skips = data.get("_depth_skips", 0)
+        self._exchange_age_sum = defaultdict(float, data.get("_exchange_age_sum", {}))
+        self._exchange_age_max = defaultdict(float, data.get("_exchange_age_max", {}))
+        self._exchange_age_count = defaultdict(int, data.get("_exchange_age_count", {}))
+        self._exchange_spread_sum = defaultdict(
+            float, data.get("_exchange_spread_sum", {})
+        )
+        self._exchange_spread_max = defaultdict(
+            float, data.get("_exchange_spread_max", {})
+        )
+        self._exchange_spread_count = defaultdict(
+            int, data.get("_exchange_spread_count", {})
         )

@@ -298,8 +298,10 @@ class SymbolOptimizer:
     async def run(self) -> None:
         """Score all symbols every second, evaluate rotation periodically."""
         self._running = True
-        self._discovery_start = time.time()
-        self._last_evaluation = time.time()
+        if not self._discovery_start:
+            self._discovery_start = time.time()
+        if not self._last_evaluation:
+            self._last_evaluation = time.time()
 
         if self._discovery_mode:
             self._monitor._paused = True
@@ -1896,3 +1898,94 @@ class SymbolOptimizer:
                 f"[Optimizer] Reset: top {self._min_active_symbols} symbols, "
                 f"window={self._scoring_window}s, auto_rotate={self._auto_rotate}"
             )
+
+    # ── State persistence ────────────────────────────────────────────────
+
+    def to_state_dict(self) -> dict:
+        """Serialize all mutable session state."""
+        from dataclasses import asdict
+
+        return {
+            "_active_symbols": list(self._active_symbols),
+            "_rotations": [asdict(r) for r in self._rotations],
+            "_historical_stats": {
+                sym: asdict(stats)
+                for sym, stats in self._historical_stats.items()
+                if stats.total_ticks > 0
+            },
+            "_historical_exchange_stats": {
+                ex: asdict(stats)
+                for ex, stats in self._historical_exchange_stats.items()
+            },
+            "_watchlist": {
+                sym: {
+                    "symbol": e.symbol,
+                    "entered_at": e.entered_at,
+                    "confirmation_start": e.confirmation_start,
+                    "score_samples": e.score_samples,
+                    "confirmed": e.confirmed,
+                }
+                for sym, e in self._watchlist.items()
+            },
+            "_demotion_tracking": dict(self._demotion_tracking),
+            "_recently_demoted": dict(self._recently_demoted),
+            "_dominant_pairs": dict(self._dominant_pairs),
+            "_last_reallocation": dict(self._last_reallocation),
+            "_tick_count": self._tick_count,
+            "_session_start": self._session_start,
+            "_discovery_mode": self._discovery_mode,
+            "_discovery_complete": self._discovery_complete,
+            "_discovery_start": self._discovery_start,
+            "_discovery_duration": self._discovery_duration,
+            "_exchange_profit_ticks": dict(self._exchange_profit_ticks),
+            "_exchange_profit_sum": dict(self._exchange_profit_sum),
+            "_exchange_buy_ticks": dict(self._exchange_buy_ticks),
+            "_exchange_sell_ticks": dict(self._exchange_sell_ticks),
+            "_prev_strong_set": list(self._prev_strong_set),
+            "_prev_very_strong_set": list(self._prev_very_strong_set),
+            "_prev_candidate_set": list(self._prev_candidate_set),
+        }
+
+    def from_state_dict(self, data: dict) -> None:
+        """Restore session state from a saved dict."""
+        self._active_symbols = data.get("_active_symbols", self._active_symbols)
+        self._rotations = [
+            RotationEvent(**r) for r in data.get("_rotations", [])
+        ]
+        for sym, stats_dict in data.get("_historical_stats", {}).items():
+            self._historical_stats[sym] = HistoricalSymbolStats(**stats_dict)
+        for ex, stats_dict in data.get("_historical_exchange_stats", {}).items():
+            self._historical_exchange_stats[ex] = HistoricalExchangeStats(**stats_dict)
+        self._watchlist = {
+            sym: WatchlistEntry(**entry)
+            for sym, entry in data.get("_watchlist", {}).items()
+        }
+        self._demotion_tracking = data.get("_demotion_tracking", {})
+        self._recently_demoted = data.get("_recently_demoted", {})
+        self._dominant_pairs = data.get("_dominant_pairs", {})
+        self._last_reallocation = data.get("_last_reallocation", {})
+        self._tick_count = data.get("_tick_count", 0)
+        self._session_start = data.get("_session_start", self._session_start)
+        self._discovery_mode = data.get("_discovery_mode", self._discovery_mode)
+        self._discovery_complete = data.get(
+            "_discovery_complete", self._discovery_complete
+        )
+        self._discovery_start = data.get("_discovery_start", self._discovery_start)
+        self._discovery_duration = data.get(
+            "_discovery_duration", self._discovery_duration
+        )
+        self._exchange_profit_ticks = defaultdict(
+            int, data.get("_exchange_profit_ticks", {})
+        )
+        self._exchange_profit_sum = defaultdict(
+            float, data.get("_exchange_profit_sum", {})
+        )
+        self._exchange_buy_ticks = defaultdict(
+            int, data.get("_exchange_buy_ticks", {})
+        )
+        self._exchange_sell_ticks = defaultdict(
+            int, data.get("_exchange_sell_ticks", {})
+        )
+        self._prev_strong_set = set(data.get("_prev_strong_set", []))
+        self._prev_very_strong_set = set(data.get("_prev_very_strong_set", []))
+        self._prev_candidate_set = set(data.get("_prev_candidate_set", []))
