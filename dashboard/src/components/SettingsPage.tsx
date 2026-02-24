@@ -32,6 +32,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [ipWhitelistEnabled, setIpWhitelistEnabled] = useState(currentSettings.ip_whitelist_enabled ?? false);
   const [ipWhitelist, setIpWhitelist] = useState((currentSettings.ip_whitelist ?? []).join(', '));
   const [securityStatus, setSecurityStatus] = useState<string | null>(null);
+  const [showRestartConfirm, setShowRestartConfirm] = useState(false);
 
   // Sync from server when not dirty
   const settingsKey = JSON.stringify(currentSettings);
@@ -284,6 +285,21 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         </div>
       </div>
 
+      {/* Danger Zone */}
+      <div className="bg-red-950/30 border border-red-900/50 rounded-lg p-5">
+        <h2 className="text-sm font-semibold text-red-400 uppercase tracking-wider mb-3">Danger Zone</h2>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm text-slate-300">Restart Bot</p>
+            <p className="text-xs text-slate-500 mt-0.5">Discard all session data and start fresh with ${totalCapital}.</p>
+          </div>
+          <button onClick={() => setShowRestartConfirm(true)}
+            className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors">
+            Restart Bot
+          </button>
+        </div>
+      </div>
+
       {/* Action Buttons */}
       <div className="flex items-center gap-4">
         <button onClick={handleSave}
@@ -298,6 +314,31 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <span className="text-emerald-400 text-sm font-medium">{saveStatus}</span>
         )}
       </div>
+
+      {/* Restart Confirmation Modal */}
+      {showRestartConfirm && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-slate-800 rounded-xl p-6 max-w-md w-full mx-4 border border-red-900/50">
+            <h3 className="text-lg font-semibold text-white mb-2">Restart Bot?</h3>
+            <p className="text-slate-400 text-sm mb-4">
+              Are you sure? This will discard all current session data and start fresh with ${totalCapital}.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => setShowRestartConfirm(false)}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-sm">
+                Cancel
+              </button>
+              <button onClick={() => {
+                onSendMessage({ type: 'restart' });
+                setShowRestartConfirm(false);
+              }}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium">
+                Restart
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Confirmation Modal */}
       {showConfirm && (
