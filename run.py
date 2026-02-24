@@ -13,9 +13,25 @@ Press Ctrl+C to stop gracefully.
 
 import asyncio
 import logging
+import os
 import signal
 from datetime import datetime
 from pathlib import Path
+
+
+def load_env() -> None:
+    """Load environment variables from .env file if it exists."""
+    env_path = Path(".env")
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip())
+
+
+# Load .env BEFORE importing config (which reads os.environ at module level)
+load_env()
 
 from balance import BalanceTracker
 from config import ACTIVE_SYMBOLS, MIN_WARMUP_TICKS, SYMBOLS

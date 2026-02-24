@@ -4,6 +4,8 @@ Configuration for the CoirnaBot real-time crypto price fetcher.
 All symbols, exchange settings, and operational parameters.
 """
 
+import os
+
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
 SYMBOLS: list[str] = [
@@ -179,6 +181,19 @@ USDT_WITHDRAWAL_FEES: dict[str, float] = {
 
 # Dashboard WebSocket server
 DASHBOARD_WS_PORT: int = 8765
+
+# Dashboard authentication (loaded from .env)
+DASHBOARD_USERNAME: str = os.environ.get("DASHBOARD_USERNAME", "admin")
+DASHBOARD_PASSWORD: str = os.environ.get("DASHBOARD_PASSWORD", "changeme")
+
+# Email notifications (loaded from .env)
+SMTP_EMAIL: str = os.environ.get("SMTP_EMAIL", "")
+SMTP_APP_PASSWORD: str = os.environ.get("SMTP_APP_PASSWORD", "")
+NOTIFICATION_EMAIL: str = os.environ.get("NOTIFICATION_EMAIL", "")
+
+# reCAPTCHA v2 (loaded from .env)
+RECAPTCHA_SITE_KEY: str = os.environ.get("RECAPTCHA_SITE_KEY", "")
+RECAPTCHA_SECRET_KEY: str = os.environ.get("RECAPTCHA_SECRET_KEY", "")
 
 # Reconnection settings (exponential backoff)
 RECONNECT_INITIAL_DELAY: float = 1.0

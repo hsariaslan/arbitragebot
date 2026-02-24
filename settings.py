@@ -52,6 +52,8 @@ DEFAULT_SETTINGS: dict = {
     "rebalance_cooldown": REBALANCE_COOLDOWN_SECONDS,
     "rebalance_roi_horizon": REBALANCE_ROI_HORIZON,
     "adaptive_mode": ADAPTIVE_MODE,
+    "ip_whitelist_enabled": False,
+    "ip_whitelist": [],
 }
 
 

@@ -10,12 +10,27 @@ Also handles incoming messages from the dashboard for settings updates.
 import asyncio
 import json
 import logging
+import re
+import secrets
 import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import websockets
 
-from config import ALL_EXCHANGES, DASHBOARD_WS_PORT, SYMBOLS, USDT_WITHDRAWAL_FEES
+from config import (
+    ALL_EXCHANGES,
+    DASHBOARD_PASSWORD,
+    DASHBOARD_USERNAME,
+    DASHBOARD_WS_PORT,
+    RECAPTCHA_SECRET_KEY,
+    RECAPTCHA_SITE_KEY,
+    SYMBOLS,
+    USDT_WITHDRAWAL_FEES,
+)
+from email_notifier import notify_blocked, notify_login
 from settings import save_settings
 
 if TYPE_CHECKING:
@@ -49,6 +64,222 @@ class DashboardServer:
         self._clients: set[Any] = set()
         self._start_time = 0.0
 
+        # Auth state
+        self._sessions: dict[str, dict] = {}  # token -> {ip, last_seen, remember}
+        self._failed_attempts: dict[str, list[float]] = {}  # IP -> failure timestamps
+        self._blocked_ips: dict[str, float] = {}  # IP -> block_expires_at
+        self._max_attempts = 10
+        self._block_duration = 3600.0  # 1 hour
+        self._session_expiry = 86400.0  # 24h for non-remember sessions
+        self._last_cleanup = 0.0
+        self._captcha_threshold = 3  # require CAPTCHA after this many failures
+
+        # Auth events (for Auth Log page)
+        self._auth_events: list[dict] = []
+        self._max_auth_events = 500
+
+        # Auth logger
+        self._auth_logger = self._setup_auth_logger()
+
+    @staticmethod
+    def _setup_auth_logger() -> logging.Logger:
+        """Create a dedicated logger for authentication events."""
+        auth_dir = Path("logs/auth")
+        auth_dir.mkdir(parents=True, exist_ok=True)
+        auth_log = logging.getLogger("coirnabot.auth")
+        auth_log.setLevel(logging.INFO)
+        if not auth_log.handlers:
+            fh = logging.FileHandler(auth_dir / "auth.log")
+            fh.setFormatter(logging.Formatter(
+                "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+            ))
+            auth_log.addHandler(fh)
+        return auth_log
+
+    # --- Rate limiting ---
+
+    def _check_rate_limit(self, ip: str) -> tuple[bool, int, int]:
+        """Check if IP is rate limited. Returns (blocked, remaining, retry_after_s)."""
+        now = time.time()
+        if ip in self._blocked_ips:
+            expires = self._blocked_ips[ip]
+            if now < expires:
+                return True, 0, int(expires - now)
+            del self._blocked_ips[ip]
+            self._failed_attempts.pop(ip, None)
+
+        if ip in self._failed_attempts:
+            cutoff = now - self._block_duration
+            self._failed_attempts[ip] = [t for t in self._failed_attempts[ip] if t > cutoff]
+            count = len(self._failed_attempts[ip])
+        else:
+            count = 0
+        return False, max(self._max_attempts - count, 0), 0
+
+    def _record_failed_attempt(self, ip: str) -> int:
+        """Record a failed login attempt. Returns attempts remaining."""
+        now = time.time()
+        if ip not in self._failed_attempts:
+            self._failed_attempts[ip] = []
+        self._failed_attempts[ip].append(now)
+        cutoff = now - self._block_duration
+        self._failed_attempts[ip] = [t for t in self._failed_attempts[ip] if t > cutoff]
+        remaining = max(self._max_attempts - len(self._failed_attempts[ip]), 0)
+        if remaining <= 0:
+            self._blocked_ips[ip] = now + self._block_duration
+            self._auth_logger.warning(f"{ip} - Blocked for {int(self._block_duration)}s after {self._max_attempts} failed attempts")
+        return remaining
+
+    # --- Session management ---
+
+    def _create_session(self, ip: str, remember: bool = False) -> str:
+        """Create a new session token."""
+        token = secrets.token_hex(32)
+        self._sessions[token] = {
+            "ip": ip,
+            "last_seen": time.time(),
+            "remember": remember,
+        }
+        return token
+
+    def _validate_session(self, token: str) -> bool:
+        """Validate a session token. Returns True if valid."""
+        if token not in self._sessions:
+            return False
+        session = self._sessions[token]
+        now = time.time()
+        if not session["remember"] and now - session["last_seen"] > self._session_expiry:
+            del self._sessions[token]
+            return False
+        session["last_seen"] = now
+        return True
+
+    def _invalidate_session(self, token: str) -> None:
+        """Remove a session token (logout)."""
+        self._sessions.pop(token, None)
+
+    def _cleanup_auth(self) -> None:
+        """Prune expired sessions and stale rate limit entries."""
+        now = time.time()
+        expired_blocks = [ip for ip, exp in self._blocked_ips.items() if now >= exp]
+        for ip in expired_blocks:
+            del self._blocked_ips[ip]
+        empty = [ip for ip, a in self._failed_attempts.items() if not a]
+        for ip in empty:
+            del self._failed_attempts[ip]
+        expired_sessions = [
+            t for t, s in self._sessions.items()
+            if not s["remember"] and now - s["last_seen"] > self._session_expiry
+        ]
+        for t in expired_sessions:
+            del self._sessions[t]
+
+    # --- IP whitelist ---
+
+    def _check_ip_whitelist(self, ip: str) -> bool:
+        """Check if IP is allowed. Returns True if allowed."""
+        if not self._settings.get("ip_whitelist_enabled", False):
+            return True
+        whitelist = self._settings.get("ip_whitelist", [])
+        if not whitelist:
+            return True  # empty whitelist = allow all
+        return ip in whitelist
+
+    # --- Auth events ---
+
+    def _record_auth_event(
+        self, event: str, ip: str, username: str = "",
+        browser: str = "", os_info: str = "", details: str = "",
+    ) -> None:
+        """Record an authentication event for the Auth Log page."""
+        self._auth_events.append({
+            "timestamp": time.time(),
+            "event": event,
+            "ip": ip,
+            "username": username,
+            "browser": browser,
+            "os": os_info,
+            "details": details,
+        })
+        if len(self._auth_events) > self._max_auth_events:
+            self._auth_events = self._auth_events[-self._max_auth_events:]
+
+    # --- User-Agent parsing ---
+
+    @staticmethod
+    def _parse_user_agent(ua: str) -> tuple[str, str]:
+        """Parse User-Agent string into (browser, os). Simple substring matching."""
+        # Browser detection (order matters: Edge contains Chrome, etc.)
+        browser = "Unknown"
+        if "Edg/" in ua or "Edge/" in ua:
+            m = re.search(r"Edg/(\d+)", ua)
+            browser = f"Edge {m.group(1)}" if m else "Edge"
+        elif "OPR/" in ua or "Opera" in ua:
+            m = re.search(r"OPR/(\d+)", ua)
+            browser = f"Opera {m.group(1)}" if m else "Opera"
+        elif "Chrome/" in ua and "Safari/" in ua:
+            m = re.search(r"Chrome/(\d+)", ua)
+            browser = f"Chrome {m.group(1)}" if m else "Chrome"
+        elif "Firefox/" in ua:
+            m = re.search(r"Firefox/(\d+)", ua)
+            browser = f"Firefox {m.group(1)}" if m else "Firefox"
+        elif "Safari/" in ua:
+            m = re.search(r"Version/(\d+)", ua)
+            browser = f"Safari {m.group(1)}" if m else "Safari"
+
+        # OS detection
+        os_info = "Unknown"
+        if "Windows NT 10" in ua:
+            os_info = "Windows 10/11"
+        elif "Windows NT" in ua:
+            os_info = "Windows"
+        elif "Macintosh" in ua or "Mac OS X" in ua:
+            os_info = "macOS"
+        elif "Android" in ua:
+            m = re.search(r"Android (\d+)", ua)
+            os_info = f"Android {m.group(1)}" if m else "Android"
+        elif "iPhone" in ua or "iPad" in ua:
+            os_info = "iOS"
+        elif "Linux" in ua:
+            os_info = "Linux"
+
+        return browser, os_info
+
+    # --- reCAPTCHA ---
+
+    def _is_captcha_required(self, ip: str) -> bool:
+        """Check if CAPTCHA is required for this IP (after N failures)."""
+        if not RECAPTCHA_SITE_KEY or not RECAPTCHA_SECRET_KEY:
+            return False
+        count = len(self._failed_attempts.get(ip, []))
+        return count >= self._captcha_threshold
+
+    async def _verify_recaptcha(self, token: str, ip: str) -> bool:
+        """Verify reCAPTCHA token with Google. Non-blocking."""
+        if not RECAPTCHA_SECRET_KEY:
+            return True
+        try:
+            data = urllib.parse.urlencode({
+                "secret": RECAPTCHA_SECRET_KEY,
+                "response": token,
+                "remoteip": ip,
+            }).encode()
+            req = urllib.request.Request(
+                "https://www.google.com/recaptcha/api/siteverify",
+                data=data,
+                method="POST",
+            )
+
+            def _do_verify() -> bool:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    result = json.loads(resp.read())
+                    return result.get("success", False)
+
+            return await asyncio.to_thread(_do_verify)
+        except Exception as e:
+            logger.warning(f"[Auth] reCAPTCHA verification failed: {e}")
+            return False
+
     def stop(self) -> None:
         self._running = False
 
@@ -78,30 +309,184 @@ class DashboardServer:
                         except Exception:
                             dead.add(ws)
                     self._clients -= dead
+                # Periodic auth cleanup (~every 5 min)
+                now = time.time()
+                if now - self._last_cleanup > 300:
+                    self._cleanup_auth()
+                    self._last_cleanup = now
                 await asyncio.sleep(1.0)
 
         logger.info("[Dashboard] WebSocket server stopped")
 
     async def _handle_client(self, ws: Any) -> None:
-        """Handle a new WebSocket client connection."""
-        self._clients.add(ws)
-        logger.info(f"[Dashboard] Client connected ({len(self._clients)} total)")
+        """Handle a new WebSocket client connection with authentication."""
+        ip = ws.remote_address[0] if ws.remote_address else "unknown"
+        # websockets 13+: ws.request.headers; older: ws.request_headers
+        if hasattr(ws, "request") and hasattr(ws.request, "headers"):
+            ua = ws.request.headers.get("User-Agent", "")
+        elif hasattr(ws, "request_headers"):
+            ua = ws.request_headers.get("User-Agent", "")
+        else:
+            ua = ""
+        browser, os_info = self._parse_user_agent(ua)
+
+        # IP whitelist check
+        if not self._check_ip_whitelist(ip):
+            self._auth_logger.warning(f"{ip} - Connection denied (IP not in whitelist)")
+            self._record_auth_event("ip_denied", ip, browser=browser, os_info=os_info)
+            await ws.send(json.dumps({
+                "type": "auth_denied",
+                "reason": "IP not allowed",
+            }))
+            await ws.close()
+            return
+
+        # Rate limit check
+        is_blocked, _, retry_after = self._check_rate_limit(ip)
+        if is_blocked:
+            self._auth_logger.info(f"{ip} - Connection denied (blocked, {retry_after}s remaining)")
+            self._record_auth_event("blocked", ip, browser=browser, os_info=os_info, details=f"retry_after={retry_after}s")
+            await ws.send(json.dumps({
+                "type": "auth_blocked",
+                "reason": f"Too many failed attempts. Try again in {retry_after // 60} minutes.",
+                "retry_after": retry_after,
+            }))
+            await ws.close()
+            return
+
+        # Request authentication (include captcha info if needed)
+        captcha_needed = self._is_captcha_required(ip)
+        auth_msg: dict[str, Any] = {"type": "auth_required"}
+        if captcha_needed:
+            auth_msg["captcha_required"] = True
+            auth_msg["captcha_site_key"] = RECAPTCHA_SITE_KEY
+        await ws.send(json.dumps(auth_msg))
+
+        authenticated = False
+        session_token = None
+
         try:
-            # Send initial state immediately
-            state = self._build_state()
-            await ws.send(json.dumps(state))
-            # Listen for incoming messages
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                if not authenticated:
+                    if msg.get("type") != "auth":
+                        continue
+
+                    # Try token-based reconnection
+                    token = msg.get("token")
+                    if token and self._validate_session(token):
+                        authenticated = True
+                        session_token = token
+                        await ws.send(json.dumps({"type": "auth_ok", "token": token}))
+                        self._clients.add(ws)
+                        await ws.send(json.dumps(self._build_state()))
+                        self._auth_logger.info(f"{ip} - Reconnected with session token")
+                        self._record_auth_event("reconnected", ip, browser=browser, os_info=os_info)
+                        continue
+
+                    # Username/password authentication
+                    username = msg.get("username", "")
+                    password = msg.get("password", "")
+                    remember = msg.get("remember", False)
+
+                    # Re-check rate limit
+                    is_blocked, remaining, retry_after = self._check_rate_limit(ip)
+                    if is_blocked:
+                        self._auth_logger.info(f"{ip} - Blocked during auth")
+                        self._record_auth_event("blocked", ip, username=username, browser=browser, os_info=os_info)
+                        await ws.send(json.dumps({
+                            "type": "auth_blocked",
+                            "reason": f"Too many failed attempts. Try again in {retry_after // 60} minutes.",
+                            "retry_after": retry_after,
+                        }))
+                        await ws.close()
+                        return
+
+                    # reCAPTCHA check (required after N failures)
+                    if self._is_captcha_required(ip):
+                        captcha_token = msg.get("captcha_token", "")
+                        if not captcha_token:
+                            await ws.send(json.dumps({
+                                "type": "auth_failed",
+                                "reason": "Please complete the CAPTCHA",
+                                "captcha_required": True,
+                                "captcha_site_key": RECAPTCHA_SITE_KEY,
+                            }))
+                            continue
+                        if not await self._verify_recaptcha(captcha_token, ip):
+                            await ws.send(json.dumps({
+                                "type": "auth_failed",
+                                "reason": "CAPTCHA verification failed. Please try again.",
+                                "captcha_required": True,
+                                "captcha_site_key": RECAPTCHA_SITE_KEY,
+                            }))
+                            continue
+
+                    if username == DASHBOARD_USERNAME and password == DASHBOARD_PASSWORD:
+                        authenticated = True
+                        session_token = self._create_session(ip, remember)
+                        self._failed_attempts.pop(ip, None)
+                        await ws.send(json.dumps({"type": "auth_ok", "token": session_token}))
+                        self._clients.add(ws)
+                        await ws.send(json.dumps(self._build_state()))
+                        self._auth_logger.info(f"{ip} - Login successful ({username}, remember={remember})")
+                        self._record_auth_event(
+                            "login_success", ip, username=username,
+                            browser=browser, os_info=os_info, details=f"remember={remember}",
+                        )
+                        # Fire-and-forget email notification
+                        asyncio.create_task(notify_login(ip, browser, os_info))
+                    else:
+                        remaining = self._record_failed_attempt(ip)
+                        self._auth_logger.warning(f"{ip} - Login failed (user={username}, {remaining} attempts remaining)")
+                        self._record_auth_event(
+                            "login_failed", ip, username=username,
+                            browser=browser, os_info=os_info, details=f"{remaining} attempts remaining",
+                        )
+
+                        if remaining <= 0:
+                            self._record_auth_event("blocked", ip, username=username, browser=browser, os_info=os_info, details="10 failed attempts")
+                            # Fire-and-forget email notification
+                            asyncio.create_task(notify_blocked(ip, browser, os_info))
+                            await ws.send(json.dumps({
+                                "type": "auth_blocked",
+                                "reason": "Too many failed attempts. Try again in 60 minutes.",
+                                "retry_after": int(self._block_duration),
+                            }))
+                            await ws.close()
+                            return
+
+                        # Include captcha info if threshold reached
+                        fail_response: dict[str, Any] = {
+                            "type": "auth_failed",
+                            "reason": "Invalid credentials",
+                            "attempts_remaining": remaining,
+                        }
+                        if self._is_captcha_required(ip):
+                            fail_response["captcha_required"] = True
+                            fail_response["captcha_site_key"] = RECAPTCHA_SITE_KEY
+                        await ws.send(json.dumps(fail_response))
+                else:
+                    # Authenticated — handle normal messages
+                    if msg.get("type") == "logout":
+                        if session_token:
+                            self._invalidate_session(session_token)
+                        self._auth_logger.info(f"{ip} - Logged out")
+                        self._record_auth_event("logout", ip, browser=browser, os_info=os_info)
+                        await ws.send(json.dumps({"type": "logged_out"}))
+                        await ws.close()
+                        return
                     await self._handle_message(msg, ws)
-                except (json.JSONDecodeError, KeyError) as e:
-                    logger.debug(f"[Dashboard] Invalid message: {e}")
         except websockets.ConnectionClosed:
             pass
         finally:
             self._clients.discard(ws)
-            logger.info(f"[Dashboard] Client disconnected ({len(self._clients)} total)")
+            if authenticated:
+                logger.info(f"[Dashboard] Client {ip} disconnected ({len(self._clients)} total)")
 
     async def _handle_message(self, msg: dict, ws: Any) -> None:
         """Process an incoming message from the dashboard."""
@@ -124,6 +509,16 @@ class DashboardServer:
             self._apply_settings(new_settings)
             await ws.send(json.dumps({"type": "settings_applied", "ok": True}))
             logger.info("[Dashboard] Settings applied and simulation reset")
+
+        elif msg_type == "save_security_settings":
+            security = msg.get("settings", {})
+            if "ip_whitelist_enabled" in security:
+                self._settings["ip_whitelist_enabled"] = security["ip_whitelist_enabled"]
+            if "ip_whitelist" in security:
+                self._settings["ip_whitelist"] = security["ip_whitelist"]
+            save_settings(self._settings)
+            await ws.send(json.dumps({"type": "security_settings_saved", "ok": True}))
+            logger.info("[Dashboard] Security settings saved")
 
     def _apply_settings(self, settings: dict) -> None:
         """Apply new settings: restart discovery with updated parameters."""
@@ -402,6 +797,7 @@ class DashboardServer:
                 for c in self._monitor._config_history
             ],
             "profit_stats": self._monitor.get_net_profit_stats(),
+            "auth_logs": self._auth_events,
         }
 
     def _build_adaptive_config(self) -> dict[str, Any]:
