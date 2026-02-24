@@ -353,7 +353,10 @@ React/TypeScript SPA served by the Python backend via WebSocket.
 - **Dashboard** — Real-time overview: portfolio P&L, trade/transfer stats, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`), balance table, price grid, recent trades/transfers, rotation log
 - **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist
 - **Settings** — Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist
-- **Auth Log** — Authentication event log: login success/failure, blocked IPs, reconnections, IP denials. Filterable by event type with search by IP/username/browser/OS
+- **Logs** — Unified log viewer with two sub-tabs:
+  - **Bot Logs**: Real-time terminal-style log viewer (font-mono, auto-scroll). Filters: level (INFO/WARNING/ERROR), component (Monitor/Optimizer/Balance/exchanges/Dashboard/Auth/Email/Settings), text search. Export to `.log` file.
+  - **Auth Logs**: Authentication event log (login success/failure, blocked IPs, reconnections, IP denials). Filterable by event type with search by IP/username/browser/OS. Export to `.csv` file.
+  - **Export**: Presets (1 Hour, 6 Hours, Today, 1 Day, Current Session, All, Custom UTC datetime picker). "Apply current filters" checkbox auto-checks when UI filters are active. Reads from disk log files for cross-day ranges.
 
 ### Dashboard Authentication
 
@@ -365,12 +368,20 @@ Full authentication system for the WebSocket dashboard:
 - **IP whitelist**: Optional, configurable from Settings page. Validated with `ipaddress` module.
 - **reCAPTCHA v2**: "I'm not a robot" checkbox appears after 3 failed attempts (requires Google reCAPTCHA v2 keys in `.env`). Warning logged at startup if keys not configured.
 - **Email notifications**: Gmail SMTP alerts on successful login and IP block (requires Gmail App Password in `.env`). All user-controlled values HTML-escaped.
-- **Auth log**: All auth events persisted to `logs/auth/auth_events.jsonl` (5MB rotation, 2 backup files), loaded on startup (500 max), viewable in Auth Log tab. Passwords masked (first 2 chars + asterisks). Legacy plaintext passwords stripped on load.
+- **Auth log**: All auth events persisted to `logs/auth/auth_events.jsonl` (5MB rotation, 2 backup files), loaded on startup (500 max), viewable in Logs → Auth Logs tab. Passwords masked (first 2 chars + asterisks). Legacy plaintext passwords stripped on load.
 - **Dedicated auth logger**: Human-readable log at `logs/auth/auth.log`
 - **X-Forwarded-For**: Only trusted from IPs in `TRUSTED_PROXIES` (default: `127.0.0.1,::1`). Prevents IP spoofing to bypass rate limits/whitelist.
 - **Origin validation**: When `ALLOWED_ORIGINS` is set, WebSocket connections from unknown origins are rejected (CSRF protection).
 - **Settings validation**: All settings validated against schema (type, min/max ranges). Unknown keys rejected. IP whitelist entries validated. 5s cooldown between settings saves.
 - **Bind host**: Default `127.0.0.1` (behind nginx). Override with `DASHBOARD_BIND_HOST=0.0.0.0` for direct access.
+- **IP denied flash prevention**: Connecting screen text is delayed 1.5s so IP-denied users see only a spinner before the "You are not allowed here" page.
+
+### Bot Logging
+
+- **Format**: UTC timestamps via `time.gmtime` converter: `YYYY-MM-DD HH:MM:SS [LEVEL] [Component] message`
+- **Daily rotation**: `TimedRotatingFileHandler` rotates at 00:00 UTC, keeps 30 days. Files: `logs/coirnabot.log` (current), `logs/coirnabot.log.YYYY-MM-DD` (rotated).
+- **DashboardLogHandler**: Custom `logging.Handler` in `dashboard_server.py`. Captures entries in-memory (`deque` for live broadcast, `list` for session export). Parses `[Component]` prefix from log messages.
+- **Disk export**: `_read_bot_logs_from_disk()` reads rotated + current log files for cross-day export ranges. `_read_auth_logs_from_disk()` reads JSONL files. Both use `asyncio.to_thread()` for non-blocking I/O.
 
 ### XLSX Export
 
@@ -380,16 +391,19 @@ Click "Export XLSX" on the Rankings page. 15 sheets: Summary, Rolling Rankings, 
 
 | File | Purpose |
 |------|---------|
-| `dashboard/src/App.tsx` | Main layout, tab routing, WebSocket state |
-| `dashboard/src/types.ts` | All TypeScript interfaces (Trade, SymbolRanking, AdaptiveConfig, ConfigSnapshot, AuthLogEntry, etc.) |
-| `dashboard/src/hooks/useWebSocket.ts` | WebSocket connection, auth flow, state management |
+| `dashboard/src/App.tsx` | Main layout, tab routing, WebSocket state, IP-denied flash prevention |
+| `dashboard/src/types.ts` | All TypeScript interfaces (Trade, SymbolRanking, AdaptiveConfig, ConfigSnapshot, AuthLogEntry, BotLogEntry, etc.) |
+| `dashboard/src/hooks/useWebSocket.ts` | WebSocket connection, auth flow, state management, export callbacks |
 | `dashboard/src/components/LoginPage.tsx` | Login form with reCAPTCHA integration |
-| `dashboard/src/components/AuthLogPage.tsx` | Auth event log with filtering/search |
+| `dashboard/src/components/LogsPage.tsx` | Unified Logs page container with Bot Logs / Auth Logs sub-tabs |
+| `dashboard/src/components/BotLogsTab.tsx` | Terminal-style real-time bot log viewer with filters and auto-scroll |
+| `dashboard/src/components/AuthLogPage.tsx` | Auth event log with filtering/search and CSV export |
+| `dashboard/src/components/ExportLogsModal.tsx` | Reusable export modal with time presets, custom UTC picker, filter toggle |
 | `dashboard/src/components/SymbolRankings.tsx` | Main page ranking card |
 | `dashboard/src/components/RankingPage.tsx` | Full ranking analysis page |
 | `dashboard/src/components/SettingsPage.tsx` | Settings form with adaptive mode toggle + IP whitelist |
 | `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 15 sheets |
-| `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings |
+| `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings, log export from disk |
 | `email_notifier.py` | Gmail SMTP email notifications (login alerts, IP block alerts) |
 
 ## Tools
