@@ -183,8 +183,48 @@ USDT_WITHDRAWAL_FEES: dict[str, float] = {
 DASHBOARD_WS_PORT: int = 8765
 
 # Dashboard authentication (loaded from .env)
+import sys as _sys
+
+import bcrypt as _bcrypt
+
 DASHBOARD_USERNAME: str = os.environ.get("DASHBOARD_USERNAME", "admin")
-DASHBOARD_PASSWORD: str = os.environ.get("DASHBOARD_PASSWORD", "changeme")
+
+# Password: prefer DASHBOARD_PASSWORD_HASH (bcrypt), fall back to legacy plaintext
+_password_hash_env = os.environ.get("DASHBOARD_PASSWORD_HASH", "")
+_password_plain_env = os.environ.get("DASHBOARD_PASSWORD", "")
+
+if _password_hash_env:
+    DASHBOARD_PASSWORD_HASH: bytes = _password_hash_env.encode("utf-8")
+elif _password_plain_env:
+    if _password_plain_env == "changeme":
+        print(
+            "SECURITY ERROR: Default password 'changeme' is not allowed.\n"
+            "Set DASHBOARD_PASSWORD_HASH in .env. Generate with:\n"
+            '  python -c "import bcrypt; print(bcrypt.hashpw(b\'YOUR_PASSWORD\', bcrypt.gensalt()).decode())"',
+            file=_sys.stderr,
+        )
+        _sys.exit(1)
+    print(
+        "WARNING: DASHBOARD_PASSWORD is deprecated. Use DASHBOARD_PASSWORD_HASH instead.\n"
+        "Generate hash: "
+        'python -c "import bcrypt; print(bcrypt.hashpw(b\'YOUR_PASSWORD\', bcrypt.gensalt()).decode())"',
+        file=_sys.stderr,
+    )
+    DASHBOARD_PASSWORD_HASH = _bcrypt.hashpw(
+        _password_plain_env.encode("utf-8"), _bcrypt.gensalt()
+    )
+else:
+    print(
+        "SECURITY ERROR: No dashboard password configured.\n"
+        "Set DASHBOARD_PASSWORD_HASH in .env.",
+        file=_sys.stderr,
+    )
+    _sys.exit(1)
+
+
+def verify_dashboard_password(password: str) -> bool:
+    """Check a plaintext password against the stored bcrypt hash."""
+    return _bcrypt.checkpw(password.encode("utf-8"), DASHBOARD_PASSWORD_HASH)
 
 # Email notifications (loaded from .env)
 SMTP_EMAIL: str = os.environ.get("SMTP_EMAIL", "")
@@ -194,6 +234,22 @@ NOTIFICATION_EMAIL: str = os.environ.get("NOTIFICATION_EMAIL", "")
 # reCAPTCHA v2 (loaded from .env)
 RECAPTCHA_SITE_KEY: str = os.environ.get("RECAPTCHA_SITE_KEY", "")
 RECAPTCHA_SECRET_KEY: str = os.environ.get("RECAPTCHA_SECRET_KEY", "")
+
+# Trusted reverse proxy IPs (only trust X-Forwarded-For from these)
+TRUSTED_PROXIES: list[str] = [
+    p.strip()
+    for p in os.environ.get("TRUSTED_PROXIES", "127.0.0.1,::1").split(",")
+    if p.strip()
+]
+
+# Allowed WebSocket origins (CSRF protection)
+_origins_env = os.environ.get("ALLOWED_ORIGINS", "")
+ALLOWED_ORIGINS: list[str] = (
+    [o.strip() for o in _origins_env.split(",") if o.strip()] if _origins_env else []
+)
+
+# Dashboard bind host (default localhost — use 0.0.0.0 to expose directly)
+DASHBOARD_BIND_HOST: str = os.environ.get("DASHBOARD_BIND_HOST", "127.0.0.1")
 
 # Reconnection settings (exponential backoff)
 RECONNECT_INITIAL_DELAY: float = 1.0

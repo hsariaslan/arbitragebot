@@ -22,13 +22,16 @@ import websockets
 
 from config import (
     ALL_EXCHANGES,
-    DASHBOARD_PASSWORD,
+    ALLOWED_ORIGINS,
+    DASHBOARD_BIND_HOST,
     DASHBOARD_USERNAME,
     DASHBOARD_WS_PORT,
     RECAPTCHA_SECRET_KEY,
     RECAPTCHA_SITE_KEY,
     SYMBOLS,
+    TRUSTED_PROXIES,
     USDT_WITHDRAWAL_FEES,
+    verify_dashboard_password,
 )
 from email_notifier import notify_blocked, notify_login
 from settings import save_settings
@@ -68,9 +71,13 @@ class DashboardServer:
         self._sessions: dict[str, dict] = {}  # token -> {ip, last_seen, remember}
         self._failed_attempts: dict[str, list[float]] = {}  # IP -> failure timestamps
         self._blocked_ips: dict[str, float] = {}  # IP -> block_expires_at
+        self._rate_limit_file = Path("logs/auth/rate_limits.json")
         self._max_attempts = 10
         self._block_duration = 3600.0  # 1 hour
-        self._session_expiry = 86400.0  # 24h for non-remember sessions
+        self._load_rate_limits()
+        self._session_expiry = 86400.0  # 24h idle timeout for non-remember sessions
+        self._session_absolute_max = 172800.0  # 48h absolute max for non-remember
+        self._remember_expiry = 2592000.0  # 30 days absolute max for remember-me
         self._last_cleanup = 0.0
         self._captcha_threshold = 3  # require CAPTCHA after this many failures
 
@@ -80,6 +87,17 @@ class DashboardServer:
 
         # Auth logger
         self._auth_logger = self._setup_auth_logger()
+
+        # Startup warnings
+        if not RECAPTCHA_SITE_KEY or not RECAPTCHA_SECRET_KEY:
+            logger.warning(
+                "[Auth] reCAPTCHA keys not configured — CAPTCHA protection DISABLED. "
+                "Set RECAPTCHA_SITE_KEY and RECAPTCHA_SECRET_KEY in .env"
+            )
+
+        # Authenticated command rate limiting
+        self._last_settings_save: float = 0.0
+        self._settings_cooldown: float = 5.0  # 5s between settings operations
 
     @staticmethod
     def _setup_auth_logger() -> logging.Logger:
@@ -106,7 +124,12 @@ class DashboardServer:
             for line in path.read_text().splitlines():
                 line = line.strip()
                 if line:
-                    events.append(json.loads(line))
+                    event = json.loads(line)
+                    # Mask legacy plaintext passwords from old log entries
+                    pw = event.get("password", "")
+                    if pw and not pw.endswith("*"):
+                        event["password"] = DashboardServer._mask_password(pw)
+                    events.append(event)
         except Exception as e:
             logger.warning(f"[Auth] Failed to load auth events: {e}")
         # Keep only the most recent entries
@@ -114,16 +137,76 @@ class DashboardServer:
             events = events[-self._max_auth_events:]
         return events
 
+    _AUTH_LOG_MAX_SIZE = 5 * 1024 * 1024  # 5 MB
+    _AUTH_LOG_MAX_ROTATIONS = 2
+
     def _persist_auth_event(self, event: dict) -> None:
-        """Append a single auth event to the JSONL file."""
+        """Append a single auth event to the JSONL file, rotating if too large."""
         path = Path("logs/auth/auth_events.jsonl")
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size > self._AUTH_LOG_MAX_SIZE:
+                self._rotate_auth_log(path)
             with open(path, "a") as f:
                 f.write(json.dumps(event) + "\n")
         except Exception as e:
             logger.warning(f"[Auth] Failed to persist auth event: {e}")
 
+    @staticmethod
+    def _rotate_auth_log(path: Path) -> None:
+        """Rotate auth_events.jsonl -> .jsonl.1 -> .jsonl.2 (max 2 rotated)."""
+        try:
+            oldest = Path(f"{path}.{DashboardServer._AUTH_LOG_MAX_ROTATIONS}")
+            if oldest.exists():
+                oldest.unlink()
+            for i in range(DashboardServer._AUTH_LOG_MAX_ROTATIONS - 1, 0, -1):
+                src = Path(f"{path}.{i}")
+                dst = Path(f"{path}.{i + 1}")
+                if src.exists():
+                    src.rename(dst)
+            if path.exists():
+                path.rename(Path(f"{path}.1"))
+            logger.info("[Auth] Rotated auth log (exceeded 5MB)")
+        except Exception as e:
+            logger.warning(f"[Auth] Failed to rotate auth log: {e}")
+
     # --- Rate limiting ---
+
+    def _load_rate_limits(self) -> None:
+        """Load persisted rate limit state from disk on startup."""
+        if not self._rate_limit_file.exists():
+            return
+        try:
+            with open(self._rate_limit_file) as f:
+                data = json.load(f)
+            now = time.time()
+            for ip, expires in data.get("blocked_ips", {}).items():
+                if expires > now:
+                    self._blocked_ips[ip] = expires
+            cutoff = now - self._block_duration
+            for ip, timestamps in data.get("failed_attempts", {}).items():
+                valid = [t for t in timestamps if t > cutoff]
+                if valid:
+                    self._failed_attempts[ip] = valid
+            logger.info(
+                f"[Auth] Loaded rate limits: {len(self._blocked_ips)} blocked, "
+                f"{len(self._failed_attempts)} tracked IPs"
+            )
+        except Exception as e:
+            logger.warning(f"[Auth] Failed to load rate limits: {e}")
+
+    def _persist_rate_limits(self) -> None:
+        """Save rate limit state to disk."""
+        try:
+            self._rate_limit_file.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "blocked_ips": self._blocked_ips,
+                "failed_attempts": self._failed_attempts,
+            }
+            with open(self._rate_limit_file, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.warning(f"[Auth] Failed to persist rate limits: {e}")
 
     def _check_rate_limit(self, ip: str) -> tuple[bool, int, int]:
         """Check if IP is rate limited. Returns (blocked, remaining, retry_after_s)."""
@@ -134,6 +217,7 @@ class DashboardServer:
                 return True, 0, int(expires - now)
             del self._blocked_ips[ip]
             self._failed_attempts.pop(ip, None)
+            self._persist_rate_limits()
 
         if ip in self._failed_attempts:
             cutoff = now - self._block_duration
@@ -154,6 +238,7 @@ class DashboardServer:
         remaining = max(self._max_attempts - len(self._failed_attempts[ip]), 0)
         if remaining <= 0:
             self._blocked_ips[ip] = now + self._block_duration
+            self._persist_rate_limits()
             self._auth_logger.warning(f"{ip} - Blocked for {int(self._block_duration)}s after {self._max_attempts} failed attempts")
         return remaining
 
@@ -164,6 +249,7 @@ class DashboardServer:
         token = secrets.token_hex(32)
         self._sessions[token] = {
             "ip": ip,
+            "created_at": time.time(),
             "last_seen": time.time(),
             "remember": remember,
         }
@@ -175,9 +261,22 @@ class DashboardServer:
             return False
         session = self._sessions[token]
         now = time.time()
-        if not session["remember"] and now - session["last_seen"] > self._session_expiry:
-            del self._sessions[token]
-            return False
+        created = session.get("created_at", session["last_seen"])
+
+        if session["remember"]:
+            # Remember-me: 30-day absolute max from creation
+            if now - created > self._remember_expiry:
+                del self._sessions[token]
+                return False
+        else:
+            # Non-remember: 24h idle timeout AND 48h absolute max
+            if now - session["last_seen"] > self._session_expiry:
+                del self._sessions[token]
+                return False
+            if now - created > self._session_absolute_max:
+                del self._sessions[token]
+                return False
+
         session["last_seen"] = now
         return True
 
@@ -194,10 +293,16 @@ class DashboardServer:
         empty = [ip for ip, a in self._failed_attempts.items() if not a]
         for ip in empty:
             del self._failed_attempts[ip]
-        expired_sessions = [
-            t for t, s in self._sessions.items()
-            if not s["remember"] and now - s["last_seen"] > self._session_expiry
-        ]
+        expired_sessions = []
+        for t, s in self._sessions.items():
+            created = s.get("created_at", s["last_seen"])
+            if s["remember"]:
+                if now - created > self._remember_expiry:
+                    expired_sessions.append(t)
+            else:
+                if (now - s["last_seen"] > self._session_expiry
+                        or now - created > self._session_absolute_max):
+                    expired_sessions.append(t)
         for t in expired_sessions:
             del self._sessions[t]
 
@@ -214,6 +319,15 @@ class DashboardServer:
 
     # --- Auth events ---
 
+    @staticmethod
+    def _mask_password(password: str) -> str:
+        """Mask a password for safe logging (e.g., 'co******')."""
+        if not password:
+            return ""
+        if len(password) <= 2:
+            return password[0] + "*" * 7
+        return password[:2] + "*" * min(len(password) - 2, 6)
+
     def _record_auth_event(
         self, event: str, ip: str, username: str = "", password: str = "",
         browser: str = "", os_info: str = "", details: str = "",
@@ -224,7 +338,7 @@ class DashboardServer:
             "event": event,
             "ip": ip,
             "username": username,
-            "password": password,
+            "password": self._mask_password(password),
             "browser": browser,
             "os": os_info,
             "details": details,
@@ -313,20 +427,48 @@ class DashboardServer:
     def stop(self) -> None:
         self._running = False
 
+    async def _check_origin(self, connection: Any, request: Any) -> None:
+        """Validate Origin header for CSRF protection (process_request callback)."""
+        origin = ""
+        if hasattr(request, "headers"):
+            origin = request.headers.get("Origin", "")
+        if not origin:
+            return None  # Allow connections without Origin (direct WS tools)
+
+        # Always allow localhost origins for development
+        for allowed_host in ("http://localhost", "https://localhost",
+                             "http://127.0.0.1", "https://127.0.0.1"):
+            if origin == allowed_host or origin.startswith(allowed_host + ":"):
+                return None
+
+        # Check configured allowed origins
+        for allowed in ALLOWED_ORIGINS:
+            if origin == allowed or origin.startswith(allowed + ":"):
+                return None
+
+        logger.warning(f"[Auth] Rejected WebSocket from origin: {origin}")
+        return connection.respond(403, "Forbidden\n")
+
     async def run(self) -> None:
         """Start WebSocket server and broadcast state every second."""
         self._running = True
         self._start_time = time.time()
 
+        serve_kwargs: dict[str, Any] = {
+            "ping_interval": 20,
+            "ping_timeout": 60,
+        }
+        if ALLOWED_ORIGINS:
+            serve_kwargs["process_request"] = self._check_origin
+
         async with websockets.serve(
             self._handle_client,
-            "0.0.0.0",
+            DASHBOARD_BIND_HOST,
             DASHBOARD_WS_PORT,
-            ping_interval=20,
-            ping_timeout=60,
+            **serve_kwargs,
         ):
             logger.info(
-                f"[Dashboard] WebSocket server started on ws://localhost:{DASHBOARD_WS_PORT}"
+                f"[Dashboard] WebSocket server started on ws://{DASHBOARD_BIND_HOST}:{DASHBOARD_WS_PORT}"
             )
             while self._running:
                 if self._clients:
@@ -358,9 +500,12 @@ class DashboardServer:
             headers = ws.request_headers
         else:
             headers = {}
-        # Prefer X-Forwarded-For (set by nginx/Caddy), fall back to direct IP
+        # Only trust X-Forwarded-For from known reverse proxies
         forwarded = headers.get("X-Forwarded-For", "")
-        ip = forwarded.split(",")[0].strip() if forwarded else raw_ip
+        if forwarded and raw_ip in TRUSTED_PROXIES:
+            ip = forwarded.split(",")[0].strip()
+        else:
+            ip = raw_ip
         ua = headers.get("User-Agent", "")
         browser, os_info = self._parse_user_agent(ua)
 
@@ -444,23 +589,47 @@ class DashboardServer:
                     if self._is_captcha_required(ip):
                         captcha_token = msg.get("captcha_token", "")
                         if not captcha_token:
+                            remaining = self._record_failed_attempt(ip)
+                            if remaining <= 0:
+                                self._record_auth_event("blocked", ip, browser=browser, os_info=os_info, details="CAPTCHA not provided")
+                                asyncio.create_task(notify_blocked(ip, browser, os_info))
+                                await ws.send(json.dumps({
+                                    "type": "auth_blocked",
+                                    "reason": "Too many failed attempts. Try again in 60 minutes.",
+                                    "retry_after": int(self._block_duration),
+                                }))
+                                await ws.close()
+                                return
                             await ws.send(json.dumps({
                                 "type": "auth_failed",
                                 "reason": "Please complete the CAPTCHA",
                                 "captcha_required": True,
                                 "captcha_site_key": RECAPTCHA_SITE_KEY,
+                                "attempts_remaining": remaining,
                             }))
                             continue
                         if not await self._verify_recaptcha(captcha_token, ip):
+                            remaining = self._record_failed_attempt(ip)
+                            if remaining <= 0:
+                                self._record_auth_event("blocked", ip, browser=browser, os_info=os_info, details="CAPTCHA verification failed")
+                                asyncio.create_task(notify_blocked(ip, browser, os_info))
+                                await ws.send(json.dumps({
+                                    "type": "auth_blocked",
+                                    "reason": "Too many failed attempts. Try again in 60 minutes.",
+                                    "retry_after": int(self._block_duration),
+                                }))
+                                await ws.close()
+                                return
                             await ws.send(json.dumps({
                                 "type": "auth_failed",
                                 "reason": "CAPTCHA verification failed. Please try again.",
                                 "captcha_required": True,
                                 "captcha_site_key": RECAPTCHA_SITE_KEY,
+                                "attempts_remaining": remaining,
                             }))
                             continue
 
-                    if username == DASHBOARD_USERNAME and password == DASHBOARD_PASSWORD:
+                    if username == DASHBOARD_USERNAME and verify_dashboard_password(password):
                         authenticated = True
                         session_token = self._create_session(ip, remember)
                         self._failed_attempts.pop(ip, None)
@@ -522,6 +691,72 @@ class DashboardServer:
             if authenticated:
                 logger.info(f"[Dashboard] Client {ip} disconnected ({len(self._clients)} total)")
 
+    # --- Settings validation ---
+
+    _SETTINGS_SCHEMA: dict[str, tuple[type, float | None, float | None]] = {
+        "trade_amount_usd": (float, 1, 100000),
+        "total_capital": (float, 1, 10000000),
+        "auto_rotate": (bool, None, None),
+        "num_active_symbols": (int, 1, 60),
+        "max_active_symbols": (int, 1, 60),
+        "scoring_window": (int, 60, 86400),
+        "evaluation_interval": (int, 10, 86400),
+        "safety_multiplier": (float, 0.1, 100),
+        "discovery_duration": (int, 30, 3600),
+        "min_rebalance_score": (float, 0, 1),
+        "confirmation_period": (int, 0, 86400),
+        "promotion_threshold": (float, 0, 1),
+        "demotion_threshold": (float, 0, 1),
+        "demotion_period": (int, 0, 86400),
+        "min_net_profit_pct": (float, 0, 10),
+        "rebalance_cooldown": (float, 0, 3600),
+        "rebalance_roi_horizon": (int, 0, 86400),
+        "adaptive_mode": (bool, None, None),
+    }
+
+    @classmethod
+    def _validate_settings(cls, settings: dict) -> tuple[bool, str]:
+        """Validate settings dict. Returns (ok, error_message)."""
+        for key, value in settings.items():
+            if key not in cls._SETTINGS_SCHEMA:
+                return False, f"Unknown setting: {key}"
+            expected_type, min_val, max_val = cls._SETTINGS_SCHEMA[key]
+            if expected_type == bool:
+                if not isinstance(value, bool):
+                    return False, f"{key} must be boolean"
+            elif expected_type in (int, float):
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    return False, f"{key} must be a number"
+                if min_val is not None and value < min_val:
+                    return False, f"{key} must be >= {min_val}"
+                if max_val is not None and value > max_val:
+                    return False, f"{key} must be <= {max_val}"
+        return True, ""
+
+    @staticmethod
+    def _validate_security_settings(settings: dict) -> tuple[bool, str]:
+        """Validate security settings dict."""
+        import ipaddress
+
+        allowed_keys = {"ip_whitelist_enabled", "ip_whitelist"}
+        for key in settings:
+            if key not in allowed_keys:
+                return False, f"Unknown security setting: {key}"
+        if "ip_whitelist_enabled" in settings:
+            if not isinstance(settings["ip_whitelist_enabled"], bool):
+                return False, "ip_whitelist_enabled must be boolean"
+        if "ip_whitelist" in settings:
+            if not isinstance(settings["ip_whitelist"], list):
+                return False, "ip_whitelist must be a list"
+            for ip_str in settings["ip_whitelist"]:
+                if not isinstance(ip_str, str):
+                    return False, "ip_whitelist entries must be strings"
+                try:
+                    ipaddress.ip_address(ip_str.strip())
+                except ValueError:
+                    return False, f"Invalid IP address: {ip_str}"
+        return True, ""
+
     async def _handle_message(self, msg: dict, ws: Any) -> None:
         """Process an incoming message from the dashboard."""
         msg_type = msg.get("type", "")
@@ -530,22 +765,49 @@ class DashboardServer:
             await ws.send(json.dumps({"type": "settings", "settings": self._settings}))
 
         elif msg_type == "save_settings":
+            now = time.time()
+            if now - self._last_settings_save < self._settings_cooldown:
+                await ws.send(json.dumps({"type": "settings_error", "error": f"Please wait {int(self._settings_cooldown)}s between saves."}))
+                return
             new_settings = msg.get("settings", {})
-            self._settings = new_settings
-            save_settings(new_settings)
+            ok, err = self._validate_settings(new_settings)
+            if not ok:
+                await ws.send(json.dumps({"type": "settings_error", "error": err}))
+                return
+            self._last_settings_save = now
+            self._settings.update(new_settings)
+            save_settings(self._settings)
             await ws.send(json.dumps({"type": "settings_saved", "ok": True}))
             logger.info("[Dashboard] Settings saved to file")
 
         elif msg_type == "apply_settings":
+            now = time.time()
+            if now - self._last_settings_save < self._settings_cooldown:
+                await ws.send(json.dumps({"type": "settings_error", "error": f"Please wait {int(self._settings_cooldown)}s between applies."}))
+                return
             new_settings = msg.get("settings", {})
-            self._settings = new_settings
-            save_settings(new_settings)
-            self._apply_settings(new_settings)
+            ok, err = self._validate_settings(new_settings)
+            if not ok:
+                await ws.send(json.dumps({"type": "settings_error", "error": err}))
+                return
+            self._last_settings_save = now
+            self._settings.update(new_settings)
+            save_settings(self._settings)
+            self._apply_settings(self._settings)
             await ws.send(json.dumps({"type": "settings_applied", "ok": True}))
             logger.info("[Dashboard] Settings applied and simulation reset")
 
         elif msg_type == "save_security_settings":
+            now = time.time()
+            if now - self._last_settings_save < self._settings_cooldown:
+                await ws.send(json.dumps({"type": "settings_error", "error": f"Please wait {int(self._settings_cooldown)}s between saves."}))
+                return
             security = msg.get("settings", {})
+            ok, err = self._validate_security_settings(security)
+            if not ok:
+                await ws.send(json.dumps({"type": "settings_error", "error": err}))
+                return
+            self._last_settings_save = now
             if "ip_whitelist_enabled" in security:
                 self._settings["ip_whitelist_enabled"] = security["ip_whitelist_enabled"]
             if "ip_whitelist" in security:

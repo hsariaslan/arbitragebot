@@ -6,6 +6,7 @@ Uses asyncio.to_thread() to avoid blocking the event loop.
 """
 
 import asyncio
+import html
 import logging
 import smtplib
 from datetime import datetime, timezone
@@ -45,9 +46,9 @@ async def notify_login(ip: str, browser: str, os_info: str) -> None:
     await send_email_async(
         "CoirnaBot: New Login",
         f"<h3>New Login Detected</h3>"
-        f"<p><b>IP:</b> {ip}<br>"
-        f"<b>Browser:</b> {browser}<br>"
-        f"<b>OS:</b> {os_info}<br>"
+        f"<p><b>IP:</b> {html.escape(ip)}<br>"
+        f"<b>Browser:</b> {html.escape(browser)}<br>"
+        f"<b>OS:</b> {html.escape(os_info)}<br>"
         f"<b>Time:</b> {now}</p>",
     )
 
@@ -58,9 +59,9 @@ async def notify_blocked(ip: str, browser: str, os_info: str) -> None:
     await send_email_async(
         "CoirnaBot: IP Blocked After 10 Failed Attempts",
         f"<h3>IP Blocked</h3>"
-        f"<p><b>IP:</b> {ip}<br>"
-        f"<b>Browser:</b> {browser}<br>"
-        f"<b>OS:</b> {os_info}<br>"
+        f"<p><b>IP:</b> {html.escape(ip)}<br>"
+        f"<b>Browser:</b> {html.escape(browser)}<br>"
+        f"<b>OS:</b> {html.escape(os_info)}<br>"
         f"<b>Time:</b> {now}<br>"
         f"<b>Reason:</b> 10 consecutive failed login attempts</p>",
     )
