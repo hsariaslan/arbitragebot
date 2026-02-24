@@ -1,0 +1,20 @@
+[Unit]
+Description=CoirnaBot Crypto Arbitrage Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/coirnabot
+ExecStart=/root/coirnabot/.venv/bin/python run.py
+ExecStopPost=/bin/bash -c 'fuser -k 8765/tcp 2>/dev/null || true'
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=10
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
