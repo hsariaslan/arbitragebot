@@ -350,14 +350,18 @@ class DashboardServer:
 
     async def _handle_client(self, ws: Any) -> None:
         """Handle a new WebSocket client connection with authentication."""
-        ip = ws.remote_address[0] if ws.remote_address else "unknown"
-        # websockets 13+: ws.request.headers; older: ws.request_headers
+        # Extract real client IP (behind reverse proxy) and User-Agent
+        raw_ip = ws.remote_address[0] if ws.remote_address else "unknown"
         if hasattr(ws, "request") and hasattr(ws.request, "headers"):
-            ua = ws.request.headers.get("User-Agent", "")
+            headers = ws.request.headers
         elif hasattr(ws, "request_headers"):
-            ua = ws.request_headers.get("User-Agent", "")
+            headers = ws.request_headers
         else:
-            ua = ""
+            headers = {}
+        # Prefer X-Forwarded-For (set by nginx/Caddy), fall back to direct IP
+        forwarded = headers.get("X-Forwarded-For", "")
+        ip = forwarded.split(",")[0].strip() if forwarded else raw_ip
+        ua = headers.get("User-Agent", "")
         browser, os_info = self._parse_user_agent(ua)
 
         # IP whitelist check
