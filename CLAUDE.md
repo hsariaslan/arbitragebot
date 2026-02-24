@@ -352,7 +352,7 @@ React/TypeScript SPA served by the Python backend via WebSocket.
 
 - **Dashboard** — Real-time overview: portfolio P&L, trade/transfer stats, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`), balance table, price grid, recent trades/transfers, rotation log
 - **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist
-- **Settings** — Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist
+- **Settings** — Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: "Restart Bot" button clears saved state and starts fresh with configured capital.
 - **Logs** — Unified log viewer with two sub-tabs:
   - **Bot Logs**: Real-time terminal-style log viewer (font-mono, auto-scroll). Filters: level (INFO/WARNING/ERROR), component (Monitor/Optimizer/Balance/exchanges/Dashboard/Auth/Email/Settings), text search. Export to `.log` file.
   - **Auth Logs**: Authentication event log (login success/failure, blocked IPs, reconnections, IP denials). Filterable by event type with search by IP/username/browser/OS. Export to `.csv` file.
@@ -383,6 +383,25 @@ Full authentication system for the WebSocket dashboard:
 - **DashboardLogHandler**: Custom `logging.Handler` in `dashboard_server.py`. Captures entries in-memory (`deque` for live broadcast, `list` for session export). Parses `[Component]` prefix from log messages.
 - **Disk export**: `_read_bot_logs_from_disk()` reads rotated + current log files for cross-day export ranges. `_read_auth_logs_from_disk()` reads JSONL files. Both use `asyncio.to_thread()` for non-blocking I/O.
 
+### State Persistence
+
+Session state survives restarts (including deploys via `systemctl restart`). `StateManager` in `state_manager.py` coordinates save/load.
+
+**What's persisted:**
+- **BalanceTracker**: USDT/crypto balances, transfers, fees, initialization state
+- **ArbitrageMonitor**: Trade history, config snapshots, tick count, session statistics
+- **SymbolOptimizer**: Active symbols, rotations, historical stats, discovery state, dominant pairs
+
+**How it works:**
+- Each component implements `to_state_dict()` / `from_state_dict()` for JSON serialization
+- Atomic writes: temp file + `os.replace()` to prevent corruption on crash
+- Backup: `.bak` file kept as fallback if primary is corrupt
+- Periodic saves every 60s + save on shutdown (SIGINT/SIGTERM)
+- State stored in `state/session.json` (gitignored)
+- `run()` methods guard timestamps (`_start_time`, `_discovery_start`) to avoid overwriting restored values
+
+**Restart button:** Settings → Danger Zone → "Restart Bot" clears saved state and restarts the process via `os.execv()`. Starts fresh with configured capital. Works both locally and under systemd.
+
 ### XLSX Export
 
 Click "Export XLSX" on the Rankings page. 15 sheets: Summary, Rolling Rankings, Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange (Rolling/Historical), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History, Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations.
@@ -401,9 +420,10 @@ Click "Export XLSX" on the Rankings page. 15 sheets: Summary, Rolling Rankings, 
 | `dashboard/src/components/ExportLogsModal.tsx` | Reusable export modal with time presets, custom UTC picker, filter toggle |
 | `dashboard/src/components/SymbolRankings.tsx` | Main page ranking card |
 | `dashboard/src/components/RankingPage.tsx` | Full ranking analysis page |
-| `dashboard/src/components/SettingsPage.tsx` | Settings form with adaptive mode toggle + IP whitelist |
+| `dashboard/src/components/SettingsPage.tsx` | Settings form with adaptive mode toggle, IP whitelist, restart button |
 | `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 15 sheets |
-| `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings, log export from disk |
+| `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings, log export from disk, restart handler |
+| `state_manager.py` | Session state persistence: atomic save/load, periodic saves, clear for fresh restart |
 | `email_notifier.py` | Gmail SMTP email notifications (login alerts, IP block alerts) |
 
 ## Tools
