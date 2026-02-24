@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useWebSocket } from './hooks/useWebSocket';
 import type { Settings } from './types';
 import Header from './components/Header';
@@ -12,16 +12,28 @@ import RotationLog from './components/RotationLog';
 import RankingPage from './components/RankingPage';
 import SettingsPage from './components/SettingsPage';
 import LoginPage from './components/LoginPage';
-import AuthLogPage from './components/AuthLogPage';
+import LogsPage from './components/LogsPage';
 
 export default function App() {
   const {
     state, connected, authenticated, authError,
     attemptsRemaining, blocked, retryAfter, authLoading,
     captchaRequired, captchaSiteKey, ipDenied,
-    login, logout, send,
+    login, logout, send, sendWithCallback,
   } = useWebSocket();
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'ranking' | 'settings' | 'auth_log'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'ranking' | 'settings' | 'logs'>('dashboard');
+  const [showConnectingText, setShowConnectingText] = useState(false);
+
+  // Delay showing "Connecting..." text so IP-denied users see only a spinner
+  // before the denied page appears (auth_denied arrives within ~200ms)
+  useEffect(() => {
+    if (!connected && !blocked && !ipDenied) {
+      const timer = setTimeout(() => setShowConnectingText(true), 1500);
+      return () => clearTimeout(timer);
+    } else {
+      setShowConnectingText(false);
+    }
+  }, [connected, blocked, ipDenied]);
 
   // IP denied — dead end, no login, no reconnect
   if (ipDenied) {
@@ -38,8 +50,12 @@ export default function App() {
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
           <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-slate-400 text-lg">Connecting to CoirnaBot...</p>
-          <p className="text-slate-500 text-sm mt-2">Make sure <code className="text-slate-400">python run.py</code> is running</p>
+          {showConnectingText && (
+            <>
+              <p className="text-slate-400 text-lg">Connecting to CoirnaBot...</p>
+              <p className="text-slate-500 text-sm mt-2">Make sure <code className="text-slate-400">python run.py</code> is running</p>
+            </>
+          )}
         </div>
       </div>
     );
@@ -165,7 +181,12 @@ export default function App() {
             onSendMessage={send}
           />
         ) : (
-          <AuthLogPage authLogs={state.auth_logs ?? []} />
+          <LogsPage
+            botLogs={state.bot_logs ?? []}
+            authLogs={state.auth_logs ?? []}
+            sendWithCallback={sendWithCallback}
+            uptimeSeconds={state.uptime_seconds}
+          />
         )}
       </main>
     </div>

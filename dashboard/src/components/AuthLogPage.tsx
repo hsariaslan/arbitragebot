@@ -1,8 +1,11 @@
 import { useState, useMemo } from 'react';
 import type { AuthLogEntry } from '../types';
+import ExportLogsModal from './ExportLogsModal';
 
 interface AuthLogPageProps {
   authLogs: AuthLogEntry[];
+  sendWithCallback: (msg: object, callback: (data: any) => void) => void;
+  uptimeSeconds: number;
 }
 
 const EVENT_STYLES: Record<string, { bg: string; text: string; label: string }> = {
@@ -36,26 +39,81 @@ function formatTimestamp(ts: number): string {
   });
 }
 
-export default function AuthLogPage({ authLogs }: AuthLogPageProps) {
+function formatFullTimestampUTC(ts: number): string {
+  const d = new Date(ts * 1000);
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+
+function applyAuthFilters(logs: AuthLogEntry[], filter: string, search: string): AuthLogEntry[] {
+  let result = logs;
+  if (filter !== 'all') {
+    result = result.filter(l => l.event === filter);
+  }
+  if (search.trim()) {
+    const q = search.trim().toLowerCase();
+    result = result.filter(l =>
+      l.ip.toLowerCase().includes(q) ||
+      l.username.toLowerCase().includes(q) ||
+      l.browser.toLowerCase().includes(q) ||
+      l.os.toLowerCase().includes(q)
+    );
+  }
+  return result;
+}
+
+function downloadFile(filename: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function escapeCSV(value: string): string {
+  if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+export default function AuthLogPage({ authLogs, sendWithCallback, uptimeSeconds }: AuthLogPageProps) {
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
+  const [showExportModal, setShowExportModal] = useState(false);
 
   const filtered = useMemo(() => {
-    let logs = [...authLogs].reverse(); // newest first
-    if (filter !== 'all') {
-      logs = logs.filter(l => l.event === filter);
-    }
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      logs = logs.filter(l =>
-        l.ip.toLowerCase().includes(q) ||
-        l.username.toLowerCase().includes(q) ||
-        l.browser.toLowerCase().includes(q) ||
-        l.os.toLowerCase().includes(q)
-      );
-    }
-    return logs;
+    const reversed = [...authLogs].reverse(); // newest first
+    return applyAuthFilters(reversed, filter, search);
   }, [authLogs, filter, search]);
+
+  const hasActiveFilters = filter !== 'all' || search.trim() !== '';
+  const sessionStart = Math.floor(Date.now() / 1000) - uptimeSeconds;
+
+  const handleExport = (start: number, end: number, useFilters: boolean) => {
+    sendWithCallback({ type: 'export_auth_logs', start, end }, (data: any) => {
+      let entries: AuthLogEntry[] = data.logs || [];
+      if (useFilters) {
+        entries = applyAuthFilters(entries, filter, search);
+      }
+      const header = 'Time (UTC),Event,IP,Username,Browser,OS,Details';
+      const rows = entries.map(e =>
+        [
+          formatFullTimestampUTC(e.timestamp),
+          e.event,
+          e.ip,
+          escapeCSV(e.username || ''),
+          escapeCSV(e.browser || ''),
+          escapeCSV(e.os || ''),
+          escapeCSV(e.details || ''),
+        ].join(',')
+      );
+      const ts = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+      downloadFile(`auth-logs-${ts}.csv`, [header, ...rows].join('\n'), 'text/csv');
+    });
+  };
 
   return (
     <div className="space-y-4">
@@ -82,6 +140,12 @@ export default function AuthLogPage({ authLogs }: AuthLogPageProps) {
           placeholder="Search by IP, username, browser..."
           className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500 placeholder-slate-500 w-64"
         />
+        <button
+          onClick={() => setShowExportModal(true)}
+          className="px-3 py-1.5 rounded-lg text-sm font-medium bg-slate-700 text-slate-300 hover:bg-slate-600 transition-colors"
+        >
+          Export Logs
+        </button>
         <span className="text-xs text-slate-500 ml-auto">{filtered.length} shown</span>
       </div>
 
@@ -135,6 +199,14 @@ export default function AuthLogPage({ authLogs }: AuthLogPageProps) {
           </table>
         </div>
       </div>
+
+      <ExportLogsModal
+        open={showExportModal}
+        onClose={() => setShowExportModal(false)}
+        onExport={handleExport}
+        sessionStart={sessionStart}
+        hasActiveFilters={hasActiveFilters}
+      />
     </div>
   );
 }

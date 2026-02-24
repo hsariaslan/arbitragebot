@@ -5,8 +5,8 @@ interface HeaderProps {
   uptimeSeconds: number;
   connectedExchanges: number;
   totalExchanges: number;
-  activeTab: 'dashboard' | 'ranking' | 'settings' | 'auth_log';
-  onTabChange: (tab: 'dashboard' | 'ranking' | 'settings' | 'auth_log') => void;
+  activeTab: 'dashboard' | 'ranking' | 'settings' | 'logs';
+  onTabChange: (tab: 'dashboard' | 'ranking' | 'settings' | 'logs') => void;
   portfolio: Portfolio | null;
   simulation: Simulation | null;
   profitStats: ProfitStats | null;
@@ -67,14 +67,14 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
               Settings
             </button>
             <button
-              onClick={() => onTabChange('auth_log')}
+              onClick={() => onTabChange('logs')}
               className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                activeTab === 'auth_log'
+                activeTab === 'logs'
                   ? 'bg-slate-700 text-white'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
               }`}
             >
-              Auth Log
+              Logs
             </button>
           </nav>
         </div>

@@ -261,6 +261,13 @@ export interface AuthLogEntry {
   details: string;
 }
 
+export interface BotLogEntry {
+  timestamp: number;
+  level: string;
+  component: string;
+  message: string;
+}
+
 export interface DashboardState {
   timestamp: number;
   uptime_seconds: number;
@@ -282,4 +289,5 @@ export interface DashboardState {
   all_config_history: ConfigSnapshot[];
   profit_stats: ProfitStats;
   auth_logs?: AuthLogEntry[];
+  bot_logs?: BotLogEntry[];
 }

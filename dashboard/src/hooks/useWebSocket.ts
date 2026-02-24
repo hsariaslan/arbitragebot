@@ -34,6 +34,7 @@ export function useWebSocket() {
   const reconnectRef = useRef<ReturnType<typeof setTimeout>>();
   const blockedRef = useRef(false);
   const pendingCredentials = useRef<{ username: string; password: string; remember: boolean; captchaToken?: string } | null>(null);
+  const exportCallbackRef = useRef<((data: any) => void) | null>(null);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -141,6 +142,13 @@ export function useWebSocket() {
           return;
         }
 
+        // Export result callbacks
+        if (data.type === 'export_bot_logs_result' || data.type === 'export_auth_logs_result') {
+          exportCallbackRef.current?.(data);
+          exportCallbackRef.current = null;
+          return;
+        }
+
         // Normal state broadcast
         if (data.timestamp && data.portfolio) {
           setState(data as DashboardState);
@@ -204,6 +212,13 @@ export function useWebSocket() {
     }
   }, []);
 
+  const sendWithCallback = useCallback((msg: object, callback: (data: any) => void) => {
+    exportCallbackRef.current = callback;
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(msg));
+    }
+  }, []);
+
   useEffect(() => {
     connect();
     return () => {
@@ -216,6 +231,6 @@ export function useWebSocket() {
     state, connected, authenticated, authError,
     attemptsRemaining, blocked, retryAfter, authLoading,
     captchaRequired, captchaSiteKey, ipDenied,
-    login, logout, send,
+    login, logout, send, sendWithCallback,
   };
 }
