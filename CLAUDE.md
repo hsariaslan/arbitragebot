@@ -350,8 +350,22 @@ React/TypeScript SPA served by the Python backend via WebSocket.
 ### Pages
 
 - **Dashboard** — Real-time overview: portfolio P&L, trade/transfer stats, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`), balance table, price grid, recent trades/transfers, rotation log
-- **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel (All → Candidates → Watchlisted → Confirmed → Activated → Strong → Very Strong), exchange rankings, pair analysis, trend analysis, watchlist
-- **Settings** — Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits
+- **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist
+- **Settings** — Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist
+- **Auth Log** — Authentication event log: login success/failure, blocked IPs, reconnections, IP denials. Filterable by event type with search by IP/username/browser/OS
+
+### Dashboard Authentication
+
+Full authentication system for the WebSocket dashboard:
+
+- **Login**: Username/password from `.env` (`DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`)
+- **Sessions**: Token-based with remember-me support (localStorage/sessionStorage)
+- **Rate limiting**: 10 attempts per IP, 1-hour block after exhaustion
+- **IP whitelist**: Optional, configurable from Settings page
+- **reCAPTCHA v2**: "I'm not a robot" checkbox appears after 3 failed attempts (requires Google reCAPTCHA v2 keys in `.env`)
+- **Email notifications**: Gmail SMTP alerts on successful login and IP block (requires Gmail App Password in `.env`)
+- **Auth log**: All auth events stored in memory (500 max), viewable in Auth Log tab
+- **Dedicated auth logger**: Writes to `logs/auth/auth_YYYY-MM-DD.log`
 
 ### XLSX Export
 
@@ -362,13 +376,16 @@ Click "Export XLSX" on the Rankings page. 15 sheets: Summary, Rolling Rankings, 
 | File | Purpose |
 |------|---------|
 | `dashboard/src/App.tsx` | Main layout, tab routing, WebSocket state |
-| `dashboard/src/types.ts` | All TypeScript interfaces (Trade, SymbolRanking, AdaptiveConfig, ConfigSnapshot, etc.) |
-| `dashboard/src/hooks/useWebSocket.ts` | WebSocket connection and state management |
+| `dashboard/src/types.ts` | All TypeScript interfaces (Trade, SymbolRanking, AdaptiveConfig, ConfigSnapshot, AuthLogEntry, etc.) |
+| `dashboard/src/hooks/useWebSocket.ts` | WebSocket connection, auth flow, state management |
+| `dashboard/src/components/LoginPage.tsx` | Login form with reCAPTCHA integration |
+| `dashboard/src/components/AuthLogPage.tsx` | Auth event log with filtering/search |
 | `dashboard/src/components/SymbolRankings.tsx` | Main page ranking card |
 | `dashboard/src/components/RankingPage.tsx` | Full ranking analysis page |
-| `dashboard/src/components/SettingsPage.tsx` | Settings form with adaptive mode toggle |
+| `dashboard/src/components/SettingsPage.tsx` | Settings form with adaptive mode toggle + IP whitelist |
 | `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 15 sheets |
-| `dashboard_server.py` | Python WebSocket server, builds state, handles settings |
+| `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings |
+| `email_notifier.py` | Gmail SMTP email notifications (login alerts, IP block alerts) |
 
 ## Tools
 
