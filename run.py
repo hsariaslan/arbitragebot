@@ -42,6 +42,7 @@ from fetchers.binance import BinanceFetcher
 from fetchers.bitget import BitgetFetcher
 from fetchers.bybit import BybitFetcher
 from fetchers.kucoin import KuCoinFetcher
+from fetchers.mexc import MEXCFetcher
 from fetchers.okx import OKXFetcher
 from monitor import ArbitrageMonitor
 from optimizer import SymbolOptimizer
@@ -94,6 +95,7 @@ async def main() -> None:
         OKXFetcher(),
         BybitFetcher(),
         BitgetFetcher(),
+        MEXCFetcher(),
         KuCoinFetcher(),
     ]
 
@@ -185,12 +187,26 @@ async def main() -> None:
         optimizer=optimizer, log_handler=log_handler, state_manager=state_mgr,
     )
 
+    # Demo/testnet portfolio comparison (optional — needs API keys in .env)
+    from demo_fetcher import DemoPortfolioFetcher
+    demo_fetcher = DemoPortfolioFetcher(
+        balance_tracker=balance, fetchers=fetchers, poll_interval=15.0,
+    )
+    if saved and "demo_fetcher" in saved:
+        demo_fetcher.from_state_dict(saved["demo_fetcher"])
+    if demo_fetcher.enabled:
+        dashboard.set_demo_fetcher(demo_fetcher)
+    else:
+        logger.info("[DemoCompare] Disabled (no API keys configured in .env)")
+
     loop = asyncio.get_running_loop()
 
     def shutdown_handler():
         logger.info("Shutdown signal received, saving state...")
-        state_mgr.save(balance, monitor, optimizer)
+        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None)
         state_mgr.stop()
+        if demo_fetcher.enabled:
+            demo_fetcher.stop()
         for fetcher in fetchers:
             fetcher.stop()
         monitor.stop()
@@ -204,7 +220,11 @@ async def main() -> None:
     tasks.append(asyncio.create_task(monitor.run()))
     tasks.append(asyncio.create_task(optimizer.run()))
     tasks.append(asyncio.create_task(dashboard.run()))
-    tasks.append(asyncio.create_task(state_mgr.periodic_save(balance, monitor, optimizer)))
+    tasks.append(asyncio.create_task(state_mgr.periodic_save(
+        balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None
+    )))
+    if demo_fetcher.enabled:
+        tasks.append(asyncio.create_task(demo_fetcher.run()))
 
     try:
         await asyncio.gather(*tasks)

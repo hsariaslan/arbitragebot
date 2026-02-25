@@ -105,6 +105,7 @@ class DashboardServer:
         self._optimizer = optimizer
         self._log_handler = log_handler
         self._state_manager = state_manager
+        self._demo_fetcher: "DemoPortfolioFetcher | None" = None
         if optimizer:
             optimizer.set_dashboard(self)
         self._running = False
@@ -470,6 +471,10 @@ class DashboardServer:
 
     def stop(self) -> None:
         self._running = False
+
+    def set_demo_fetcher(self, demo_fetcher: "DemoPortfolioFetcher") -> None:
+        """Attach the demo portfolio fetcher for comparison data."""
+        self._demo_fetcher = demo_fetcher
 
     async def _check_origin(self, connection: Any, request: Any) -> None:
         """Validate Origin header for CSRF protection (process_request callback)."""
@@ -1061,7 +1066,13 @@ class DashboardServer:
         now = time.time()
         active_exchanges = self._balance._exchanges
         active_symbols = self._balance._symbols
-        prices = self._get_prices(active_exchanges, active_symbols)
+        # Also fetch prices for any residual crypto from demoted symbols
+        all_held_symbols = set(active_symbols)
+        for ex in active_exchanges:
+            for sym, qty in self._balance.crypto[ex].items():
+                if qty > 0:
+                    all_held_symbols.add(sym)
+        prices = self._get_prices(active_exchanges, list(all_held_symbols))
 
         # Connection status
         active_set = set(active_exchanges)
@@ -1084,18 +1095,26 @@ class DashboardServer:
         if self._optimizer:
             self._optimizer.update_profit_state(net_profit, session_hourly_rate)
 
-        # Balances per exchange
+        # Balances per exchange (include ALL held crypto, not just active symbols)
         balances: dict[str, Any] = {}
         for ex in active_exchanges:
             usdt = self._balance.usdt[ex]
             crypto_data: dict[str, Any] = {}
             ex_total = usdt
+            # Active symbols
             for sym in active_symbols:
                 qty = self._balance.crypto[ex].get(sym, 0.0)
                 p = prices.get(sym, 0.0)
                 val = qty * p
                 ex_total += val
                 crypto_data[sym] = {"qty": round(qty, 6), "value": round(val, 2), "price": round(p, 6)}
+            # Residual crypto from demoted symbols
+            for sym, qty in self._balance.crypto[ex].items():
+                if qty > 0 and sym not in crypto_data:
+                    p = prices.get(sym, 0.0)
+                    val = qty * p
+                    ex_total += val
+                    crypto_data[sym] = {"qty": round(qty, 6), "value": round(val, 2), "price": round(p, 6)}
             balances[ex] = {
                 "usdt": round(usdt, 2),
                 "crypto": crypto_data,
@@ -1247,6 +1266,115 @@ class DashboardServer:
             "profit_stats": self._monitor.get_net_profit_stats(),
             "auth_logs": self._auth_events,
             "bot_logs": self._log_handler.get_recent() if self._log_handler else [],
+            "demo_comparison": self._build_demo_state() if self._demo_fetcher and self._demo_fetcher.enabled else None,
+        }
+
+    def _build_demo_state(self) -> dict[str, Any]:
+        """Build demo comparison state for dashboard broadcast."""
+        df = self._demo_fetcher
+        if not df:
+            return {}
+
+        # Only include symbols the sim actually holds (qty > 0).
+        # Active symbols with 0 holdings have pre-loaded testnet crypto, not ours.
+        sim_held = set()
+        for ex in self._balance._exchanges:
+            for sym, qty in self._balance.crypto[ex].items():
+                if qty > 0:
+                    sim_held.add(sym)
+        prices = self._get_prices(self._balance._exchanges, list(sim_held))
+
+        comparisons: dict[str, Any] = {}
+        for ex_name, demo_bal in df.latest_balances.items():
+            # Simulation side
+            sim_usdt = self._balance.usdt.get(ex_name, 0.0)
+            sim_crypto: dict[str, Any] = {}
+            sim_total = sim_usdt
+            for sym, qty in self._balance.crypto.get(ex_name, {}).items():
+                if qty > 0:
+                    p = prices.get(sym, 0.0)
+                    val = qty * p
+                    sim_total += val
+                    sim_crypto[sym] = {"qty": round(qty, 6), "value": round(val, 2)}
+
+            # Demo side — use baseline-adjusted values so pre-funded
+            # testnet amounts are subtracted. adjusted = sim + (demo - baseline).
+            # When no trades: adjusted = sim (delta=0). Phase 2: shows real diffs.
+            baseline = df.baselines.get(ex_name)
+            baseline_usdt = baseline.usdt if baseline else demo_bal.usdt
+            demo_usdt_delta = demo_bal.usdt - baseline_usdt
+            adjusted_demo_usdt = sim_usdt + demo_usdt_delta
+
+            demo_crypto: dict[str, Any] = {}
+            demo_total = adjusted_demo_usdt
+            for sym, qty in demo_bal.crypto.items():
+                if qty > 0 and sym in sim_held:
+                    baseline_qty = baseline.crypto.get(sym, 0.0) if baseline else 0.0
+                    qty_delta = qty - baseline_qty
+                    p = prices.get(sym, 0.0)
+                    # Show sim_qty + delta as the adjusted demo qty
+                    sim_qty = self._balance.crypto.get(ex_name, {}).get(sym, 0.0)
+                    adjusted_qty = sim_qty + qty_delta
+                    val = adjusted_qty * p
+                    demo_total += val
+                    demo_crypto[sym] = {"qty": round(adjusted_qty, 6), "value": round(val, 2)}
+
+            diff_usdt = sim_usdt - adjusted_demo_usdt
+            diff_total = sim_total - demo_total
+            diff_total_pct = diff_total / max(abs(demo_total), 1) * 100
+
+            comparisons[ex_name] = {
+                "sim": {
+                    "usdt": round(sim_usdt, 2),
+                    "crypto": sim_crypto,
+                    "total": round(sim_total, 2),
+                },
+                "demo": {
+                    "usdt": round(adjusted_demo_usdt, 2),
+                    "crypto": demo_crypto,
+                    "total": round(demo_total, 2),
+                    "error": demo_bal.error,
+                    "fetched_at": demo_bal.fetched_at,
+                },
+                "diff_usdt": round(diff_usdt, 2),
+                "diff_total": round(diff_total, 2),
+                "diff_total_pct": round(diff_total_pct, 2),
+            }
+
+        # Demo portfolio total = sim portfolio total + sum(baseline deltas).
+        # Baseline deltas measure the net USD change from actual demo trades
+        # (current demo balance - first-fetch baseline, at current prices).
+        # When no demo trades have executed, deltas are ~0 and demo ≈ sim.
+        # When Phase 2 starts, deltas capture real P&L vs simulated P&L.
+        all_prices = self._get_prices(self._balance._exchanges, list(set(self._balance._symbols) | sim_held))
+        if self._balance.initialized:
+            sim_total = self._balance.get_portfolio_value(all_prices)
+        else:
+            sim_total = self._balance._initial_investment
+        total_delta = df.get_total_delta(all_prices)
+        demo_portfolio_total = sim_total + total_delta
+
+        return {
+            "enabled": True,
+            "exchanges": comparisons,
+            "demo_portfolio_total": round(demo_portfolio_total, 2),
+            "recent_discrepancies": [
+                {
+                    "timestamp": d.timestamp,
+                    "exchange": d.exchange,
+                    "type": d.discrepancy_type,
+                    "symbol": d.symbol,
+                    "sim_value": round(d.sim_value, 4),
+                    "demo_value": round(d.demo_value, 4),
+                    "diff_abs": round(d.diff_abs, 4),
+                    "diff_pct": round(d.diff_pct, 2),
+                    "root_cause": d.root_cause,
+                }
+                for d in df.recent_discrepancies[-50:]
+            ],
+            "total_discrepancies": df.total_discrepancy_count,
+            "last_fetch_time": df.last_fetch_time,
+            "configured_exchanges": [ex for ex, ok in df._configured.items() if ok],
         }
 
     def _build_adaptive_config(self) -> dict[str, Any]:
