@@ -30,12 +30,13 @@ function PnlText({ value, prefix = '$' }: { value: number; prefix?: string }) {
 
 export default function Header({ connected, uptimeSeconds, connectedExchanges, totalExchanges, activeTab, onTabChange, portfolio, simulation, profitStats, onLogout }: HeaderProps) {
   return (
+    <>
     <header className="bg-slate-900 border-b border-slate-700">
       {/* Top row: title, tabs, connection */}
-      <div className="flex items-center justify-between px-6 py-2">
-        <div className="flex items-center gap-6">
-          <h1 className="text-xl font-bold text-white tracking-tight">CoirnaBot</h1>
-          <nav className="flex gap-1">
+      <div className="flex items-center justify-between px-3 sm:px-6 py-2">
+        <div className="flex items-center gap-3 sm:gap-6">
+          <h1 className="text-lg sm:text-xl font-bold text-white tracking-tight">CoirnaBot</h1>
+          <nav className="hidden md:flex gap-1">
             <button
               onClick={() => onTabChange('dashboard')}
               className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
@@ -78,11 +79,11 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
             </button>
           </nav>
         </div>
-        <div className="flex items-center gap-6 text-sm">
-          <span className="text-slate-400">
+        <div className="flex items-center gap-3 sm:gap-6 text-sm">
+          <span className="text-slate-400 hidden sm:inline">
             Exchanges: <span className="text-white font-medium">{connectedExchanges}/{totalExchanges}</span>
           </span>
-          <span className="text-slate-400">
+          <span className="text-slate-400 hidden sm:inline">
             Uptime: <span className="text-white font-medium">{formatUptime(uptimeSeconds)}</span>
           </span>
           <div className="flex items-center gap-2">
@@ -103,7 +104,7 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
 
       {/* Stats bar */}
       {portfolio && simulation && profitStats && (
-        <div className="flex items-center gap-6 px-6 py-1.5 bg-slate-800/50 border-t border-slate-700/50 text-xs">
+        <div className="hidden md:flex items-center gap-6 px-6 py-1.5 bg-slate-800/50 border-t border-slate-700/50 text-xs">
           <div className="flex items-center gap-1.5">
             <span className="text-slate-500">Portfolio:</span>
             <span className="text-white font-mono font-medium">
@@ -156,5 +157,23 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
         </div>
       )}
     </header>
+
+    {/* Mobile bottom tab bar */}
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900 border-t border-slate-700 z-50 flex justify-around px-2 py-2">
+      {(['dashboard', 'ranking', 'settings', 'logs'] as const).map(tab => (
+        <button
+          key={tab}
+          onClick={() => onTabChange(tab)}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+            activeTab === tab
+              ? 'bg-slate-700 text-white'
+              : 'text-slate-500'
+          }`}
+        >
+          {tab === 'dashboard' ? 'Home' : tab === 'ranking' ? 'Ranks' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+        </button>
+      ))}
+    </nav>
+    </>
   );
 }

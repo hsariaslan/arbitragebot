@@ -117,9 +117,9 @@ export default function App() {
         onLogout={logout}
       />
 
-      <main className="flex-1 p-6 max-w-[1600px] mx-auto w-full">
+      <main className="flex-1 p-3 sm:p-6 pb-20 md:pb-6 max-w-[1600px] mx-auto w-full">
         {activeTab === 'dashboard' ? (
-          <div className="space-y-5">
+          <div className="space-y-3 sm:space-y-5">
             {state.optimizer?.discovery_mode && (
               <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 text-center">
                 <p className="text-amber-300 font-medium">
@@ -134,7 +134,7 @@ export default function App() {
             <StatsCards portfolio={state.portfolio} simulation={state.simulation} profitStats={state.profit_stats ?? { net_profit: 0, hourly_net: 0, session_hourly_rate: 0, trading_pnl: 0, transfer_fees: 0, is_profitable: false }} demoComparison={state.demo_comparison} uptimeSeconds={state.uptime_seconds} />
 
             {state.optimizer?.rankings?.length > 0 && (
-              <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-3 sm:gap-5">
                 <div className="xl:col-span-2">
                   <SymbolRankings
                     rankings={state.optimizer.rankings.slice(0, 20)}
@@ -147,7 +147,7 @@ export default function App() {
               </div>
             )}
 
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 sm:gap-5">
               <BalanceTable balances={state.balances} symbols={symbols} />
               <PriceGrid prices={state.prices} />
             </div>
@@ -156,12 +156,12 @@ export default function App() {
               <DemoComparison data={state.demo_comparison} />
             )}
 
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 sm:gap-5">
               <TradesTable trades={state.recent_trades} totalPnl={state.portfolio.trading_pnl} />
               <TransfersTable transfers={state.recent_transfers} totalFees={state.portfolio.transfer_fees} />
             </div>
 
-            <div className="text-center text-xs text-slate-600 py-2">
+            <div className="text-center text-[10px] sm:text-xs text-slate-600 py-2">
               Portfolio: ${state.portfolio.initial_investment.toFixed(0)} initial
               {' | '}Trading: {state.portfolio.trading_pnl >= 0 ? '+' : ''}{state.portfolio.trading_pnl.toFixed(4)}
               {' | '}Fees: -{state.portfolio.transfer_fees.toFixed(4)}
