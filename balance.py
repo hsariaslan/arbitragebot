@@ -44,6 +44,23 @@ class Transfer:
     fee_usd: float
 
 
+@dataclass
+class InTransitFund:
+    """D-17: Tracks funds in transit between exchanges.
+
+    In demo mode, external transfers are not instant. Funds are deducted
+    from source immediately but credited to destination only after the
+    estimated network transit time.
+    """
+
+    amount: float           # USDT or crypto quantity
+    asset: str              # "USDT" or crypto symbol (e.g. "BTCUSDT")
+    sent_at: float          # time.time() when transfer initiated
+    eta: float              # estimated time of arrival (sent_at + network_delay)
+    from_exchange: str
+    to_exchange: str
+
+
 class BalanceTracker:
     """
     Tracks simulated USDT and crypto balances across exchanges.
@@ -65,9 +82,11 @@ class BalanceTracker:
         rebalance_cooldown: float = 30.0,
         trade_amount: float = 50.0,
         adaptive_mode: bool = True,
+        exchange_info: "ExchangeInfoManager | None" = None,
     ) -> None:
         self._exchanges = exchanges or ACTIVE_EXCHANGES
         self._symbols = symbols or ACTIVE_SYMBOLS
+        self._exchange_info = exchange_info
         self._rebalance_amount = rebalance_amount or REBALANCE_AMOUNT
         self._rebalance_cooldown = rebalance_cooldown
         self._trade_amount = trade_amount
@@ -116,6 +135,13 @@ class BalanceTracker:
 
         # Rebalance cooldown tracking: "exchange:direction" → last rebalance timestamp
         self._last_rebalance: dict[str, float] = {}
+
+        # D-18: Track last trade time per exchange (for demo sync grace period)
+        self.last_trade_time: dict[str, float] = {}
+
+        # D-17: In-transit funds (demo mode only)
+        self._in_transit: list[InTransitFund] = []
+        self._execution_mode: str = "simulation"
 
         # Initialization state
         self._initialized: bool = False
@@ -181,6 +207,52 @@ class BalanceTracker:
         logger.info(
             f"[Balance] Initialized (${self._initial_investment:.0f} total): "
             + " | ".join(parts)
+        )
+
+    # ── D-17: In-transit fund tracking ──────────────────────────────────
+
+    # Estimated network transit times in seconds per network type
+    _NETWORK_DELAYS: dict[str, float] = {
+        "BEP20": 30.0,       # BSC: ~3s block + confirmations
+        "Arbitrum": 15.0,    # L2: fast finality
+        "Polygon": 30.0,     # PoS: moderate
+        "Solana": 10.0,      # Fast but occasional outages
+        "TRC20": 60.0,       # TRON: slower confirmations
+        "default": 60.0,     # Conservative default
+    }
+
+    def deliver_in_transit(self) -> int:
+        """Credit arrived in-transit funds to destination balances.
+
+        Called periodically (e.g., each tick). Returns number of deliveries.
+        """
+        now = time.time()
+        delivered = 0
+        still_in_transit = []
+
+        for fund in self._in_transit:
+            if now >= fund.eta:
+                # Deliver to destination
+                if fund.asset == "USDT":
+                    self.usdt[fund.to_exchange] += fund.amount
+                else:
+                    self.crypto[fund.to_exchange][fund.asset] += fund.amount
+                delivered += 1
+                logger.debug(
+                    f"[Balance] In-transit delivered: {fund.amount:.4f} {fund.asset} "
+                    f"→ {fund.to_exchange} (transit {now - fund.sent_at:.0f}s)"
+                )
+            else:
+                still_in_transit.append(fund)
+
+        self._in_transit = still_in_transit
+        return delivered
+
+    def in_transit_total(self, exchange: str, asset: str = "USDT") -> float:
+        """Get total amount in transit to an exchange for a given asset."""
+        return sum(
+            f.amount for f in self._in_transit
+            if f.to_exchange == exchange and f.asset == asset
         )
 
     def can_execute(
@@ -335,7 +407,24 @@ class BalanceTracker:
         if external_source and external_cost <= internal_cost:
             amt = external_rebal
             self.usdt[external_source] -= amt + external_cost
-            self.usdt[exchange] += amt
+
+            if self._execution_mode == "demo":
+                # D-17: In demo mode, funds transit through network
+                self._in_transit.append(InTransitFund(
+                    amount=amt,
+                    asset="USDT",
+                    sent_at=now,
+                    eta=now + self._NETWORK_DELAYS.get("BEP20", 60.0),
+                    from_exchange=external_source,
+                    to_exchange=exchange,
+                ))
+                logger.debug(
+                    f"[Balance] USDT in-transit: ${amt:.2f} {external_source}→{exchange}"
+                )
+            else:
+                # Simulation: instant credit
+                self.usdt[exchange] += amt
+
             self.total_transfer_fees += external_cost
 
             transfer = Transfer(
@@ -571,23 +660,123 @@ class BalanceTracker:
         sell_price: float,
         buy_fee: float,
         sell_fee: float,
-    ) -> None:
+        buy_fee_model: str = "received",
+        sell_fee_model: str = "received",
+    ) -> dict | None:
         """
         Execute a simulated trade and update balances.
 
         buy_fee/sell_fee are decimal rates (e.g., 0.00075 for 0.075%).
+
+        fee_model controls where the fee is deducted from (D-05):
+          - "received" (default): fee deducted from received asset
+            Buy: receive less crypto. Sell: receive less USDT.
+          - "spent": fee added to spent amount
+            Buy: spend more USDT. Sell: spend more crypto.
+          - "token": fee deducted from discount token (BNB/BGB/KCS)
+            Full qty received; fee tracked separately.
+
+        When exchange_info is available, quantities are rounded DOWN to
+        the exchange's lot_size_step (D-01) and unspent USDT stays in
+        balance. Returns a dict with rounding details, or None if no
+        exchange_info.
         """
-        # Buy side: spend USDT, receive crypto (minus fee)
-        coins_bought = trade_amount / buy_price
-        coins_after_fee = coins_bought * (1.0 - buy_fee)
-        self.usdt[buy_exchange] -= trade_amount
+        from decimal import Decimal, ROUND_DOWN
+
+        info = self._exchange_info
+        adjustment = None
+
+        # Buy side: spend USDT, receive crypto
+        coins_bought_raw = trade_amount / buy_price
+
+        if buy_fee_model == "received":
+            # Fee deducted from received crypto (default sim behavior)
+            coins_after_fee_raw = coins_bought_raw * (1.0 - buy_fee)
+        elif buy_fee_model == "spent":
+            # Fee added to USDT spent, full crypto received
+            coins_after_fee_raw = coins_bought_raw
+        else:  # "token"
+            # Full qty received, fee from discount token
+            coins_after_fee_raw = coins_bought_raw
+
+        if info:
+            # Round quantity to exchange lot size (D-01)
+            coins_after_fee_dec = info.round_quantity(
+                buy_exchange, symbol, Decimal(str(coins_after_fee_raw))
+            )
+            coins_after_fee = float(coins_after_fee_dec)
+            if buy_fee_model == "received":
+                actual_buy_spend = coins_after_fee / (1.0 - buy_fee) * buy_price if coins_after_fee > 0 else 0.0
+            elif buy_fee_model == "spent":
+                actual_buy_spend = coins_after_fee * buy_price * (1.0 + buy_fee)
+            else:  # "token"
+                actual_buy_spend = coins_after_fee * buy_price
+            buy_rounding_saved = trade_amount - actual_buy_spend
+        else:
+            coins_after_fee = coins_after_fee_raw
+            if buy_fee_model == "spent":
+                actual_buy_spend = trade_amount * (1.0 + buy_fee)
+            elif buy_fee_model == "token":
+                actual_buy_spend = trade_amount
+            else:
+                actual_buy_spend = trade_amount
+            buy_rounding_saved = 0.0
+
+        self.usdt[buy_exchange] -= actual_buy_spend
         self.crypto[buy_exchange][symbol] += coins_after_fee
 
-        # Sell side: spend crypto, receive USDT (minus fee)
-        coins_to_sell = trade_amount / sell_price
-        usdt_received = trade_amount * (1.0 - sell_fee)
-        self.crypto[sell_exchange][symbol] -= coins_to_sell
+        # Sell side: spend crypto, receive USDT
+        coins_to_sell_raw = trade_amount / sell_price
+
+        if info:
+            coins_to_sell_dec = info.round_quantity(
+                sell_exchange, symbol, Decimal(str(coins_to_sell_raw))
+            )
+            coins_to_sell = float(coins_to_sell_dec)
+            if sell_fee_model == "received":
+                usdt_received = coins_to_sell * sell_price * (1.0 - sell_fee)
+            elif sell_fee_model == "spent":
+                # Fee in crypto: sell more crypto but receive full USDT value
+                usdt_received = coins_to_sell * sell_price
+            else:  # "token"
+                usdt_received = coins_to_sell * sell_price
+            sell_rounding_loss = (coins_to_sell_raw - coins_to_sell) * sell_price * (1.0 - sell_fee)
+        else:
+            coins_to_sell = coins_to_sell_raw
+            if sell_fee_model == "received":
+                usdt_received = trade_amount * (1.0 - sell_fee)
+            elif sell_fee_model == "spent":
+                # Fee in crypto: need to sell more to cover fee
+                usdt_received = trade_amount
+            else:  # "token"
+                usdt_received = trade_amount
+            sell_rounding_loss = 0.0
+
+        if sell_fee_model == "spent":
+            # Fee charged in crypto (the spent asset)
+            self.crypto[sell_exchange][symbol] -= coins_to_sell * (1.0 + sell_fee)
+        else:
+            self.crypto[sell_exchange][symbol] -= coins_to_sell
         self.usdt[sell_exchange] += usdt_received
+
+        # D-18: Record trade time for demo sync grace period
+        now = time.time()
+        self.last_trade_time[buy_exchange] = now
+        self.last_trade_time[sell_exchange] = now
+
+        if info:
+            total_rounding_impact = buy_rounding_saved - sell_rounding_loss
+            adjustment = {
+                "buy_qty_raw": coins_after_fee_raw,
+                "buy_qty_rounded": coins_after_fee,
+                "sell_qty_raw": coins_to_sell_raw,
+                "sell_qty_rounded": coins_to_sell,
+                "buy_rounding_saved_usd": buy_rounding_saved,
+                "sell_rounding_loss_usd": sell_rounding_loss,
+                "rounding_impact_usd": total_rounding_impact,
+            }
+
+        return adjustment
 
     def get_portfolio_value(self, prices: dict[str, float]) -> float:
         """Calculate total portfolio value in USD (counts ALL held crypto, not just active symbols)."""
@@ -633,6 +822,9 @@ class BalanceTracker:
             "skipped_trades": self.skipped_trades,
             "_last_rebalance": dict(self._last_rebalance),
             "_estimated_profit_per_trade": self._estimated_profit_per_trade,
+            "last_trade_time": dict(self.last_trade_time),
+            "_in_transit": [asdict(f) for f in self._in_transit],
+            "_execution_mode": self._execution_mode,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -666,3 +858,8 @@ class BalanceTracker:
         self.skipped_trades = data.get("skipped_trades", 0)
         self._last_rebalance = data.get("_last_rebalance", {})
         self._estimated_profit_per_trade = data.get("_estimated_profit_per_trade", 0.02)
+        self.last_trade_time = data.get("last_trade_time", {})
+        self._in_transit = [
+            InTransitFund(**f) for f in data.get("_in_transit", [])
+        ]
+        self._execution_mode = data.get("_execution_mode", "simulation")

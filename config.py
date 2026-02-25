@@ -130,6 +130,19 @@ EXCHANGE_TAKER_FEES: dict[str, float] = {
     "Gate.io": 0.0010,   # 0.10% (base tier, GT discount is minimal ~10%)
 }
 
+# Per-exchange fee model (D-05): where the exchange charges the taker fee
+# "received" = fee deducted from received asset (most exchanges default)
+# "spent" = fee added to spent amount
+# "token" = fee from discount token (BNB, BGB, KCS) — full qty received
+EXCHANGE_FEE_MODELS: dict[str, str] = {
+    "Binance": "token",     # BNB fee payment enabled → fee from BNB balance
+    "OKX": "received",      # Default: fee from received asset
+    "Bybit": "received",    # Default: fee from received asset
+    "Bitget": "token",      # BGB fee payment enabled → fee from BGB balance
+    "KuCoin": "token",      # KCS fee payment enabled → fee from KCS balance
+    "Gate.io": "received",  # GT discount is minimal, use default model
+}
+
 # All available exchanges and symbols (used by settings page)
 ALL_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "Bitget", "KuCoin", "Gate.io"]  # MEXC removed (geo-blocked)
 
@@ -158,6 +171,9 @@ MIN_NET_PROFIT_PCT: float = 0.02         # Min net% to execute a trade (filter m
 REBALANCE_COOLDOWN_SECONDS: float = 30   # Seconds between rebalances per exchange/direction
 REBALANCE_ROI_HORIZON: int = 1800        # Max seconds to recoup rebalance cost
 ADAPTIVE_MODE: bool = True               # Enable adaptive trade sizing and smart rebalancing
+
+# Execution mode: "simulation" (default), "demo" (testnet orders)
+EXECUTION_MODE: str = "simulation"
 
 # Balance management
 TOTAL_CAPITAL: float = 1800.0               # Total capital across all exchanges
@@ -251,7 +267,7 @@ ALLOWED_ORIGINS: list[str] = (
 # Dashboard bind host (default localhost — use 0.0.0.0 to expose directly)
 DASHBOARD_BIND_HOST: str = os.environ.get("DASHBOARD_BIND_HOST", "127.0.0.1")
 
-# Demo/testnet API keys (for portfolio comparison)
+# Demo/testnet API keys (for portfolio comparison + Phase 2 order execution)
 BINANCE_TESTNET_API_KEY: str = os.environ.get("BINANCE_TESTNET_API_KEY", "")
 BINANCE_TESTNET_API_SECRET: str = os.environ.get("BINANCE_TESTNET_API_SECRET", "")
 OKX_DEMO_API_KEY: str = os.environ.get("OKX_DEMO_API_KEY", "")
@@ -259,6 +275,16 @@ OKX_DEMO_API_SECRET: str = os.environ.get("OKX_DEMO_API_SECRET", "")
 OKX_DEMO_PASSPHRASE: str = os.environ.get("OKX_DEMO_PASSPHRASE", "")
 BYBIT_DEMO_API_KEY: str = os.environ.get("BYBIT_DEMO_API_KEY", "")
 BYBIT_DEMO_API_SECRET: str = os.environ.get("BYBIT_DEMO_API_SECRET", "")
+
+# Bitget demo API keys
+BITGET_DEMO_API_KEY: str = os.environ.get("BITGET_DEMO_API_KEY", "")
+BITGET_DEMO_API_SECRET: str = os.environ.get("BITGET_DEMO_API_SECRET", "")
+BITGET_DEMO_PASSPHRASE: str = os.environ.get("BITGET_DEMO_PASSPHRASE", "")
+
+# KuCoin sandbox API keys
+KUCOIN_SANDBOX_API_KEY: str = os.environ.get("KUCOIN_SANDBOX_API_KEY", "")
+KUCOIN_SANDBOX_API_SECRET: str = os.environ.get("KUCOIN_SANDBOX_API_SECRET", "")
+KUCOIN_SANDBOX_PASSPHRASE: str = os.environ.get("KUCOIN_SANDBOX_PASSPHRASE", "")
 
 # Reconnection settings (exponential backoff)
 RECONNECT_INITIAL_DELAY: float = 1.0
