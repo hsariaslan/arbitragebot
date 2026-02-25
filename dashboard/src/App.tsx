@@ -117,7 +117,7 @@ export default function App() {
         onLogout={logout}
       />
 
-      <main className="flex-1 p-3 sm:p-6 pb-20 md:pb-6 max-w-[1600px] mx-auto w-full">
+      <main className="flex-1 p-3 sm:p-6 pb-20 sm:pb-20 md:pb-6 max-w-[1600px] mx-auto w-full">
         {activeTab === 'dashboard' ? (
           <div className="space-y-3 sm:space-y-5">
             {state.optimizer?.discovery_mode && (
