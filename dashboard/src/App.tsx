@@ -13,6 +13,7 @@ import RankingPage from './components/RankingPage';
 import SettingsPage from './components/SettingsPage';
 import LoginPage from './components/LoginPage';
 import LogsPage from './components/LogsPage';
+import DemoComparison from './components/DemoComparison';
 
 export default function App() {
   const {
@@ -130,7 +131,7 @@ export default function App() {
               </div>
             )}
 
-            <StatsCards portfolio={state.portfolio} simulation={state.simulation} profitStats={state.profit_stats ?? { net_profit: 0, hourly_net: 0, session_hourly_rate: 0, trading_pnl: 0, transfer_fees: 0, is_profitable: false }} />
+            <StatsCards portfolio={state.portfolio} simulation={state.simulation} profitStats={state.profit_stats ?? { net_profit: 0, hourly_net: 0, session_hourly_rate: 0, trading_pnl: 0, transfer_fees: 0, is_profitable: false }} demoComparison={state.demo_comparison} uptimeSeconds={state.uptime_seconds} />
 
             {state.optimizer?.rankings?.length > 0 && (
               <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
@@ -150,6 +151,10 @@ export default function App() {
               <BalanceTable balances={state.balances} symbols={symbols} />
               <PriceGrid prices={state.prices} />
             </div>
+
+            {state.demo_comparison?.enabled && (
+              <DemoComparison data={state.demo_comparison} />
+            )}
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
               <TradesTable trades={state.recent_trades} totalPnl={state.portfolio.trading_pnl} />

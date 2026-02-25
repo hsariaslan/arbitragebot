@@ -1,9 +1,11 @@
-import type { Portfolio, Simulation, ProfitStats } from '../types';
+import type { Portfolio, Simulation, ProfitStats, DemoComparisonState } from '../types';
 
 interface StatsCardsProps {
   portfolio: Portfolio;
   simulation: Simulation;
   profitStats: ProfitStats;
+  demoComparison?: DemoComparisonState | null;
+  uptimeSeconds: number;
 }
 
 function PnlValue({ value, prefix = '$' }: { value: number; prefix?: string }) {
@@ -12,14 +14,57 @@ function PnlValue({ value, prefix = '$' }: { value: number; prefix?: string }) {
   return <span className={color}>{sign}{prefix}{value.toFixed(2)}</span>;
 }
 
-export default function StatsCards({ portfolio, simulation, profitStats }: StatsCardsProps) {
+function diffColor(pct: number): string {
+  const abs = Math.abs(pct);
+  if (abs < 1) return 'text-emerald-400';
+  if (abs < 5) return 'text-yellow-400';
+  return 'text-red-400';
+}
+
+function formatAge(timestamp: number): string {
+  const age = Math.floor((Date.now() / 1000) - timestamp);
+  if (age < 5) return 'just now';
+  if (age < 60) return `${age}s ago`;
+  if (age < 3600) return `${Math.floor(age / 60)}m ago`;
+  return `${Math.floor(age / 3600)}h ago`;
+}
+
+export default function StatsCards({ portfolio, simulation, profitStats, demoComparison, uptimeSeconds }: StatsCardsProps) {
+  const hasDemo = demoComparison?.enabled && Object.keys(demoComparison.exchanges).length > 0;
+  const demoTotal = hasDemo ? demoComparison!.demo_portfolio_total : 0;
+  const demoPnl = hasDemo ? demoTotal - portfolio.initial_investment : 0;
+  const diff = hasDemo ? portfolio.total_value - demoTotal : 0;
+  const diffPct = hasDemo && demoTotal > 0 ? (diff / demoTotal) * 100 : 0;
+
+  const demoOnline = hasDemo
+    ? Object.values(demoComparison!.exchanges).filter(e => !e.demo.error).length
+    : 0;
+  const demoConfigured = hasDemo ? demoComparison!.configured_exchanges.length : 0;
+  const demoHourlyRate = hasDemo && uptimeSeconds > 60
+    ? demoPnl / (uptimeSeconds / 3600)
+    : 0;
+  const simAccuracy = hasDemo ? Math.max(0, 100 - Math.abs(diffPct)) : 100;
+
   const cards = [
     {
-      title: 'Portfolio',
+      title: 'Portfolio (Sim)',
       main: `$${portfolio.total_value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
       sub: <PnlValue value={portfolio.net_pnl} />,
       subLabel: 'P&L',
       accent: 'border-blue-500',
+      extra: hasDemo ? (
+        <div className="mt-2 pt-2 border-t border-slate-700/50">
+          <div className="text-xs text-slate-400 uppercase tracking-wider mb-0.5">Demo</div>
+          <div className="text-lg font-semibold text-white">${demoTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+          <div className="text-xs">
+            <span className="text-slate-500 mr-1">P&L:</span>
+            <PnlValue value={demoPnl} />
+          </div>
+          <div className={`text-xs mt-0.5 ${diffColor(diffPct)}`}>
+            {'\u0394'} {diff >= 0 ? '+' : ''}{diff.toFixed(2)} ({diffPct >= 0 ? '+' : ''}{diffPct.toFixed(1)}%)
+          </div>
+        </div>
+      ) : null,
     },
     {
       title: 'Trades',
@@ -27,6 +72,22 @@ export default function StatsCards({ portfolio, simulation, profitStats }: Stats
       sub: <span className="text-slate-300">{simulation.trades_per_minute}/min</span>,
       subLabel: 'Rate',
       accent: 'border-emerald-500',
+      extra: hasDemo ? (
+        <div className="mt-2 pt-2 border-t border-slate-700/50">
+          <div className="text-xs">
+            <span className="text-slate-500 mr-1">Demo:</span>
+            <span className={demoOnline === demoConfigured ? 'text-emerald-400' : 'text-yellow-400'}>
+              {demoOnline}/{demoConfigured} online
+            </span>
+          </div>
+          <div className="text-xs mt-0.5">
+            <span className="text-slate-500 mr-1">Fetched:</span>
+            <span className="text-slate-300">
+              {demoComparison!.last_fetch_time ? formatAge(demoComparison!.last_fetch_time) : 'never'}
+            </span>
+          </div>
+        </div>
+      ) : null,
     },
     {
       title: 'Trade Profit',
@@ -34,6 +95,20 @@ export default function StatsCards({ portfolio, simulation, profitStats }: Stats
       sub: <span className="text-amber-400">-${portfolio.transfer_fees.toFixed(2)} fees</span>,
       subLabel: 'Net',
       accent: 'border-cyan-500',
+      extra: hasDemo ? (
+        <div className="mt-2 pt-2 border-t border-slate-700/50">
+          <div className="text-xs">
+            <span className="text-slate-500 mr-1">Demo P&L:</span>
+            <PnlValue value={demoPnl} />
+          </div>
+          <div className="text-xs mt-0.5">
+            <span className="text-slate-500 mr-1">Discrepancies:</span>
+            <span className={demoComparison!.total_discrepancies > 0 ? 'text-yellow-400' : 'text-slate-300'}>
+              {demoComparison!.total_discrepancies}
+            </span>
+          </div>
+        </div>
+      ) : null,
     },
     {
       title: 'Net $/hr',
@@ -41,6 +116,20 @@ export default function StatsCards({ portfolio, simulation, profitStats }: Stats
       sub: <PnlValue value={profitStats.net_profit} />,
       subLabel: 'Net Total',
       accent: profitStats.is_profitable ? 'border-emerald-500' : 'border-red-500',
+      extra: hasDemo ? (
+        <div className="mt-2 pt-2 border-t border-slate-700/50">
+          <div className="text-xs">
+            <span className="text-slate-500 mr-1">Demo $/hr:</span>
+            <PnlValue value={demoHourlyRate} />
+          </div>
+          <div className="text-xs mt-0.5">
+            <span className="text-slate-500 mr-1">Accuracy:</span>
+            <span className={simAccuracy >= 99 ? 'text-emerald-400' : simAccuracy >= 95 ? 'text-yellow-400' : 'text-red-400'}>
+              {simAccuracy.toFixed(1)}%
+            </span>
+          </div>
+        </div>
+      ) : null,
     },
   ];
 
@@ -54,6 +143,7 @@ export default function StatsCards({ portfolio, simulation, profitStats }: Stats
             <span className="text-slate-500 mr-1">{card.subLabel}:</span>
             {card.sub}
           </div>
+          {card.extra}
         </div>
       ))}
     </div>

@@ -268,6 +268,53 @@ export interface BotLogEntry {
   message: string;
 }
 
+// ── Demo/Testnet Comparison ──────────────────────────────────────────
+
+export interface DemoCryptoPosition {
+  qty: number;
+  value: number;
+}
+
+export interface DemoExchangeSnapshot {
+  usdt: number;
+  crypto: Record<string, DemoCryptoPosition>;
+  total: number;
+  error?: string | null;
+  fetched_at?: number;
+}
+
+export interface DemoExchangeComparison {
+  sim: DemoExchangeSnapshot;
+  demo: DemoExchangeSnapshot;
+  diff_usdt: number;
+  diff_total: number;
+  diff_total_pct: number;
+}
+
+export interface DemoDiscrepancy {
+  timestamp: number;
+  exchange: string;
+  type: string;
+  symbol: string;
+  sim_value: number;
+  demo_value: number;
+  diff_abs: number;
+  diff_pct: number;
+  root_cause: string;
+}
+
+export interface DemoComparisonState {
+  enabled: boolean;
+  exchanges: Record<string, DemoExchangeComparison>;
+  recent_discrepancies: DemoDiscrepancy[];
+  total_discrepancies: number;
+  last_fetch_time: number;
+  configured_exchanges: string[];
+  demo_portfolio_total: number;  // demo exchanges + sim fallback for non-demo exchanges
+}
+
+// ── Main Dashboard State ────────────────────────────────────────────
+
 export interface DashboardState {
   timestamp: number;
   uptime_seconds: number;
@@ -290,4 +337,5 @@ export interface DashboardState {
   profit_stats: ProfitStats;
   auth_logs?: AuthLogEntry[];
   bot_logs?: BotLogEntry[];
+  demo_comparison?: DemoComparisonState | null;
 }
