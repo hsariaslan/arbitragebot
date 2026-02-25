@@ -70,7 +70,7 @@ const tierColors = ['', 'text-yellow-300', 'text-blue-300', 'text-orange-300', '
 function WatchlistCard({ watchlist }: { watchlist: WatchlistEntry[] }) {
   if (!watchlist || watchlist.length === 0) return null;
   return (
-    <div className="bg-slate-800/50 rounded-lg p-5">
+    <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
       <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
         Watchlist — Candidates Being Tracked
       </h3>
@@ -173,12 +173,12 @@ function RollingView({ optimizer }: { optimizer: OptimizerState }) {
       <WatchlistCard watchlist={watchlist} />
 
       {/* Full Symbol Rankings Table */}
-      <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
           All Symbols — Rolling {windowMinutes}min Window
         </h3>
         <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm min-w-[900px]">
             <thead className="sticky top-0 bg-slate-800 z-10">
               <tr className="text-slate-400 text-xs uppercase">
                 <th className="text-left px-2 py-2 font-medium">#</th>
@@ -269,8 +269,8 @@ function RollingView({ optimizer }: { optimizer: OptimizerState }) {
       </div>
 
       {/* Charts Row */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
-        <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-3 sm:gap-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Top 10 by Score</h3>
           {profitable.length > 0 ? (
             <div className="space-y-1.5">
@@ -281,7 +281,7 @@ function RollingView({ optimizer }: { optimizer: OptimizerState }) {
             </div>
           ) : <p className="text-slate-500 text-sm">No profitable symbols yet</p>}
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Top 10 by Frequency</h3>
           {bestByFreq.length > 0 ? (
             <div className="space-y-1.5">
@@ -292,7 +292,7 @@ function RollingView({ optimizer }: { optimizer: OptimizerState }) {
             </div>
           ) : <p className="text-slate-500 text-sm">No data yet</p>}
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Top 10 by Est $/hr</h3>
           {bestByHourly.length > 0 ? (
             <div className="space-y-1.5">
@@ -306,8 +306,8 @@ function RollingView({ optimizer }: { optimizer: OptimizerState }) {
       </div>
 
       {/* Worst + Heatmap */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-        <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 sm:gap-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Worst 10 by Avg Net% (Avoid)</h3>
           {worstByNet.length > 0 ? (
             <div className="space-y-1.5">
@@ -317,7 +317,7 @@ function RollingView({ optimizer }: { optimizer: OptimizerState }) {
             </div>
           ) : <p className="text-slate-500 text-sm">No data yet</p>}
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Frequency Heatmap</h3>
           <div className="flex flex-wrap gap-1">
             {rankings.filter(r => r.total_ticks > 0).map((r) => {
@@ -342,9 +342,10 @@ function RollingView({ optimizer }: { optimizer: OptimizerState }) {
       </div>
 
       {/* Tier Analysis */}
-      <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Performance by Tier</h3>
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="w-full text-sm min-w-[650px]">
           <thead>
             <tr className="text-slate-400 text-xs uppercase">
               <th className="text-left px-3 py-2 font-medium">Tier</th>
@@ -383,14 +384,16 @@ function RollingView({ optimizer }: { optimizer: OptimizerState }) {
             })}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* Exchange + Pair Rankings */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-        <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 sm:gap-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Exchange Rankings</h3>
           {exchange_rankings && exchange_rankings.length > 0 ? (
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[500px]">
               <thead>
                 <tr className="text-slate-400 text-xs uppercase">
                   <th className="text-left px-2 py-2 font-medium">Exchange</th>
@@ -418,12 +421,14 @@ function RollingView({ optimizer }: { optimizer: OptimizerState }) {
                 ))}
               </tbody>
             </table>
+            </div>
           ) : <p className="text-slate-500 text-sm">Waiting for scoring data...</p>}
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Best Exchange Pairs (Buy @ → Sell @)</h3>
           {pair_rankings && pair_rankings.length > 0 ? (
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[400px]">
               <thead>
                 <tr className="text-slate-400 text-xs uppercase">
                   <th className="text-left px-2 py-2 font-medium">#</th>
@@ -445,13 +450,14 @@ function RollingView({ optimizer }: { optimizer: OptimizerState }) {
                 ))}
               </tbody>
             </table>
+            </div>
           ) : <p className="text-slate-500 text-sm">Waiting for scoring data...</p>}
         </div>
       </div>
 
       {/* Buy/Sell Role Distribution */}
       {exchange_rankings && exchange_rankings.length > 0 && (
-        <div className="bg-slate-800/50 rounded-lg p-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Exchange Buy/Sell Role Distribution</h3>
           <div className="space-y-2">
             {exchange_rankings.map((ex) => {
@@ -573,7 +579,7 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
       </div>
 
       {/* Lifecycle Funnel */}
-      <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Lifecycle Funnel</h3>
         <div className="flex items-center gap-2">
           {[
@@ -603,12 +609,12 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
       </div>
 
       {/* Full Historical Symbol Table */}
-      <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
           All-Time Symbol Rankings ({hist.length} symbols)
         </h3>
         <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm min-w-[1100px]">
             <thead className="sticky top-0 bg-slate-800 z-10">
               <tr className="text-slate-400 text-xs uppercase">
                 <th className="text-left px-2 py-2 font-medium">#</th>
@@ -683,8 +689,8 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
       </div>
 
       {/* Top 10 Charts - 3 column */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
-        <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-3 sm:gap-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Top 10 by All-Time Score</h3>
           <div className="space-y-1.5">
             {topByScore.filter(h => h.all_time_score > 0).map((h) => (
@@ -693,7 +699,7 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
             ))}
           </div>
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Top 10 by Est Total Profit</h3>
           <div className="space-y-1.5">
             {topByProfit.map((h) => (
@@ -702,7 +708,7 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
             ))}
           </div>
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Top 10 by Overall Frequency</h3>
           <div className="space-y-1.5">
             {topByFreq.map((h) => (
@@ -714,8 +720,8 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
       </div>
 
       {/* Unprofitable Assets + Trend Analysis */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
-        <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-3 sm:gap-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
             Unprofitable Assets ({bottomByNet.length}) — Permanently Avoid
           </h3>
@@ -727,7 +733,7 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
             ))}
           </div>
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-emerald-400 uppercase tracking-wider mb-3">Trending UP (improving)</h3>
           {trendingUp.length > 0 ? (
             <div className="space-y-1.5">
@@ -744,7 +750,7 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
             </div>
           ) : <p className="text-slate-500 text-sm">No symbols trending up</p>}
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-red-400 uppercase tracking-wider mb-3">Trending DOWN (declining)</h3>
           {trendingDown.length > 0 ? (
             <div className="space-y-1.5">
@@ -765,7 +771,7 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
 
       {/* Historical Exchange Rankings */}
       {histEx && histEx.length > 0 && (
-        <div className="bg-slate-800/50 rounded-lg p-5">
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Historical Exchange Rankings</h3>
           <table className="w-full text-sm">
             <thead>
@@ -822,9 +828,9 @@ export default function RankingPage({ optimizer, tickCount, portfolio, simulatio
   const maxActive = optimizer.max_active_symbols ?? activeCount;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3 sm:space-y-5">
       {/* Header with toggle */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-bold text-white">Symbol & Exchange Rankings</h2>
           <p className="text-sm text-slate-400">
@@ -837,7 +843,7 @@ export default function RankingPage({ optimizer, tickCount, portfolio, simulatio
             {optimizer.discovery_mode && <span className="text-amber-400 ml-2">(Discovery Mode)</span>}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
           <button
             onClick={() => exportXlsx(optimizer, portfolio ?? null, simulation ?? null, allTrades ?? [], allTransfers ?? [], allConfigHistory ?? [])}
             className="px-4 py-1.5 rounded-lg text-sm font-medium bg-slate-700 text-slate-300 hover:bg-slate-600 transition-colors"
