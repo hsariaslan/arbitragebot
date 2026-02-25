@@ -32,7 +32,7 @@ export default function BalanceTable({ balances, symbols }: BalanceTableProps) {
 
   return (
     <div className="bg-slate-800/50 rounded-lg overflow-hidden">
-      <div className="px-4 py-3 border-b border-slate-700">
+      <div className="px-3 sm:px-4 py-3 border-b border-slate-700">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Exchange Balances</h2>
       </div>
       <div className="overflow-x-auto">

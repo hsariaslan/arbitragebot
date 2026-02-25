@@ -134,11 +134,11 @@ export default function StatsCards({ portfolio, simulation, profitStats, demoCom
   ];
 
   return (
-    <div className="grid grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
       {cards.map((card) => (
-        <div key={card.title} className={`bg-slate-800/50 rounded-lg p-4 border-l-2 ${card.accent}`}>
+        <div key={card.title} className={`bg-slate-800/50 rounded-lg p-3 sm:p-4 border-l-2 ${card.accent}`}>
           <div className="text-xs text-slate-400 uppercase tracking-wider mb-1">{card.title}</div>
-          <div className="text-2xl font-bold text-white mb-1">{card.main}</div>
+          <div className="text-xl sm:text-2xl font-bold text-white mb-1">{card.main}</div>
           <div className="text-sm">
             <span className="text-slate-500 mr-1">{card.subLabel}:</span>
             {card.sub}

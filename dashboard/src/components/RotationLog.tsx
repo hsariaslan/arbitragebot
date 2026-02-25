@@ -10,7 +10,7 @@ function formatTime(ts: number): string {
 
 export default function RotationLog({ rotations }: RotationLogProps) {
   return (
-    <div className="bg-slate-800/50 rounded-lg p-5 flex flex-col h-full">
+    <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5 flex flex-col h-full">
       <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
         Rotation Log
       </h2>

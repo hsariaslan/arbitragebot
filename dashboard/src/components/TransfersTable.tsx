@@ -20,14 +20,14 @@ const TYPE_LABELS: Record<string, { label: string; color: string }> = {
 export default function TransfersTable({ transfers, totalFees }: TransfersTableProps) {
   return (
     <div className="bg-slate-800/50 rounded-lg overflow-hidden flex flex-col" style={{ maxHeight: '400px' }}>
-      <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between shrink-0">
+      <div className="px-3 sm:px-4 py-3 border-b border-slate-700 flex items-center justify-between shrink-0">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Transfers</h2>
         <span className="text-xs">
           Total fees: <span className="text-amber-400">${totalFees.toFixed(4)}</span>
         </span>
       </div>
-      <div className="overflow-y-auto flex-1">
-        <table className="w-full text-xs">
+      <div className="overflow-y-auto overflow-x-auto flex-1">
+        <table className="w-full text-xs min-w-[600px]">
           <thead className="sticky top-0 bg-slate-800">
             <tr className="text-slate-400 uppercase">
               <th className="text-left px-3 py-2 font-medium">Time</th>

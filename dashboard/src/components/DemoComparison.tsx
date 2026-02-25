@@ -192,7 +192,7 @@ export default function DemoComparison({ data }: DemoComparisonProps) {
   return (
     <div className="space-y-4">
       <div className="bg-slate-800/50 rounded-lg overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+        <div className="px-3 sm:px-4 py-3 border-b border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
           <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
             Demo Portfolio Comparison
           </h2>

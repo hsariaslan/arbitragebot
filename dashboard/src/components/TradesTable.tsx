@@ -13,7 +13,7 @@ function formatTime(ts: number): string {
 export default function TradesTable({ trades, totalPnl }: TradesTableProps) {
   return (
     <div className="bg-slate-800/50 rounded-lg overflow-hidden flex flex-col" style={{ maxHeight: '400px' }}>
-      <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between shrink-0">
+      <div className="px-3 sm:px-4 py-3 border-b border-slate-700 flex items-center justify-between shrink-0">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Recent Trades</h2>
         <span className="text-xs">
           Total P&L:{' '}
@@ -22,8 +22,8 @@ export default function TradesTable({ trades, totalPnl }: TradesTableProps) {
           </span>
         </span>
       </div>
-      <div className="overflow-y-auto flex-1">
-        <table className="w-full text-xs">
+      <div className="overflow-y-auto overflow-x-auto flex-1">
+        <table className="w-full text-xs min-w-[600px]">
           <thead className="sticky top-0 bg-slate-800">
             <tr className="text-slate-400 uppercase">
               <th className="text-left px-3 py-2 font-medium">Time</th>

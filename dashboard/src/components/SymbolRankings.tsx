@@ -15,7 +15,7 @@ interface SymbolRankingsProps {
 export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, discoveryMode }: SymbolRankingsProps) {
   if (rankings.length === 0) {
     return (
-      <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Symbol Rankings</h2>
         <p className="text-slate-500 text-sm">Waiting for scoring data...</p>
       </div>
@@ -23,7 +23,7 @@ export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, 
   }
 
   return (
-    <div className="bg-slate-800/50 rounded-lg p-5">
+    <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
           Symbol Rankings
