@@ -551,6 +551,28 @@ Run the bot against all 6 exchange demo accounts with $1800 total capital ($300/
 7. **Latency tracking** — Measure time from order send to fill confirmation. Display in dashboard.
 8. **Capital enforcement** — In demo mode, ignore exchange's large demo balance. Use BalanceTracker's `total_capital` as the limit. Reject orders that would exceed it.
 
+### Crash Safety & State Reconciliation (Critical for Real Trading)
+
+In simulation, the 60s periodic save interval is harmless — lost trades are just missed statistics. In real trading, the problem is **state/reality divergence**: the bot's internal BalanceTracker can disagree with actual exchange balances after a crash. Example: bot buys ORDI on Binance + sells on KuCoin, both orders fill, VPS crashes before save → on restart, BalanceTracker thinks Binance still has the old USDT amount → double-position risk.
+
+**Required safeguards for demo/live modes:**
+
+1. **Save state after every real trade** — Call `state_mgr.save()` immediately after `execute_trade()` succeeds, not just every 60s. Real money changes require immediate persistence.
+2. **Reconcile balances on startup** — Query each exchange's actual balances via REST API, compare with saved BalanceTracker. If they diverge, trust the exchange and log the discrepancy. This catches any trades that filled but weren't saved.
+3. **Periodic reconciliation** — Every few minutes, compare internal state with exchange balances. Detect and correct drift from missed saves, partial fills, or fee differences.
+4. **Idempotent client order IDs** — Use unique client order IDs (e.g., `coirna-{symbol}-{timestamp}-{uuid}`) so on restart, the bot can query "did my last order fill?" via the exchange's order history API rather than guessing.
+5. **Order status tracking** — Persist order IDs to state before sending. On restart, check pending order IDs for fill status. States: `pending → sent → filled/partial/rejected/expired`.
+
+**Current simulation safety (for reference):**
+
+| Scenario | Data loss | Recovery |
+|----------|-----------|----------|
+| `systemctl restart` / deploy | None | State saved on SIGTERM |
+| Ctrl+C | None | State saved on SIGINT |
+| Fatal exception | None | State saved before re-raise |
+| OOM kill / power loss | Up to 60s | Last periodic save used |
+| Corrupt write | None | Atomic write (tmp + rename) + `.bak` fallback |
+
 ### What Demo Testing Reveals (vs Simulation)
 
 | Aspect | Simulation | Demo Reality |
