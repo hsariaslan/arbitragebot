@@ -38,6 +38,7 @@ load_env()
 
 from balance import BalanceTracker
 from config import ACTIVE_SYMBOLS, MIN_WARMUP_TICKS, SYMBOLS
+from exchange_info import ExchangeInfoManager
 from dashboard_server import DashboardLogHandler, DashboardServer
 from fetchers.binance import BinanceFetcher
 from fetchers.bitget import BitgetFetcher
@@ -119,6 +120,14 @@ async def main() -> None:
         f"${trade_amount}/trade"
     )
 
+    # Fetch exchange trading rules (lot sizes, tick sizes, min notionals)
+    # before any trading starts. Addresses D-01, D-02, D-03.
+    exchange_info = ExchangeInfoManager(exchanges=active_exchanges)
+    await exchange_info.fetch_all()
+
+    # D-16: Validate USDT withdrawal fees against live exchange data
+    await exchange_info.validate_withdrawal_fees()
+
     balance = BalanceTracker(
         exchanges=active_exchanges,
         symbols=active_symbols,
@@ -126,6 +135,7 @@ async def main() -> None:
         rebalance_cooldown=settings.get("rebalance_cooldown", 30.0),
         trade_amount=trade_amount,
         adaptive_mode=adaptive_mode,
+        exchange_info=exchange_info,
     )
     monitor = ArbitrageMonitor(
         fetchers,
@@ -138,6 +148,7 @@ async def main() -> None:
         total_capital=total_capital,
         adaptive_mode=adaptive_mode,
         log_file=log_file,
+        exchange_info=exchange_info,
     )
     optimizer = SymbolOptimizer(
         fetchers=fetchers,
@@ -200,6 +211,59 @@ async def main() -> None:
     else:
         logger.info("[DemoCompare] Disabled (no API keys configured in .env)")
 
+    # Phase 2: Demo order execution (optional — needs execution_mode=demo)
+    execution_mode = settings.get("execution_mode", "simulation")
+    demo_executor = None
+
+    if execution_mode == "demo":
+        from config import (
+            BINANCE_TESTNET_API_KEY, OKX_DEMO_API_KEY, BYBIT_DEMO_API_KEY,
+        )
+        from executor import DemoExecutor
+        from executors.binance_exec import BinanceExecutor
+        from executors.okx_exec import OKXExecutor
+        from executors.bybit_exec import BybitExecutor
+
+        exchange_executors: dict = {}
+        if BINANCE_TESTNET_API_KEY:
+            exchange_executors["Binance"] = BinanceExecutor(exchange_info)
+        if OKX_DEMO_API_KEY:
+            exchange_executors["OKX"] = OKXExecutor(exchange_info)
+        if BYBIT_DEMO_API_KEY:
+            exchange_executors["Bybit"] = BybitExecutor(exchange_info)
+
+        if exchange_executors:
+            demo_executor = DemoExecutor(exchange_info, exchange_executors)
+
+            # Restore pending orders from saved state (nested in monitor state)
+            if saved:
+                monitor_state = saved.get("monitor", {})
+                executor_state = monitor_state.get("demo_executor")
+                if executor_state:
+                    demo_executor.from_state_dict(executor_state)
+
+            # Startup reconciliation: check pending orders + compare balances
+            try:
+                await demo_executor.recover_pending_orders()
+                await demo_executor.reconcile_balances(balance)
+            except Exception as e:
+                logger.error(f"[Reconcile] Startup reconciliation failed: {e}")
+
+            monitor.set_executor(
+                demo_executor, state_mgr,
+                demo_fetcher if demo_fetcher.enabled else None,
+            )
+            balance._execution_mode = "demo"
+            logger.info(
+                f"Demo execution enabled for: {list(exchange_executors.keys())}"
+            )
+        else:
+            logger.warning(
+                "[Executor] execution_mode=demo but no API keys configured"
+            )
+    else:
+        logger.info("[Executor] Simulation mode (no real orders)")
+
     loop = asyncio.get_running_loop()
 
     def shutdown_handler():
@@ -213,6 +277,8 @@ async def main() -> None:
         monitor.stop()
         optimizer.stop()
         dashboard.stop()
+        if demo_executor:
+            asyncio.ensure_future(demo_executor.close())
 
     if sys.platform != "win32":
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -238,6 +304,8 @@ async def main() -> None:
         monitor.stop()
         optimizer.stop()
         dashboard.stop()
+        if demo_executor:
+            await demo_executor.close()
         raise
     finally:
         monitor.print_summary()

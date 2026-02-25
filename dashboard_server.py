@@ -761,6 +761,11 @@ class DashboardServer:
         "rebalance_cooldown": (float, 0, 3600),
         "rebalance_roi_horizon": (int, 0, 86400),
         "adaptive_mode": (bool, None, None),
+        "execution_mode": (str, None, None),
+    }
+
+    _SETTINGS_ENUMS: dict[str, list[str]] = {
+        "execution_mode": ["simulation", "demo"],
     }
 
     @classmethod
@@ -773,6 +778,12 @@ class DashboardServer:
             if expected_type == bool:
                 if not isinstance(value, bool):
                     return False, f"{key} must be boolean"
+            elif expected_type == str:
+                if not isinstance(value, str):
+                    return False, f"{key} must be a string"
+                allowed = cls._SETTINGS_ENUMS.get(key, [])
+                if allowed and value not in allowed:
+                    return False, f"{key} must be one of {allowed}"
             elif expected_type in (int, float):
                 if not isinstance(value, (int, float)) or isinstance(value, bool):
                     return False, f"{key} must be a number"
@@ -1022,6 +1033,9 @@ class DashboardServer:
         self._balance._trade_amount = trade_amount
         self._balance._max_rebalance = trade_amount * 4
 
+        # execution_mode: persisted to settings.json but requires restart
+        # (no hot-apply — executor creation happens at startup)
+
         # Record config snapshot
         self._monitor.record_config_snapshot("settings_applied")
 
@@ -1149,7 +1163,7 @@ class DashboardServer:
         # Recent trades (last 100, newest first)
         recent_trades = []
         for t in reversed(self._monitor._trades[-100:]):
-            recent_trades.append({
+            trade_dict: dict = {
                 "timestamp": t.timestamp,
                 "symbol": t.symbol,
                 "buy_exchange": t.buy_exchange,
@@ -1161,7 +1175,20 @@ class DashboardServer:
                 "net_pct": round(t.net_pct, 4),
                 "profit_usd": round(t.profit_usd, 6),
                 "trade_amount": round(t.trade_amount, 2),
-            })
+            }
+            # Include demo fields when present (Phase 2)
+            if t.demo_status:
+                trade_dict.update({
+                    "demo_buy_price": round(t.demo_buy_price, 6),
+                    "demo_sell_price": round(t.demo_sell_price, 6),
+                    "demo_buy_qty": round(t.demo_buy_qty, 8),
+                    "demo_sell_qty": round(t.demo_sell_qty, 8),
+                    "demo_profit_usd": round(t.demo_profit_usd, 6),
+                    "demo_latency_ms": round(t.demo_latency_ms, 1),
+                    "demo_slippage_pct": round(t.demo_slippage_pct, 4),
+                    "demo_status": t.demo_status,
+                })
+            recent_trades.append(trade_dict)
 
         # Recent transfers (last 50, newest first)
         recent_transfers = []
@@ -1226,6 +1253,13 @@ class DashboardServer:
                     "net_pct": round(t.net_pct, 4),
                     "profit_usd": round(t.profit_usd, 6),
                     "trade_amount": round(t.trade_amount, 2),
+                    **({"demo_buy_price": round(t.demo_buy_price, 6),
+                        "demo_sell_price": round(t.demo_sell_price, 6),
+                        "demo_profit_usd": round(t.demo_profit_usd, 6),
+                        "demo_slippage_pct": round(t.demo_slippage_pct, 4),
+                        "demo_latency_ms": round(t.demo_latency_ms, 1),
+                        "demo_status": t.demo_status,
+                    } if t.demo_status else {}),
                 }
                 for t in self._monitor._trades
             ],
@@ -1242,6 +1276,7 @@ class DashboardServer:
                 for tr in self._balance.transfers
             ],
             "settings": self._settings,
+            "execution_mode": self._monitor._execution_mode,
             "all_exchanges": ALL_EXCHANGES,
             "all_symbols": SYMBOLS,
             "optimizer": self._build_optimizer_state(),

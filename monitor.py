@@ -20,6 +20,7 @@ from balance import BalanceTracker
 from config import (
     ACTIVE_EXCHANGES,
     ACTIVE_SYMBOLS,
+    EXCHANGE_FEE_MODELS,
     EXCHANGE_TAKER_FEES,
     MAX_DATA_AGE_SECONDS,
     MONITOR_INTERVAL_SECONDS,
@@ -28,8 +29,11 @@ from config import (
 )
 
 if TYPE_CHECKING:
+    from exchange_info import ExchangeInfoManager
+    from executor import DemoExecutor
     from fetchers.base import BaseFetcher
     from optimizer import SymbolOptimizer
+    from state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +72,23 @@ class SimulatedTrade:
     net_pct: float
     profit_usd: float
     trade_amount: float = 0.0
+    # Rounding metadata (D-01: lot size rounding)
+    buy_qty_raw: float = 0.0
+    buy_qty_rounded: float = 0.0
+    sell_qty_raw: float = 0.0
+    sell_qty_rounded: float = 0.0
+    rounding_impact_usd: float = 0.0
+    # Data freshness metadata (D-07: stale price detection)
+    data_age_ms: float = 0.0
+    # Demo execution results (Phase 2: populated when execution_mode=demo)
+    demo_buy_price: float = 0.0
+    demo_sell_price: float = 0.0
+    demo_buy_qty: float = 0.0
+    demo_sell_qty: float = 0.0
+    demo_profit_usd: float = 0.0
+    demo_latency_ms: float = 0.0
+    demo_slippage_pct: float = 0.0
+    demo_status: str = ""  # "filled", "partial", "rejected", "one_legged"
 
 
 class ArbitrageMonitor:
@@ -94,10 +115,12 @@ class ArbitrageMonitor:
         total_capital: float = 1800.0,
         adaptive_mode: bool = True,
         log_file: "Path | None" = None,
+        exchange_info: "ExchangeInfoManager | None" = None,
     ) -> None:
         self._fetchers = fetchers
         self._balance = balance
         self._log_file = log_file
+        self._exchange_info = exchange_info
         self._running: bool = False
         self._paused: bool = False
         self._symbols: list[str] = symbols or ACTIVE_SYMBOLS
@@ -137,6 +160,10 @@ class ArbitrageMonitor:
         # Depth filtering tracking
         self._depth_skips: int = 0
 
+        # Min notional / min qty rejection tracking (D-02)
+        self._notional_skips: int = 0
+        self._interval_notional_skips: int = 0
+
         # Post-discovery periodic summary counters (reset every summary)
         self._summary_interval: int = 30  # Log summary every N ticks
         self._interval_profitable: int = 0  # Profitable spreads seen
@@ -149,9 +176,31 @@ class ArbitrageMonitor:
         self._exchange_spread_max: dict[str, float] = defaultdict(float)
         self._exchange_spread_count: dict[str, int] = defaultdict(int)
 
+        # Phase 2: Demo execution
+        self._executor: "DemoExecutor | None" = None
+        self._execution_mode: str = "simulation"
+        self._state_mgr: "StateManager | None" = None
+        self._demo_fetcher = None  # set via set_executor()
+
     def set_optimizer(self, optimizer: "SymbolOptimizer") -> None:
         """Store optimizer reference for score-based rebalance gating."""
         self._optimizer = optimizer
+
+    def set_executor(
+        self,
+        executor: "DemoExecutor",
+        state_mgr: "StateManager",
+        demo_fetcher=None,
+    ) -> None:
+        """Enable demo execution mode with the given executor."""
+        self._executor = executor
+        self._execution_mode = "demo"
+        self._state_mgr = state_mgr
+        self._demo_fetcher = demo_fetcher
+        logger.info(
+            f"[Monitor] Demo execution enabled for: "
+            f"{executor.supported_exchanges}"
+        )
 
     def _output(self, text: str) -> None:
         """Print to console and append to log file."""
@@ -258,7 +307,59 @@ class ArbitrageMonitor:
             )
             return 0.0
 
-        return round(trade_size, 2)
+        trade_size = round(trade_size, 2)
+
+        # D-02: Min notional & min qty validation via exchange rules
+        if self._exchange_info:
+            from decimal import Decimal
+
+            buy_price_d = Decimal(str(sell_price))  # approximate; actual ask is close
+            sell_price_d = Decimal(str(sell_price))
+            buy_qty_d = Decimal(str(trade_size)) / buy_price_d if sell_price > 0 else Decimal(0)
+            sell_qty_d = Decimal(str(trade_size)) / sell_price_d if sell_price > 0 else Decimal(0)
+
+            buy_rules = self._exchange_info.get_rules(buy_ex, symbol)
+            sell_rules = self._exchange_info.get_rules(sell_ex, symbol)
+
+            rejected = False
+            reason = ""
+
+            # Check min notional on both sides
+            if buy_rules and not self._exchange_info.check_min_notional(
+                buy_ex, symbol, buy_qty_d, buy_price_d
+            ):
+                rejected = True
+                reason = f"buy min_notional ${float(buy_rules.min_notional):.2f}"
+            if sell_rules and not self._exchange_info.check_min_notional(
+                sell_ex, symbol, sell_qty_d, sell_price_d
+            ):
+                rejected = True
+                reason = f"sell min_notional ${float(sell_rules.min_notional):.2f}"
+
+            # Check min qty on both sides
+            if not rejected and buy_rules and not self._exchange_info.check_min_qty(
+                buy_ex, symbol, buy_qty_d
+            ):
+                rejected = True
+                reason = f"buy min_qty {float(buy_rules.min_qty)}"
+            if not rejected and sell_rules and not self._exchange_info.check_min_qty(
+                sell_ex, symbol, sell_qty_d
+            ):
+                rejected = True
+                reason = f"sell min_qty {float(sell_rules.min_qty)}"
+
+            if rejected:
+                self._notional_skips += 1
+                self._interval_notional_skips += 1
+                if self._notional_skips <= 5 or self._notional_skips % 100 == 0:
+                    logger.info(
+                        f"[Monitor] REJECT {symbol} {buy_ex}->{sell_ex}: "
+                        f"${trade_size:.2f} below {reason} "
+                        f"(total_rejects={self._notional_skips})"
+                    )
+                return 0.0
+
+        return trade_size
 
     def record_config_snapshot(self, reason: str) -> None:
         """Record current configuration state for history tracking."""
@@ -280,6 +381,152 @@ class ArbitrageMonitor:
                 self._balance._estimated_profit_per_trade if self._balance else 0
             ),
         ))
+
+    # ── Phase 2: Demo Execution ────────────────────────────────────────
+
+    async def _execute_demo_trade(
+        self,
+        buy_ex: str, sell_ex: str, symbol: str,
+        trade_size: float, buy_price: float, sell_price: float,
+        buy_qty: float, sell_qty: float,
+        sim_trade: SimulatedTrade,
+    ) -> None:
+        """Fire real demo orders and compare with sim result.
+
+        Called as an asyncio task — does not block the tick loop.
+        Records discrepancies (D-08 through D-13) and saves state immediately.
+        """
+        if not self._executor:
+            return
+
+        try:
+            result = await self._executor.execute_arbitrage(
+                buy_ex, sell_ex, symbol, trade_size,
+                buy_price, sell_price, buy_qty, sell_qty,
+            )
+
+            # Update the SimulatedTrade with demo results
+            self._record_demo_comparison(sim_trade, result)
+
+            # Immediate state save (crash safety for real trades)
+            if self._state_mgr and self._balance and self._optimizer:
+                self._state_mgr.save(
+                    self._balance, self, self._optimizer, self._demo_fetcher,
+                )
+
+        except Exception as e:
+            logger.error(f"[Monitor] Demo trade execution failed: {e}")
+
+    def _record_demo_comparison(
+        self,
+        sim_trade: SimulatedTrade,
+        result: "ArbitrageResult",
+    ) -> None:
+        """Compare sim expectations with actual demo results.
+
+        Updates the SimulatedTrade's demo_* fields and logs discrepancies
+        for D-08 (slippage), D-09 (partial fill), D-10 (rejection),
+        D-11 (one-legged), D-12 (latency), D-13 (maker/taker).
+        """
+        from executor import ArbitrageResult
+
+        buy = result.buy_result
+        sell = result.sell_result
+
+        # Update SimulatedTrade with demo data
+        sim_trade.demo_buy_price = buy.actual_avg_price
+        sim_trade.demo_sell_price = sell.actual_avg_price
+        sim_trade.demo_buy_qty = buy.filled_qty
+        sim_trade.demo_sell_qty = sell.filled_qty
+        sim_trade.demo_profit_usd = result.actual_profit_usd
+        sim_trade.demo_latency_ms = result.total_latency_ms
+        sim_trade.demo_slippage_pct = result.avg_slippage_pct
+
+        # Determine status
+        if result.one_legged:
+            sim_trade.demo_status = "one_legged"
+        elif not buy.success and not sell.success:
+            sim_trade.demo_status = "rejected"
+        elif buy.is_partial or sell.is_partial:
+            sim_trade.demo_status = "partial"
+        elif buy.success and sell.success:
+            sim_trade.demo_status = "filled"
+        else:
+            sim_trade.demo_status = "unknown"
+
+        # Log significant discrepancies
+        sym = sim_trade.symbol
+
+        # D-08: Slippage
+        if result.avg_slippage_pct > 0.01:
+            logger.info(
+                f"[D-08] {sym} slippage: buy={buy.slippage_pct:+.4f}% "
+                f"sell={sell.slippage_pct:+.4f}% avg={result.avg_slippage_pct:.4f}%"
+            )
+
+        # D-09: Partial fill
+        if buy.is_partial:
+            logger.warning(
+                f"[D-09] {sym} partial fill on {buy.exchange}: "
+                f"requested={buy.requested_qty:.8f} filled={buy.filled_qty:.8f} "
+                f"ratio={buy.fill_ratio:.2%}"
+            )
+        if sell.is_partial:
+            logger.warning(
+                f"[D-09] {sym} partial fill on {sell.exchange}: "
+                f"requested={sell.requested_qty:.8f} filled={sell.filled_qty:.8f} "
+                f"ratio={sell.fill_ratio:.2%}"
+            )
+
+        # D-10: Rejection
+        if not buy.success:
+            logger.warning(
+                f"[D-10] {sym} buy rejected on {buy.exchange}: {buy.error}"
+            )
+        if not sell.success:
+            logger.warning(
+                f"[D-10] {sym} sell rejected on {sell.exchange}: {sell.error}"
+            )
+
+        # D-11: One-legged trade
+        if result.one_legged:
+            logger.error(
+                f"[D-11] {sym} ONE-LEGGED: "
+                f"buy={'OK' if buy.success else 'FAIL'} "
+                f"sell={'OK' if sell.success else 'FAIL'} "
+                f"recovery={'OK' if result.recovery_result and result.recovery_result.success else 'FAIL'}"
+            )
+
+        # D-12: High latency
+        if result.total_latency_ms > 500:
+            logger.warning(
+                f"[D-12] {sym} high latency: {result.total_latency_ms:.0f}ms "
+                f"(buy={buy.latency_ms:.0f}ms sell={sell.latency_ms:.0f}ms)"
+            )
+
+        # D-13: Maker fill (unexpected for market orders)
+        if buy.is_maker:
+            logger.info(f"[D-13] {sym} buy filled as MAKER on {buy.exchange}")
+        if sell.is_maker:
+            logger.info(f"[D-13] {sym} sell filled as MAKER on {sell.exchange}")
+
+        # D-05: Fee currency mismatch
+        for leg, expected_side in [(buy, "buy"), (sell, "sell")]:
+            if leg.success and leg.fee_currency:
+                expected_ccy = "USDT" if expected_side == "sell" else sym.replace("USDT", "")
+                if leg.fee_currency not in (expected_ccy, "USDT", "BNB", "BGB", "KCS"):
+                    logger.warning(
+                        f"[D-05] {sym} {expected_side} fee in unexpected currency: "
+                        f"{leg.fee_currency} on {leg.exchange}"
+                    )
+
+        # Profit comparison
+        profit_diff = result.actual_profit_usd - sim_trade.profit_usd
+        if abs(profit_diff) > 0.01:
+            logger.info(
+                f"[DemoCompare] {sym} profit: sim=${sim_trade.profit_usd:.4f} "
+                f"actual=${result.actual_profit_usd:.4f} diff=${profit_diff:+.4f}"
+            )
 
     def stop(self) -> None:
         """Signal the monitor to stop."""
@@ -361,6 +608,10 @@ class ArbitrageMonitor:
         if self._balance and not self._balance.initialized:
             self._balance.initialize_crypto(self._get_current_prices())
 
+        # D-17: Deliver in-transit funds that have arrived
+        if self._balance and self._balance._in_transit:
+            self._balance.deliver_in_transit()
+
         rows: list[tuple[str, str, float, str, float, float, float, float, float]] = []
 
         # Track per-exchange data age for this tick's display
@@ -368,6 +619,8 @@ class ArbitrageMonitor:
 
         for symbol in self._symbols:
             exchange_prices: list[tuple[str, float, float]] = []
+            # Per-exchange data age for this symbol (for trade metadata)
+            symbol_ex_age: dict[str, float] = {}
 
             for fetcher in self._fetchers:
                 if fetcher.exchange_name not in self._active_exchanges:
@@ -380,6 +633,7 @@ class ArbitrageMonitor:
                 # Check data freshness
                 if ps.received_at > 0:
                     age = now - ps.received_at
+                    symbol_ex_age[fetcher.exchange_name] = age
                     tick_age_lists[fetcher.exchange_name].append(age)
 
                     # Track running stats for summary report
@@ -403,6 +657,18 @@ class ArbitrageMonitor:
 
                 if bid_f <= 0 or ask_f <= 0:
                     continue
+
+                # D-03: Round prices to tick size (corrects float imprecision)
+                if self._exchange_info:
+                    from decimal import Decimal
+                    bid_rounded = self._exchange_info.round_price(
+                        fetcher.exchange_name, symbol, Decimal(str(bid_f))
+                    )
+                    ask_rounded = self._exchange_info.round_price(
+                        fetcher.exchange_name, symbol, Decimal(str(ask_f))
+                    )
+                    bid_f = float(bid_rounded)
+                    ask_f = float(ask_rounded)
 
                 # Compute depth in USD at best bid/ask
                 try:
@@ -538,19 +804,29 @@ class ArbitrageMonitor:
                             self._miss_streak[miss_key] = 0
                             buy_fee_rate = EXCHANGE_TAKER_FEES.get(buy_ex, 0.001)
                             sell_fee_rate = EXCHANGE_TAKER_FEES.get(sell_ex, 0.001)
-                            self._balance.execute_trade(
+                            trade_adj = self._balance.execute_trade(
                                 buy_ex, sell_ex, sym, trade_size,
                                 ask_p, bid_p, buy_fee_rate, sell_fee_rate,
+                                buy_fee_model=EXCHANGE_FEE_MODELS.get(buy_ex, "received"),
+                                sell_fee_model=EXCHANGE_FEE_MODELS.get(sell_ex, "received"),
                             )
                         else:
+                            trade_adj = None
                             self._balance.skipped_trades += 1
                     elif self._balance:
                         self._balance.skipped_trades += 1
                         can_trade = False
+                        trade_adj = None
 
                     if can_trade:
                         self._interval_executed += 1
                         actual_profit = trade_size * (net / 100)
+                        # Data age: max of buy and sell exchange ages (ms)
+                        buy_age = symbol_ex_age.get(buy_ex, 0.0)
+                        sell_age = symbol_ex_age.get(sell_ex, 0.0)
+                        max_age_ms = max(buy_age, sell_age) * 1000.0
+                        # Rounding metadata from execute_trade adjustment
+                        adj = trade_adj or {}
                         trade = SimulatedTrade(
                             timestamp=now, symbol=sym,
                             buy_exchange=buy_ex, sell_exchange=sell_ex,
@@ -558,8 +834,37 @@ class ArbitrageMonitor:
                             spread_pct=spread, fee_pct=fee,
                             net_pct=net, profit_usd=actual_profit,
                             trade_amount=trade_size,
+                            buy_qty_raw=adj.get("buy_qty_raw", 0.0),
+                            buy_qty_rounded=adj.get("buy_qty_rounded", 0.0),
+                            sell_qty_raw=adj.get("sell_qty_raw", 0.0),
+                            sell_qty_rounded=adj.get("sell_qty_rounded", 0.0),
+                            rounding_impact_usd=adj.get("rounding_impact_usd", 0.0),
+                            data_age_ms=max_age_ms,
                         )
                         self._trades.append(trade)
+                        if trade_adj:
+                            rnd = trade_adj["rounding_impact_usd"]
+                            if abs(rnd) > 0.001:
+                                logger.debug(
+                                    f"[Monitor] {sym} rounding: buy {trade_adj['buy_qty_raw']:.8f}"
+                                    f"→{trade_adj['buy_qty_rounded']:.8f}, "
+                                    f"sell {trade_adj['sell_qty_raw']:.8f}"
+                                    f"→{trade_adj['sell_qty_rounded']:.8f}, "
+                                    f"impact=${rnd:+.4f}"
+                                )
+
+                        # Phase 2: Fire demo orders in parallel (non-blocking)
+                        if (self._execution_mode == "demo"
+                                and self._executor
+                                and self._executor.can_execute(buy_ex, sell_ex)):
+                            asyncio.create_task(self._execute_demo_trade(
+                                buy_ex, sell_ex, sym, trade_size,
+                                ask_p, bid_p,
+                                adj.get("buy_qty_rounded", trade_size / ask_p),
+                                adj.get("sell_qty_rounded", trade_size / bid_p),
+                                trade,
+                            ))
+
                 elif net > 0:
                     # Positive but below threshold — still track miss-streak
                     # so rebalancing can trigger for generally-profitable symbols
@@ -601,19 +906,22 @@ class ArbitrageMonitor:
                             f"tier={sc.focus_tier})"
                         )
             sym_info = " | ".join(sym_details) if sym_details else syms
+            notional_part = f" notional_reject={self._interval_notional_skips}" if self._interval_notional_skips else ""
             logger.info(
                 f"[Monitor] Status @{self._tick_count}s: "
                 f"profitable={self._interval_profitable} "
                 f"executed={self._interval_executed} "
                 f"skip_size={self._interval_size_skips} "
                 f"skip_balance={self._interval_balance_skips} "
-                f"low_profit={self._low_profit_skips} | {sym_info}"
+                f"low_profit={self._low_profit_skips}"
+                f"{notional_part} | {sym_info}"
             )
             # Reset interval counters
             self._interval_profitable = 0
             self._interval_size_skips = 0
             self._interval_balance_skips = 0
             self._interval_executed = 0
+            self._interval_notional_skips = 0
 
         # Compute average age per exchange for display
         tick_ages: dict[str, float] = {}
@@ -893,12 +1201,15 @@ class ArbitrageMonitor:
             "_stale_skips": dict(self._stale_skips),
             "_fresh_samples": dict(self._fresh_samples),
             "_depth_skips": self._depth_skips,
+            "_notional_skips": self._notional_skips,
             "_exchange_age_sum": dict(self._exchange_age_sum),
             "_exchange_age_max": dict(self._exchange_age_max),
             "_exchange_age_count": dict(self._exchange_age_count),
             "_exchange_spread_sum": dict(self._exchange_spread_sum),
             "_exchange_spread_max": dict(self._exchange_spread_max),
             "_exchange_spread_count": dict(self._exchange_spread_count),
+            "_execution_mode": self._execution_mode,
+            "demo_executor": self._executor.to_state_dict() if self._executor else None,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -917,6 +1228,7 @@ class ArbitrageMonitor:
         self._stale_skips = defaultdict(int, data.get("_stale_skips", {}))
         self._fresh_samples = defaultdict(int, data.get("_fresh_samples", {}))
         self._depth_skips = data.get("_depth_skips", 0)
+        self._notional_skips = data.get("_notional_skips", 0)
         self._exchange_age_sum = defaultdict(float, data.get("_exchange_age_sum", {}))
         self._exchange_age_max = defaultdict(float, data.get("_exchange_age_max", {}))
         self._exchange_age_count = defaultdict(int, data.get("_exchange_age_count", {}))
