@@ -215,10 +215,10 @@ The bot only trades and transfers for **strong** (score ≥ 0.1) and **very stro
 
 ### Rules
 
-- **Discovery**: Only activates symbols with score ≥ 0.1. Falls back to top 1 if nothing qualifies.
-- **Early discovery exit**: If any symbol reaches score ≥ 0.1 during discovery (before the full duration), discovery ends immediately and trading starts.
-- **Trading**: Non-strong active symbols get `trade_multiplier = 0` — the monitor skips them entirely.
-- **Rebalancing**: `should_allow_rebalance()` requires score ≥ 0.1. No transfers for weak symbols.
+- **Discovery**: Activates symbols with score ≥ 0.01. Extends discovery duration (up to 3600s) if none qualify.
+- **Early discovery exit**: If any symbol reaches score ≥ 0.01 during discovery (after 60s minimum), discovery ends immediately and trading starts.
+- **Trading**: Normal tier (0.01–0.1) gets `trade_multiplier = 0.5–1.5×`. Weak symbols (< 0.01) get `trade_multiplier = 0`.
+- **Rebalancing**: `should_allow_rebalance()` requires score ≥ 0.01 (`TRADING_SCORE_THRESHOLD`). ROI gate, net P&L gate, and transfer worthiness checks protect against unprofitable transfers.
 - **Expansion/Rotation**: Only strong/very_strong candidates can be activated or replace existing symbols.
 - **Demotion**: Symbols dropping below 0.1 are demoted on a tiered schedule (faster for weaker scores). No minimum active count protection — better idle than bleeding money on transfers.
 
@@ -307,7 +307,7 @@ After discovery, capital is allocated via the Exchange & Symbol Concentration sy
 
 Multiple gates prevent unprofitable rebalancing:
 
-1. **Strong-only gate**: `should_allow_rebalance()` requires `score >= 0.1` (`STRONG_SCORE_THRESHOLD`). Normal/weak symbols (< 0.1) never trigger rebalances.
+1. **Tradeable gate**: `should_allow_rebalance()` requires `score >= 0.01` (`TRADING_SCORE_THRESHOLD`). Weak symbols (< 0.01) never trigger rebalances.
 2. **ROI gate**: `_should_rebalance()` in monitor.py estimates rebalance cost (2× internal transfer fees on 3× trade_amount) and requires `expected_profit > cost × 1.5`. Blocks rebalances when amortized transfer cost exceeds per-trade profit.
 3. **Net P&L gate**: After 10+ trades, if `trading_pnl < total_transfer_fees` (net negative), all rebalancing is blocked. Prevents loss spirals.
 4. **Miss-streak threshold**: 15 consecutive missed ticks required before rebalancing triggers (was 5, increased to reduce frequency).
@@ -405,7 +405,7 @@ Session state survives restarts (including deploys via `systemctl restart`). `St
 
 ### XLSX Export
 
-Click "Export XLSX" on the Rankings page. 15 sheets: Summary, Rolling Rankings, Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange (Rolling/Historical), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History, Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations.
+Click "Export XLSX" on the Rankings page. 16 sheets: Summary, Rolling Rankings, Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange (Rolling/Historical), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History, Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations, Discrepancies.
 
 ### Key Dashboard Files
 
@@ -423,7 +423,7 @@ Click "Export XLSX" on the Rankings page. 15 sheets: Summary, Rolling Rankings, 
 | `dashboard/src/components/RankingPage.tsx` | Full ranking analysis page |
 | `dashboard/src/components/DemoComparison.tsx` | Per-exchange demo vs sim comparison cards with discrepancy log |
 | `dashboard/src/components/SettingsPage.tsx` | Settings form with adaptive mode toggle, IP whitelist, restart button |
-| `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 15 sheets |
+| `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 16 sheets |
 | `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings, log export from disk, restart handler |
 | `demo_fetcher.py` | Demo/testnet portfolio fetcher: REST API clients for Binance/OKX/Bybit, baseline snapshots, discrepancy detection |
 | `state_manager.py` | Session state persistence: atomic save/load, periodic saves, clear for fresh restart |
@@ -469,109 +469,116 @@ Pre-funded testnet balances (Binance ~$10k, OKX ~$5k, Bybit ~$50k) are subtracte
 
 ### Discrepancy Detection
 
-Runs after each poll (15s interval). Compares baseline-adjusted demo values against simulation:
+Comprehensive sim-vs-demo validation system. See `DISCREPANCIES.md` for the full list of 20 discrepancy types (D-01 through D-20).
+
+**Runtime detection** runs after each poll (15s interval). Compares baseline-adjusted demo values against simulation:
 - USDT balance mismatch (threshold: $1 or 1%)
 - Crypto position mismatches (qty delta vs sim qty)
+- Fee rate mismatches (D-04: actual exchange fees vs configured)
 - Root cause classification: fee difference, slippage, missing/extra position, stale data
+
+**Exchange trading rules** (`exchange_info.py`) fetched at startup to validate:
+- D-01: Lot size rounding — quantities rounded DOWN to exchange lot_size_step using Decimal
+- D-02: Min notional — trades below exchange minimum order value are rejected
+- D-03: Price tick size — prices rounded to tick_size
+- D-07: Stale price detection — data age tracked per trade in `SimulatedTrade.data_age_ms`
+
+**Fee rate validation** (D-04): On first successful demo fetch per exchange, actual fee rates are queried from exchange APIs (Binance: from `/api/v3/account` commissionRates, OKX: `/api/v5/account/trade-fee`, Bybit: `/v5/account/fee-rate`). If actual rate differs from `config.py:EXCHANGE_TAKER_FEES`, a WARNING is logged and the rate is overridden in-place.
+
+**Quantity rounding** in `balance.py:execute_trade()`: When `exchange_info` is available, buy and sell quantities are rounded DOWN to lot_size_step. Unspent USDT stays in balance (realistic behavior). Returns an adjustment dict with raw/rounded quantities and rounding impact.
+
+**Trade metadata**: `SimulatedTrade` includes `buy_qty_raw`, `buy_qty_rounded`, `sell_qty_raw`, `sell_qty_rounded`, `rounding_impact_usd`, `data_age_ms` fields for sim validation.
 
 ### Dashboard Integration
 
 - **Stats cards**: Cards 2-4 show demo exchange status, demo P&L, discrepancy count, demo $/hr, sim accuracy %
 - **Demo Portfolio Comparison section**: Per-exchange cards (sim vs demo columns for USDT, crypto, total) with color-coded diffs
 - **Discrepancy log**: Scrollable table of recent mismatches with time, exchange, type, values, root cause
+- **XLSX export**: 16th sheet "Discrepancies" with timestamp, exchange, type, symbol, sim/demo values, diff, root cause
 
 ### Key Files
 
 | File | Responsibility |
 |------|---------------|
-| `demo_fetcher.py` | `DemoPortfolioFetcher` — REST API clients, baseline management, delta computation, discrepancy detection |
-| `config.py` | Demo API key constants (`BINANCE_TESTNET_API_KEY`, `OKX_DEMO_API_KEY`, `BYBIT_DEMO_API_KEY`, etc.) |
+| `DISCREPANCIES.md` | All 20 discrepancy types documented with priority, status, detection, fix |
+| `exchange_info.py` | `ExchangeInfoManager` — fetches lot sizes, tick sizes, min notionals from all 5 exchanges at startup |
+| `demo_fetcher.py` | `DemoPortfolioFetcher` — REST API clients, baseline management, delta computation, discrepancy detection, fee rate validation |
+| `config.py` | Demo API key constants, `EXCHANGE_TAKER_FEES` (overridden at runtime by validated rates) |
+| `balance.py` | `execute_trade()` — quantity rounding via exchange rules, returns adjustment dict |
+| `monitor.py` | `_compute_trade_size()` — min notional/qty validation; `SimulatedTrade` — rounding/age metadata |
 | `dashboard_server.py` | `_build_demo_state()` — builds baseline-adjusted per-exchange comparison data for dashboard |
 | `state_manager.py` | Persists demo_fetcher baselines via `to_state_dict()` / `from_state_dict()` |
 
-## Phase 2: Demo/Testnet Order Execution (Planned)
+## Phase 2: Demo/Testnet Order Execution (Implemented)
 
-Move from simulation-only to actual order execution on exchange testnet/demo APIs. This validates the simulation against real exchange behavior before live trading.
+When `execution_mode=demo`, the simulation continues as baseline while real market orders are placed on exchange testnets in parallel. Actual fill data (price, qty, fees, latency) is compared with sim expectations to detect discrepancies D-05, D-08 through D-14, D-17, D-19, D-20.
 
-### Goal
+### Execution Mode
 
-Run the bot against all 6 exchange demo accounts with $1800 total capital ($300/exchange), placing real orders on testnets. Compare actual results (fills, latency, slippage) with what the simulation predicts.
-
-### Exchange Testnet Endpoints
-
-| Exchange | Type | Base URL | Auth |
-|----------|------|----------|------|
-| Binance | Spot Testnet | `https://testnet.binance.vision` | Separate testnet API key from [testnet.binance.vision](https://testnet.binance.vision/) |
-| OKX | Demo Trading | Same base URL | Add header `x-simulated-trading: 1`, create Demo Trading API key |
-| Bybit | Testnet | `https://api-testnet.bybit.com` | Separate testnet account at [testnet.bybit.com](https://testnet.bybit.com/) |
-| Bitget | Demo Trading | Demo-specific endpoints | KYC required, demo API key |
-| KuCoin | Sandbox | `https://openapi-sandbox.kucoin.com` | Separate sandbox API key |
-| MEXC | Futures demo only | Limited | Spot testnet not available — use simulation mode for MEXC |
+Set in `settings.json`: `"execution_mode": "simulation"` (default) or `"demo"`. Dashboard Settings page has a selector. Requires restart to take effect.
 
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│  run.py  (mode: "simulation" | "demo" | "live")  │
-├─────────────────────────────────────────────┤
-│  Monitor detects opportunity                      │
-│    ↓                                              │
-│  ExecutionEngine.execute(buy_ex, sell_ex, ...)    │
-│    ├─ SimulationExecutor (current behavior)       │
-│    ├─ DemoExecutor (testnet REST APIs)            │
-│    └─ LiveExecutor (real REST APIs, future)       │
-├─────────────────────────────────────────────┤
-│  BalanceTracker                                   │
-│    ├─ Simulation: internal math (current)         │
-│    └─ Demo/Live: reconcile with exchange API      │
-└─────────────────────────────────────────────┘
+Monitor._tick() detects opportunity
+  ├─ balance.execute_trade()          ← sim (always runs)
+  ├─ SimulatedTrade created + appended
+  └─ asyncio.create_task(_execute_demo_trade())   ← demo (fire-and-forget)
+       └─ DemoExecutor.execute_arbitrage()
+            ├─ asyncio.gather(buy_executor, sell_executor)
+            ├─ One-legged recovery if needed (D-11)
+            ├─ _record_demo_comparison() → updates SimulatedTrade.demo_* fields
+            └─ state_mgr.save() → immediate crash safety
 ```
 
-### New Files
+### Key Files
 
 | File | Purpose |
 |------|---------|
-| `executor.py` | `ExecutionEngine` base class + `SimulationExecutor` (wraps current `balance.execute_trade()`) |
-| `executors/binance_exec.py` | Binance testnet/live order placement via REST API |
-| `executors/okx_exec.py` | OKX demo/live order placement |
-| `executors/bybit_exec.py` | Bybit testnet/live order placement |
-| `executors/bitget_exec.py` | Bitget demo/live order placement |
-| `executors/kucoin_exec.py` | KuCoin sandbox/live order placement |
-| `executors/mexc_exec.py` | MEXC live order placement (no spot testnet) |
-| `api_keys.json` | Per-exchange API keys (gitignored). Separate sections for `demo` and `live` keys |
+| `executor.py` | `TradeResult`, `ArbitrageResult`, `RateLimiter`, `ExecutionEngine` base, `DemoExecutor` coordinator |
+| `executors/__init__.py` | Package init |
+| `executors/binance_exec.py` | Binance testnet: `https://testnet.binance.vision`, HMAC-SHA256, rate limit 100/60s |
+| `executors/okx_exec.py` | OKX demo: `https://www.okx.com` + `x-simulated-trading: 1`, HMAC+passphrase, rate limit 50/2s |
+| `executors/bybit_exec.py` | Bybit demo: `https://api-demo.bybit.com`, X-BAPI headers, rate limit 15/1s |
 
-### Implementation Steps
+### TradeResult Fields
 
-1. **ExecutionEngine interface** — `execute_trade(buy_ex, sell_ex, symbol, amount, buy_price, sell_price)` returns `TradeResult` with actual fill price, qty, fees, latency_ms, partial_fill flag
-2. **Per-exchange executors** — Each implements REST API order placement (market order), order status polling, and balance querying
-3. **Balance reconciliation** — After each trade, query actual exchange balances and compare with BalanceTracker. Log discrepancies. Option to sync BalanceTracker from exchange state.
-4. **API key config** — `api_keys.json` with `{"binance": {"demo": {"key": "...", "secret": "..."}, "live": {...}}, ...}`. Loaded based on execution mode.
-5. **Mode selection** — `settings.json` gets `execution_mode: "simulation" | "demo" | "live"`. Dashboard Settings page gets a mode selector.
-6. **Slippage tracking** — Compare expected fill price (from WebSocket ticker) with actual fill price. Track as new metric in dashboard.
-7. **Latency tracking** — Measure time from order send to fill confirmation. Display in dashboard.
-8. **Capital enforcement** — In demo mode, ignore exchange's large demo balance. Use BalanceTracker's `total_capital` as the limit. Reject orders that would exceed it.
+`success`, `order_id`, `client_order_id`, `exchange`, `symbol`, `side`, `requested_qty`, `filled_qty`, `requested_price`, `actual_avg_price`, `actual_fee`, `fee_rate`, `fee_currency`, `is_maker`, `latency_ms`, `error`, `raw_response`, `timestamp`. Computed properties: `fill_ratio`, `is_partial`, `slippage_pct`.
 
-### Crash Safety & State Reconciliation (Critical for Real Trading)
+### SimulatedTrade Demo Fields
 
-In simulation, the 60s periodic save interval is harmless — lost trades are just missed statistics. In real trading, the problem is **state/reality divergence**: the bot's internal BalanceTracker can disagree with actual exchange balances after a crash. Example: bot buys ORDI on Binance + sells on KuCoin, both orders fill, VPS crashes before save → on restart, BalanceTracker thinks Binance still has the old USDT amount → double-position risk.
+`demo_buy_price`, `demo_sell_price`, `demo_buy_qty`, `demo_sell_qty`, `demo_profit_usd`, `demo_latency_ms`, `demo_slippage_pct`, `demo_status` (filled/partial/rejected/one_legged/unknown).
 
-**Required safeguards for demo/live modes:**
+### Discrepancy Detection
 
-1. **Save state after every real trade** — Call `state_mgr.save()` immediately after `execute_trade()` succeeds, not just every 60s. Real money changes require immediate persistence.
-2. **Reconcile balances on startup** — Query each exchange's actual balances via REST API, compare with saved BalanceTracker. If they diverge, trust the exchange and log the discrepancy. This catches any trades that filled but weren't saved.
-3. **Periodic reconciliation** — Every few minutes, compare internal state with exchange balances. Detect and correct drift from missed saves, partial fills, or fee differences.
-4. **Idempotent client order IDs** — Use unique client order IDs (e.g., `coirna-{symbol}-{timestamp}-{uuid}`) so on restart, the bot can query "did my last order fill?" via the exchange's order history API rather than guessing.
-5. **Order status tracking** — Persist order IDs to state before sending. On restart, check pending order IDs for fill status. States: `pending → sent → filled/partial/rejected/expired`.
+`_record_demo_comparison()` runs after each demo trade. Compares sim vs actual:
+- **D-05**: Fee currency mismatch (unexpected currency)
+- **D-08**: Slippage > 0.01% (avg across legs)
+- **D-09**: Partial fill (fill_ratio < 0.99)
+- **D-10**: Order rejected (error reason)
+- **D-11**: One-legged (one success, one fail) → auto-unwind
+- **D-12**: High latency > 500ms
+- **D-13**: Maker fill (unexpected for market orders)
 
-**Current simulation safety (for reference):**
+### Fee Model (D-05)
 
-| Scenario | Data loss | Recovery |
-|----------|-----------|----------|
-| `systemctl restart` / deploy | None | State saved on SIGTERM |
-| Ctrl+C | None | State saved on SIGINT |
-| Fatal exception | None | State saved before re-raise |
-| OOM kill / power loss | Up to 60s | Last periodic save used |
-| Corrupt write | None | Atomic write (tmp + rename) + `.bak` fallback |
+`balance.py:execute_trade()` accepts `buy_fee_model`/`sell_fee_model`:
+- `"received"` (default): fee from received asset
+- `"spent"`: fee added to spent amount
+- `"token"`: fee from discount token (BNB/BGB/KCS)
+
+Per-exchange config: `config.py:EXCHANGE_FEE_MODELS`.
+
+### In-Transit Tracking (D-17)
+
+In demo mode, external USDT transfers use `InTransitFund` with estimated network delay (BEP20: 30s). Funds deducted from source immediately, credited to destination on `deliver_in_transit()` (called each tick). Simulation mode keeps instant transfers.
+
+### Crash Safety
+
+1. **Immediate save**: `_execute_demo_trade()` calls `state_mgr.save()` after each demo result
+2. **Pending orders**: Client order IDs persisted in state before submission. On crash recovery, queried via `recover_pending_orders()`
+3. **Startup reconciliation**: `reconcile_balances()` queries exchange balances, compares with BalanceTracker, logs discrepancies
+4. **Idempotent IDs**: Format `coirna-{base}-{side}-{ts}-{uuid6}` (e.g., `coirna-BTC-buy-1740000000000-a1b2c3`)
 
 ### What Demo Testing Reveals (vs Simulation)
 
@@ -583,6 +590,8 @@ In simulation, the 60s periodic save interval is harmless — lost trades are ju
 | Rate limits | Not modeled | Real API throttling |
 | Order rejection | Never | Insufficient balance, invalid params |
 | Fee calculation | Config constants | Exchange may charge differently |
+| Fee currency | Always received asset | May be discount token (BNB/BGB/KCS) |
+| Transfer speed | Instant | 10-60s+ network transit |
 
 ### VPS Deployment Plan
 
