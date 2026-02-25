@@ -16,6 +16,7 @@ import logging
 import logging.handlers
 import os
 import signal
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -213,8 +214,9 @@ async def main() -> None:
         optimizer.stop()
         dashboard.stop()
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, shutdown_handler)
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, shutdown_handler)
 
     tasks = [asyncio.create_task(f.run()) for f in fetchers]
     tasks.append(asyncio.create_task(monitor.run()))

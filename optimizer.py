@@ -865,7 +865,7 @@ class SymbolOptimizer:
             elif score_val >= STRONG_SCORE_THRESHOLD:
                 max_dir = 2
             else:
-                max_dir = 1
+                max_dir = 2  # min 2 to avoid over-concentration on 1 pair
             pairs = self._compute_dominant_pairs(sym, max_per_direction=max_dir)
             self._dominant_pairs[sym] = pairs
             buyers_str = ",".join(f"{ex}({w:.0%})" for ex, w in pairs["buyers"])
@@ -1142,7 +1142,7 @@ class SymbolOptimizer:
         elif score.score >= STRONG_SCORE_THRESHOLD:
             max_dir = 2
         else:
-            max_dir = 1
+            max_dir = 2  # min 2 to avoid over-concentration on 1 pair
         pairs = self._compute_dominant_pairs(symbol, max_per_direction=max_dir)
         self._dominant_pairs[symbol] = pairs
 
@@ -1398,7 +1398,7 @@ class SymbolOptimizer:
         elif new_score.score >= STRONG_SCORE_THRESHOLD:
             max_dir = 2
         else:
-            max_dir = 1
+            max_dir = 2  # min 2 to avoid over-concentration on 1 pair
         pairs = self._compute_dominant_pairs(new_symbol, max_per_direction=max_dir)
         self._dominant_pairs[new_symbol] = pairs
         # Clean up old symbol's dominant pair data
@@ -1580,7 +1580,7 @@ class SymbolOptimizer:
                 elif score_val >= STRONG_SCORE_THRESHOLD:
                     max_dir = 2
                 else:
-                    max_dir = 1
+                    max_dir = 2  # min 2 to avoid over-concentration on 1 pair
                 self._dominant_pairs[sym] = self._compute_dominant_pairs(sym, max_per_direction=max_dir)
                 continue
 
@@ -1596,7 +1596,7 @@ class SymbolOptimizer:
             elif score_val >= STRONG_SCORE_THRESHOLD:
                 max_dir = 2
             else:
-                max_dir = 1
+                max_dir = 2  # min 2 to avoid over-concentration on 1 pair
             new_pairs = self._compute_dominant_pairs(sym, max_per_direction=max_dir)
             old_sellers = {ex for ex, _ in old_pairs["sellers"]}
             new_sellers = {ex for ex, _ in new_pairs["sellers"]}

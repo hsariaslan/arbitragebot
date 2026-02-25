@@ -228,7 +228,7 @@ The bot only trades and transfers for **strong** (score ≥ 0.1) and **very stro
 |------|-------|-----------------|----------------|
 | Very Strong | ≥ 0.3 | 3.0×–4.0× | Up to 3 per direction (6 max) |
 | Strong | ≥ 0.1 | 2.0×–3.0× | Up to 2 per direction (4 max) |
-| Normal | 0.01–0.1 | 0× (no trading) | — |
+| Normal | 0.01–0.1 | 0.5×–1.5× | Up to 2 per direction (4 max) |
 | Weak | < 0.01 | 0× (no trading) | — |
 
 ### Historical Tracking
@@ -247,7 +247,7 @@ Instead of spreading capital uniformly across all exchanges, the bot concentrate
 `_compute_dominant_pairs(symbol, max_per_direction)` analyzes rolling tick data:
 - Weights each exchange's buyer/seller score by `best_net_pct` (profitability)
 - Selects top N exchanges per direction (buy/sell), ignoring < 2% weight
-- `max_per_direction` is tier-based: 1 for default, 2 for strong, 3 for very_strong
+- `max_per_direction` is tier-based: 2 for default/strong, 3 for very_strong
 - Falls back to historical `buy_exchange_counts` / `sell_exchange_counts` if insufficient rolling data
 
 ### Capital Allocation
