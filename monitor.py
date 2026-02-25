@@ -137,6 +137,13 @@ class ArbitrageMonitor:
         # Depth filtering tracking
         self._depth_skips: int = 0
 
+        # Post-discovery periodic summary counters (reset every summary)
+        self._summary_interval: int = 30  # Log summary every N ticks
+        self._interval_profitable: int = 0  # Profitable spreads seen
+        self._interval_size_skips: int = 0  # Skipped: trade_size = 0
+        self._interval_balance_skips: int = 0  # Skipped: insufficient balance
+        self._interval_executed: int = 0  # Trades executed
+
         # Per-exchange internal spread tracking (bid-ask on same exchange)
         self._exchange_spread_sum: dict[str, float] = defaultdict(float)
         self._exchange_spread_max: dict[str, float] = defaultdict(float)
@@ -244,6 +251,11 @@ class ArbitrageMonitor:
         trade_size = min(max_by_usdt, max_by_crypto, base)
 
         if trade_size < min_trade:
+            logger.debug(
+                f"[Monitor] {symbol} {buy_ex}->{sell_ex}: trade_size=0 "
+                f"(mult={symbol_mult:.1f} base=${base:.2f} min=${min_trade:.2f} "
+                f"usdt_avail=${usdt_available:.2f} crypto_val=${crypto_value:.2f})"
+            )
             return 0.0
 
         return round(trade_size, 2)
@@ -455,6 +467,7 @@ class ArbitrageMonitor:
 
                 # Simulate trade if profitable and above minimum threshold
                 if net > 0 and net >= pair_min_net:
+                    self._interval_profitable += 1
                     can_trade = True
 
                     # Compute trade size (adaptive or static)
@@ -468,16 +481,33 @@ class ArbitrageMonitor:
                     if self._balance and self._balance.initialized:
                         # Track miss-streak for rebalancing (even when trade_size is 0)
                         if trade_size <= 0:
+                            self._interval_size_skips += 1
                             miss_key = f"{sym}:{buy_ex}:{sell_ex}"
-                            self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
+                            streak = self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
+                            if streak <= 3 or streak % 30 == 0:
+                                sym_score = self._optimizer.get_symbol_score(sym) if self._optimizer else None
+                                mult = sym_score.trade_multiplier if sym_score else 1.0
+                                score_val = sym_score.score if sym_score else 0.0
+                                logger.info(
+                                    f"[Monitor] SKIP {sym} {buy_ex}->{sell_ex}: "
+                                    f"trade_size=0 (net={net:.4f}% mult={mult:.1f} "
+                                    f"score={score_val:.4f} streak={streak})"
+                                )
                             can_trade = False
                         else:
                             has_usdt, has_crypto = self._balance.can_execute(
                                 buy_ex, sell_ex, sym, trade_size, bid_p
                             )
                             if not has_usdt or not has_crypto:
+                                self._interval_balance_skips += 1
                                 miss_key = f"{sym}:{buy_ex}:{sell_ex}"
-                                self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
+                                streak = self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
+                                if streak <= 3 or streak % 30 == 0:
+                                    logger.info(
+                                        f"[Monitor] SKIP {sym} {buy_ex}->{sell_ex}: "
+                                        f"insufficient balance (net={net:.4f}% size=${trade_size:.2f} "
+                                        f"usdt={has_usdt} crypto={has_crypto} streak={streak})"
+                                    )
                                 can_trade = False
 
                         # Try rebalancing when miss-streak is high enough
@@ -519,6 +549,7 @@ class ArbitrageMonitor:
                         can_trade = False
 
                     if can_trade:
+                        self._interval_executed += 1
                         actual_profit = trade_size * (net / 100)
                         trade = SimulatedTrade(
                             timestamp=now, symbol=sym,
@@ -555,6 +586,34 @@ class ArbitrageMonitor:
                     self.record_config_snapshot("adaptive_update")
 
         rows.sort(key=lambda r: r[7], reverse=True)
+
+        # Periodic monitor status summary (every N ticks)
+        if self._tick_count % self._summary_interval == 0 and self._tick_count > 0:
+            syms = ", ".join(self._symbols) if self._symbols else "none"
+            # Per-symbol score/multiplier breakdown
+            sym_details = []
+            if self._optimizer:
+                for s in self._symbols:
+                    sc = self._optimizer.get_symbol_score(s)
+                    if sc:
+                        sym_details.append(
+                            f"{s}(score={sc.score:.4f} mult={sc.trade_multiplier:.1f} "
+                            f"tier={sc.focus_tier})"
+                        )
+            sym_info = " | ".join(sym_details) if sym_details else syms
+            logger.info(
+                f"[Monitor] Status @{self._tick_count}s: "
+                f"profitable={self._interval_profitable} "
+                f"executed={self._interval_executed} "
+                f"skip_size={self._interval_size_skips} "
+                f"skip_balance={self._interval_balance_skips} "
+                f"low_profit={self._low_profit_skips} | {sym_info}"
+            )
+            # Reset interval counters
+            self._interval_profitable = 0
+            self._interval_size_skips = 0
+            self._interval_balance_skips = 0
+            self._interval_executed = 0
 
         # Compute average age per exchange for display
         tick_ages: dict[str, float] = {}
