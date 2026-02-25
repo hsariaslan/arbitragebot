@@ -36,9 +36,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Score threshold: only trade/transfer symbols with score >= this value
-STRONG_SCORE_THRESHOLD = 0.1       # rebalance gate (transfers require this)
-TRADING_SCORE_THRESHOLD = 0.01     # trading gate (minimum to execute trades)
+# Score thresholds for tiered behavior
+STRONG_SCORE_THRESHOLD = 0.1       # strong tier (higher multiplier, more exchanges)
+TRADING_SCORE_THRESHOLD = 0.01     # trading + rebalance gate (minimum to trade/transfer)
 
 
 @dataclass
@@ -1939,13 +1939,14 @@ class SymbolOptimizer:
     def should_allow_rebalance(self, symbol: str) -> bool:
         """Check if a symbol's score is high enough to justify transfer fees.
 
-        Only strong symbols (score >= 0.1) are allowed to rebalance.
-        Weak/normal symbols should trade with existing capital, not incur transfer fees.
+        Any tradeable symbol (score >= 0.01) is allowed to rebalance.
+        The ROI gate, net P&L gate, and transfer worthiness checks in
+        monitor/balance already protect against unprofitable transfers.
         """
         score = self._scores.get(symbol)
         if not score:
             return False
-        return score.score >= STRONG_SCORE_THRESHOLD
+        return score.score >= TRADING_SCORE_THRESHOLD
 
     def get_symbol_score(self, symbol: str) -> SymbolScore | None:
         """Return the current rolling score for a symbol."""

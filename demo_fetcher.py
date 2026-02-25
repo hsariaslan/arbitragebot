@@ -23,6 +23,7 @@ from config import (
     BINANCE_TESTNET_API_SECRET,
     BYBIT_DEMO_API_KEY,
     BYBIT_DEMO_API_SECRET,
+    EXCHANGE_TAKER_FEES,
     OKX_DEMO_API_KEY,
     OKX_DEMO_API_SECRET,
     OKX_DEMO_PASSPHRASE,
@@ -102,6 +103,9 @@ class DemoPortfolioFetcher:
         # Per-exchange backoff (for rate limiting)
         self._backoff: dict[str, float] = {}
 
+        # Fee rate validation: track which exchanges have been validated (D-04)
+        self._fee_validated: dict[str, bool] = {}
+
         # Determine which exchanges have keys configured
         self._configured: dict[str, bool] = {
             "Binance": bool(BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET),
@@ -149,6 +153,15 @@ class DemoPortfolioFetcher:
                 tasks.append(self._fetch_bybit(session))
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # D-04: Fetch fee rates (one-time per exchange, after first successful balance fetch)
+            fee_tasks = []
+            if self._configured["OKX"] and not self._fee_validated.get("OKX"):
+                fee_tasks.append(self._fetch_okx_fee_rate(session))
+            if self._configured["Bybit"] and not self._fee_validated.get("Bybit"):
+                fee_tasks.append(self._fetch_bybit_fee_rate(session))
+            if fee_tasks:
+                await asyncio.gather(*fee_tasks, return_exceptions=True)
 
         # Only count symbols the simulation actually holds (qty > 0).
         # Don't include active symbols with 0 holdings — their demo crypto
@@ -261,6 +274,13 @@ class DemoPortfolioFetcher:
                 elif asset in _COIN_TO_SYMBOL:
                     bal.crypto[_COIN_TO_SYMBOL[asset]] = total
 
+            # D-04: Extract fee rate from account response (one-time validation)
+            if not self._fee_validated.get("Binance"):
+                commission_rates = data.get("commissionRates", {})
+                taker_str = commission_rates.get("taker")
+                if taker_str:
+                    self._validate_fee_rate("Binance", float(taker_str))
+
             return bal
 
         except Exception as e:
@@ -370,6 +390,117 @@ class DemoPortfolioFetcher:
 
     # ── Rate limit backoff ───────────────────────────────────────────────
 
+    # ── Fee rate validation (D-04) ──────────────────────────────────────
+
+    def _validate_fee_rate(self, exchange: str, actual_rate: float) -> None:
+        """Compare actual fee rate with configured rate. Warn + override if different."""
+        self._fee_validated[exchange] = True
+        configured = EXCHANGE_TAKER_FEES.get(exchange, 0.001)
+
+        if abs(actual_rate - configured) < 1e-7:
+            logger.info(
+                f"[FeeValidation] {exchange}: configured={configured*100:.4f}%, "
+                f"actual={actual_rate*100:.4f}% — OK"
+            )
+            return
+
+        # Mismatch detected
+        logger.warning(
+            f"[FeeValidation] {exchange}: configured={configured*100:.4f}%, "
+            f"actual={actual_rate*100:.4f}% — MISMATCH, overriding with actual rate"
+        )
+        # Override in-place so all code using EXCHANGE_TAKER_FEES gets the real rate
+        EXCHANGE_TAKER_FEES[exchange] = actual_rate
+
+        # Record as discrepancy
+        self.recent_discrepancies.append(Discrepancy(
+            timestamp=time.time(),
+            exchange=exchange,
+            discrepancy_type="fee_rate_mismatch",
+            symbol="ALL",
+            sim_value=configured * 100,
+            demo_value=actual_rate * 100,
+            diff_abs=abs(actual_rate - configured) * 100,
+            diff_pct=((actual_rate - configured) / configured) * 100 if configured else 0,
+            root_cause=f"Exchange actual taker fee ({actual_rate*100:.4f}%) differs from "
+                       f"configured ({configured*100:.4f}%). Overridden at runtime.",
+        ))
+        self.total_discrepancy_count += 1
+
+    async def _fetch_okx_fee_rate(self, session: aiohttp.ClientSession) -> None:
+        """Fetch OKX actual taker fee rate (one-time after first successful balance fetch)."""
+        if self._fee_validated.get("OKX"):
+            return
+        try:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + \
+                 f"{datetime.now(timezone.utc).microsecond // 1000:03d}Z"
+            method = "GET"
+            path = "/api/v5/account/trade-fee?instType=SPOT&instId=BTC-USDT"
+            sign_str = ts + method + path
+            signature = base64.b64encode(
+                hmac.new(
+                    OKX_DEMO_API_SECRET.encode(), sign_str.encode(), hashlib.sha256
+                ).digest()
+            ).decode()
+
+            headers = {
+                "OK-ACCESS-KEY": OKX_DEMO_API_KEY,
+                "OK-ACCESS-SIGN": signature,
+                "OK-ACCESS-TIMESTAMP": ts,
+                "OK-ACCESS-PASSPHRASE": OKX_DEMO_PASSPHRASE,
+                "x-simulated-trading": "1",
+            }
+
+            url = f"https://www.okx.com{path}"
+            async with session.get(url, headers=headers) as resp:
+                data = await resp.json()
+
+            if data.get("code") == "0" and data.get("data"):
+                taker_str = data["data"][0].get("taker")
+                if taker_str:
+                    self._validate_fee_rate("OKX", float(taker_str))
+            else:
+                logger.warning(f"[FeeValidation] OKX fee rate query failed: {data.get('msg', data)}")
+        except Exception as e:
+            logger.warning(f"[FeeValidation] OKX fee rate query error: {e}")
+
+    async def _fetch_bybit_fee_rate(self, session: aiohttp.ClientSession) -> None:
+        """Fetch Bybit actual taker fee rate (one-time after first successful balance fetch)."""
+        if self._fee_validated.get("Bybit"):
+            return
+        try:
+            ts = str(int(time.time() * 1000))
+            recv_window = "5000"
+            params = "category=spot&symbol=BTCUSDT"
+            sign_str = f"{ts}{BYBIT_DEMO_API_KEY}{recv_window}{params}"
+            signature = hmac.new(
+                BYBIT_DEMO_API_SECRET.encode(), sign_str.encode(), hashlib.sha256
+            ).hexdigest()
+
+            headers = {
+                "X-BAPI-API-KEY": BYBIT_DEMO_API_KEY,
+                "X-BAPI-TIMESTAMP": ts,
+                "X-BAPI-SIGN": signature,
+                "X-BAPI-RECV-WINDOW": recv_window,
+            }
+
+            url = f"https://api-demo.bybit.com/v5/account/fee-rate?{params}"
+            async with session.get(url, headers=headers) as resp:
+                data = await resp.json()
+
+            if data.get("retCode") == 0:
+                fee_list = data.get("result", {}).get("list", [])
+                if fee_list:
+                    taker_str = fee_list[0].get("takerFeeRate")
+                    if taker_str:
+                        self._validate_fee_rate("Bybit", float(taker_str))
+            else:
+                logger.warning(f"[FeeValidation] Bybit fee rate query failed: {data.get('retMsg', data)}")
+        except Exception as e:
+            logger.warning(f"[FeeValidation] Bybit fee rate query error: {e}")
+
+    # ── Rate limit backoff ───────────────────────────────────────────────
+
     def _apply_backoff(self, exchange: str) -> None:
         """Double the backoff for an exchange (max 120s)."""
         current = self._backoff.get(exchange, 0)
@@ -378,6 +509,9 @@ class DemoPortfolioFetcher:
         logger.warning(f"[DemoCompare] {exchange} rate limited, backing off {delay:.0f}s")
 
     # ── Discrepancy detection ────────────────────────────────────────────
+
+    # D-18: Grace period after sim trades to avoid false discrepancies
+    _TRADE_GRACE_PERIOD: float = 30.0  # seconds
 
     def _detect_discrepancies(
         self, exchange: str, demo: DemoBalance, prices: dict[str, float]
@@ -388,6 +522,10 @@ class DemoPortfolioFetcher:
         Only flags differences caused by actual trading activity divergence
         (slippage, fee differences, partial fills, etc.).
         Without a baseline, no discrepancies are reported.
+
+        D-18: If a sim trade touched this exchange within the grace period,
+        discrepancies are tagged as settling (root cause updated) to avoid
+        false alarms from balance sync timing.
         """
         if demo.error:
             return []
@@ -398,6 +536,10 @@ class DemoPortfolioFetcher:
 
         now = time.time()
         discrepancies: list[Discrepancy] = []
+
+        # D-18: Check if a sim trade recently touched this exchange
+        last_trade = self._balance.last_trade_time.get(exchange, 0.0)
+        settling = (now - last_trade) < self._TRADE_GRACE_PERIOD if last_trade > 0 else False
 
         # 1. USDT balance — compare delta from baseline
         # demo_usdt_delta = what the bot changed on demo
@@ -410,10 +552,15 @@ class DemoPortfolioFetcher:
         if usdt_diff > 1.0:
             diff_pct = (sim_usdt - adjusted_demo_usdt) / max(abs(adjusted_demo_usdt), 1) * 100
             root = self._classify_root_cause(exchange, "USDT", sim_usdt, adjusted_demo_usdt, diff_pct)
+            dtype = "balance_mismatch"
+            if settling:
+                dtype = "balance_mismatch_settling"
+                settle_age = now - last_trade
+                root = f"[Settling {settle_age:.0f}s ago] {root}"
             disc = Discrepancy(
                 timestamp=now,
                 exchange=exchange,
-                discrepancy_type="balance_mismatch",
+                discrepancy_type=dtype,
                 symbol="USDT",
                 sim_value=sim_usdt,
                 demo_value=adjusted_demo_usdt,
@@ -423,14 +570,16 @@ class DemoPortfolioFetcher:
             )
             discrepancies.append(disc)
             logger.info(
-                f"[DemoCompare] {exchange} USDT mismatch: "
+                f"[DemoCompare] {exchange} USDT {dtype}: "
                 f"sim=${sim_usdt:.2f} adjusted_demo=${adjusted_demo_usdt:.2f} "
                 f"diff=${usdt_diff:.2f} ({diff_pct:+.2f}%) — {root}"
             )
 
         # 2. Crypto positions — compare qty deltas from baseline
-        # Only check symbols where sim holds qty > 0 OR demo has a
-        # non-zero delta from baseline (bot actually traded it).
+        # Check symbols where sim holds qty > 0 OR demo has a non-zero
+        # delta from baseline. This catches both desync directions:
+        # sim holds position but demo doesn't (executor failed / sim-only)
+        # and demo holds position but sim doesn't (unexpected fill).
         sim_crypto = self._balance.crypto.get(exchange, {})
         check_syms: set[str] = set()
         for sym, qty in sim_crypto.items():
@@ -463,6 +612,13 @@ class DemoPortfolioFetcher:
                     dtype = "balance_mismatch"
 
                 root = self._classify_root_cause(exchange, sym, sim_val, adjusted_demo_val, diff_pct)
+
+                # D-18: Tag as settling if trade recently touched this exchange
+                if settling:
+                    dtype = f"{dtype}_settling"
+                    settle_age = now - last_trade
+                    root = f"[Settling {settle_age:.0f}s ago] {root}"
+
                 disc = Discrepancy(
                     timestamp=now,
                     exchange=exchange,
@@ -496,7 +652,6 @@ class DemoPortfolioFetcher:
             return "Minor drift: likely fee calculation difference or rounding"
 
         # Check if the difference is roughly a fee amount
-        from config import EXCHANGE_TAKER_FEES
         fee_rate = EXCHANGE_TAKER_FEES.get(exchange, 0.001)
         expected_fee_impact = max(sim_val, demo_val) * fee_rate * 100
         if abs(abs(diff_pct) - expected_fee_impact) < expected_fee_impact * 0.5:
