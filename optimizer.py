@@ -238,6 +238,10 @@ class SymbolOptimizer:
         self._rotation_budget_ok: bool = True
         self._session_hourly_rate: float = 0.0
 
+        # Discovery debug logging
+        self._discovery_debug_last_summary: float = 0.0
+        self._discovery_debug_last_detail: float = 0.0
+
         # Per-symbol dominant exchange pair mapping
         self._dominant_pairs: dict[str, dict] = {}
         self._last_reallocation: dict[str, float] = {}
@@ -305,6 +309,8 @@ class SymbolOptimizer:
 
         if self._discovery_mode:
             self._monitor._paused = True
+            # Enable DEBUG logging during discovery
+            logger.setLevel(logging.DEBUG)
             logger.info(
                 f"[Optimizer] Discovery stage: scoring all "
                 f"{len(self._all_symbols)} symbols on all exchanges "
@@ -449,6 +455,10 @@ class SymbolOptimizer:
                     self._exchange_buy_ticks[best_buy] += 1
                     self._exchange_sell_ticks[best_sell] += 1
 
+        # Discovery debug logging
+        if self._discovery_mode:
+            self._discovery_debug_log(now)
+
         # Prune old ticks
         cutoff = now - self._scoring_window
         for dq in self._ticks.values():
@@ -456,6 +466,120 @@ class SymbolOptimizer:
                 dq.popleft()
 
         self._compute_scores()
+
+    def _discovery_debug_log(self, now: float) -> None:
+        """Emit debug logs during discovery to diagnose low scores."""
+        elapsed = now - self._discovery_start
+
+        # Every 30s: exchange data availability + tick-level spread summary
+        if now - self._discovery_debug_last_summary >= 30.0:
+            self._discovery_debug_last_summary = now
+
+            # Count how many exchanges have fresh data per symbol
+            ex_data_counts: dict[str, int] = {}
+            symbols_with_data = 0
+            for symbol in self._all_symbols:
+                count = 0
+                for fetcher in self._fetchers:
+                    if fetcher.exchange_name not in self._active_exchanges:
+                        continue
+                    state = fetcher.get_state()
+                    ps = state.get(symbol)
+                    if ps and ps.bid and ps.ask:
+                        if ps.received_at > 0 and (now - ps.received_at) <= MAX_DATA_AGE_SECONDS:
+                            count += 1
+                ex_data_counts[symbol] = count
+                if count >= 2:
+                    symbols_with_data += 1
+
+            # Exchange connectivity
+            ex_names = []
+            for fetcher in self._fetchers:
+                if fetcher.exchange_name in self._active_exchanges:
+                    state = fetcher.get_state()
+                    fresh = sum(1 for ps in state.values()
+                                if ps and ps.bid and ps.received_at > 0
+                                and (now - ps.received_at) <= MAX_DATA_AGE_SECONDS)
+                    ex_names.append(f"{fetcher.exchange_name}({fresh})")
+
+            # Best spread this tick across all symbols
+            best_ticks: list[tuple[str, float, float, float, str, str]] = []
+            for symbol in self._all_symbols:
+                ticks = self._ticks.get(symbol)
+                if ticks:
+                    last = ticks[-1]
+                    if last.timestamp >= now - 2.0:  # Recent tick
+                        best_ticks.append((
+                            symbol, last.best_net_pct, last.spread_pct,
+                            last.fee_pct, last.buy_exchange, last.sell_exchange,
+                        ))
+            best_ticks.sort(key=lambda x: x[1], reverse=True)
+
+            logger.debug(
+                f"[Discovery] {elapsed:.0f}s | tick={self._tick_count} | "
+                f"exchanges: {', '.join(ex_names)} | "
+                f"symbols_with_2+_exchanges: {symbols_with_data}/{len(self._all_symbols)}"
+            )
+
+            # Top 5 spreads this tick
+            if best_ticks:
+                for sym, net, spread, fee, buy_ex, sell_ex in best_ticks[:5]:
+                    logger.debug(
+                        f"[Discovery]   {sym.replace('USDT', ''):>8s}: "
+                        f"net={net:+.4f}% spread={spread:+.4f}% fee={fee:.4f}% "
+                        f"({buy_ex}->{sell_ex})"
+                    )
+                # Count positive vs negative net spreads
+                pos = sum(1 for _, n, *_ in best_ticks if n > 0)
+                neg = len(best_ticks) - pos
+                logger.debug(
+                    f"[Discovery]   Spread summary: {pos} positive, {neg} negative "
+                    f"out of {len(best_ticks)} symbols with data"
+                )
+
+        # Every 60s: score ranking summary
+        if now - self._discovery_debug_last_detail >= 60.0:
+            self._discovery_debug_last_detail = now
+
+            if self._scores:
+                ranked = sorted(
+                    self._scores.values(),
+                    key=lambda s: s.score,
+                    reverse=True,
+                )
+                # Top 10 with full breakdown
+                logger.debug(
+                    f"[Discovery] Score ranking at {elapsed:.0f}s "
+                    f"(threshold={TRADING_SCORE_THRESHOLD}):"
+                )
+                for s in ranked[:10]:
+                    logger.debug(
+                        f"[Discovery]   #{s.rank:2d} {s.symbol.replace('USDT', ''):>8s}: "
+                        f"score={s.score:.6f} "
+                        f"(avg_prof_net={s.avg_profitable_net:.4f}% × freq={s.frequency:.2%}) "
+                        f"ticks={s.profitable_ticks}/{s.total_ticks} "
+                        f"best_net={s.best_net_pct:+.4f}%"
+                    )
+                above = sum(1 for s in ranked if s.score >= TRADING_SCORE_THRESHOLD)
+                logger.debug(
+                    f"[Discovery]   {above} symbols above threshold "
+                    f"({TRADING_SCORE_THRESHOLD}), "
+                    f"{sum(1 for s in ranked if s.score >= STRONG_SCORE_THRESHOLD)} strong "
+                    f"({STRONG_SCORE_THRESHOLD})"
+                )
+
+                # Fee floor analysis: show min combined fee for each exchange pair
+                if elapsed <= 120:  # Only in first 2 minutes
+                    ex_list = sorted(self._active_exchanges)
+                    logger.debug("[Discovery]   Fee pairs:")
+                    for i, ex1 in enumerate(ex_list):
+                        for ex2 in ex_list[i + 1:]:
+                            fee1 = EXCHANGE_TAKER_FEES.get(ex1, 0.001)
+                            fee2 = EXCHANGE_TAKER_FEES.get(ex2, 0.001)
+                            combined = (fee1 + fee2) * 100
+                            logger.debug(
+                                f"[Discovery]     {ex1}+{ex2}: {combined:.3f}%"
+                            )
 
     def _compute_scores(self) -> None:
         """Recompute SymbolScore for all symbols from rolling windows."""
@@ -659,6 +783,7 @@ class SymbolOptimizer:
         """Pick best symbols after discovery period. All active exchanges stay active."""
         if not self._scores:
             logger.warning("[Optimizer] Discovery complete but no scores available")
+            logger.setLevel(logging.INFO)
             self._discovery_mode = False
             self._discovery_complete = True
             self._monitor._paused = False
@@ -687,23 +812,25 @@ class SymbolOptimizer:
             )
         else:
             # No tradeable symbols found — extend discovery and keep scanning
-            top = ranked_symbols[0] if ranked_symbols else None
-            top_info = (
-                f"top={top.symbol.replace('USDT', '')}({top.score:.4f})"
-                if top else "no data"
-            )
             self._discovery_duration = min(
                 self._discovery_duration * 2, 3600
             )
             self._discovery_start = time.time()
+            top_10 = ", ".join(
+                f"{s.symbol.replace('USDT', '')}({s.score:.6f} "
+                f"prof={s.profitable_ticks}/{s.total_ticks} "
+                f"best={s.best_net_pct:+.4f}%)"
+                for s in ranked_symbols[:10]
+            ) if ranked_symbols else "no data"
             logger.warning(
                 f"[Optimizer] Discovery: NO tradeable symbols (>= {TRADING_SCORE_THRESHOLD}). "
-                f"{top_info}. Extending discovery to {self._discovery_duration}s."
+                f"Extending to {self._discovery_duration}s. Top 10: {top_10}"
             )
             return  # Stay in discovery mode, don't proceed
 
         if not best_symbols:
             logger.warning("[Optimizer] Discovery: no symbols with data")
+            logger.setLevel(logging.INFO)
             self._discovery_mode = False
             self._discovery_complete = True
             self._monitor._paused = False
@@ -837,7 +964,8 @@ class SymbolOptimizer:
             self._dashboard._settings["active_symbols"] = list(best_symbols)
             self._dashboard._settings["allocations"] = allocations
 
-        # Transition to normal operation
+        # Transition to normal operation — disable discovery debug logging
+        logger.setLevel(logging.INFO)
         self._discovery_mode = False
         self._discovery_complete = True
         self._last_evaluation = time.time()
