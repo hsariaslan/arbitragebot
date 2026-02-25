@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import type { ConfigSnapshot, OptimizerState, Portfolio, Simulation, Trade, Transfer } from '../types';
+import type { ConfigSnapshot, DemoDiscrepancy, OptimizerState, Portfolio, Simulation, Trade, Transfer } from '../types';
 
 const tier1 = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'ADAUSDT'];
 const tier2 = ['AVAXUSDT', 'LINKUSDT', 'POLUSDT', 'DOTUSDT', 'NEARUSDT', 'SUIUSDT', 'APTUSDT', 'TRXUSDT'];
@@ -13,6 +13,7 @@ export function exportXlsx(
   allTrades: Trade[] = [],
   allTransfers: Transfer[] = [],
   allConfigHistory: ConfigSnapshot[] = [],
+  demoDiscrepancies: DemoDiscrepancy[] = [],
 ) {
   const wb = XLSX.utils.book_new();
   const now = new Date();
@@ -202,6 +203,7 @@ export function exportXlsx(
 
   // 10. Trade History (ALL trades)
   if (allTrades.length > 0) {
+    const hasDemoTrades = allTrades.some(t => t.demo_status);
     const tradeRows = allTrades.map(t => ({
       Timestamp: new Date(t.timestamp * 1000).toISOString(),
       Symbol: t.symbol.replace('USDT', ''),
@@ -214,6 +216,14 @@ export function exportXlsx(
       'Net%': t.net_pct,
       'Profit $': t.profit_usd,
       'Trade Amount $': t.trade_amount,
+      ...(hasDemoTrades ? {
+        'Demo Buy $': t.demo_buy_price ?? '',
+        'Demo Sell $': t.demo_sell_price ?? '',
+        'Demo Profit $': t.demo_profit_usd ?? '',
+        'Slippage %': t.demo_slippage_pct ?? '',
+        'Latency ms': t.demo_latency_ms ?? '',
+        'Demo Status': t.demo_status ?? '',
+      } : {}),
     }));
     const wsTrades = XLSX.utils.json_to_sheet(tradeRows);
     XLSX.utils.book_append_sheet(wb, wsTrades, 'Trade History');
@@ -324,6 +334,23 @@ export function exportXlsx(
     }));
     const wsConfig = XLSX.utils.json_to_sheet(configRows);
     XLSX.utils.book_append_sheet(wb, wsConfig, 'Configurations');
+  }
+
+  // 16. Discrepancies (demo vs sim)
+  if (demoDiscrepancies.length > 0) {
+    const discRows = demoDiscrepancies.map(d => ({
+      Timestamp: new Date(d.timestamp * 1000).toISOString(),
+      Exchange: d.exchange,
+      Type: d.type,
+      Symbol: d.symbol.replace('USDT', ''),
+      'Sim Value $': Number(d.sim_value.toFixed(4)),
+      'Demo Value $': Number(d.demo_value.toFixed(4)),
+      'Diff $': Number(d.diff_abs.toFixed(4)),
+      'Diff %': Number(d.diff_pct.toFixed(2)),
+      'Root Cause': d.root_cause,
+    }));
+    const wsDisc = XLSX.utils.json_to_sheet(discRows);
+    XLSX.utils.book_append_sheet(wb, wsDisc, 'Discrepancies');
   }
 
   // Generate and download

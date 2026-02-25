@@ -49,6 +49,15 @@ export interface Trade {
   net_pct: number;
   profit_usd: number;
   trade_amount: number;
+  // Demo execution results (Phase 2, present when execution_mode=demo)
+  demo_buy_price?: number;
+  demo_sell_price?: number;
+  demo_buy_qty?: number;
+  demo_sell_qty?: number;
+  demo_profit_usd?: number;
+  demo_latency_ms?: number;
+  demo_slippage_pct?: number;
+  demo_status?: string;
 }
 
 export interface Transfer {
@@ -84,6 +93,7 @@ export interface Settings {
   rebalance_cooldown?: number;
   rebalance_roi_horizon?: number;
   adaptive_mode?: boolean;
+  execution_mode?: string;
   // Security
   ip_whitelist_enabled?: boolean;
   ip_whitelist?: string[];

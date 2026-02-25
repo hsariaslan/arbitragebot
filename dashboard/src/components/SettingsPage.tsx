@@ -29,6 +29,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [rebalanceCooldown, setRebalanceCooldown] = useState(currentSettings.rebalance_cooldown ?? 30);
   const [rebalanceRoiHorizon, setRebalanceRoiHorizon] = useState(currentSettings.rebalance_roi_horizon ?? 1800);
   const [adaptiveMode, setAdaptiveMode] = useState(currentSettings.adaptive_mode ?? true);
+  const [executionMode, setExecutionMode] = useState(currentSettings.execution_mode ?? 'simulation');
   const [ipWhitelistEnabled, setIpWhitelistEnabled] = useState(currentSettings.ip_whitelist_enabled ?? false);
   const [ipWhitelist, setIpWhitelist] = useState((currentSettings.ip_whitelist ?? []).join(', '));
   const [securityStatus, setSecurityStatus] = useState<string | null>(null);
@@ -55,6 +56,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setRebalanceCooldown(currentSettings.rebalance_cooldown ?? 30);
       setRebalanceRoiHorizon(currentSettings.rebalance_roi_horizon ?? 1800);
       setAdaptiveMode(currentSettings.adaptive_mode ?? true);
+      setExecutionMode(currentSettings.execution_mode ?? 'simulation');
       setIpWhitelistEnabled(currentSettings.ip_whitelist_enabled ?? false);
       setIpWhitelist((currentSettings.ip_whitelist ?? []).join(', '));
     }
@@ -79,6 +81,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     rebalance_cooldown: rebalanceCooldown,
     rebalance_roi_horizon: rebalanceRoiHorizon,
     adaptive_mode: adaptiveMode,
+    execution_mode: executionMode,
   });
 
   const handleSave = () => {
@@ -136,6 +139,18 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           </label>
           <p className="text-xs text-slate-500 ml-7 mt-1">
             Dynamically adjusts trade sizes, rebalance amounts, and thresholds based on real-time market conditions and available capital.
+          </p>
+        </div>
+        <div className="mt-4">
+          <label className="block text-sm text-slate-300 mb-1">Execution Mode</label>
+          <select value={executionMode}
+            onChange={e => { setDirty(true); setExecutionMode(e.target.value); }}
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
+            <option value="simulation">Simulation</option>
+            <option value="demo">Demo (Testnet)</option>
+          </select>
+          <p className="text-xs text-slate-500 mt-1">
+            Demo mode places real orders on exchange testnets. Requires API keys in .env and a restart to take effect.
           </p>
         </div>
       </div>

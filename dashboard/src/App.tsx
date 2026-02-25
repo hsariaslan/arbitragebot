@@ -177,6 +177,7 @@ export default function App() {
             allTrades={state.all_trades}
             allTransfers={state.all_transfers}
             allConfigHistory={state.all_config_history}
+            demoDiscrepancies={state.demo_comparison?.recent_discrepancies}
           />
         ) : activeTab === 'settings' ? (
           <SettingsPage
