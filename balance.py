@@ -590,13 +590,13 @@ class BalanceTracker:
         self.usdt[sell_exchange] += usdt_received
 
     def get_portfolio_value(self, prices: dict[str, float]) -> float:
-        """Calculate total portfolio value in USD."""
+        """Calculate total portfolio value in USD (counts ALL held crypto, not just active symbols)."""
         total = sum(self.usdt.values())
         for ex in self._exchanges:
-            for sym in self._symbols:
-                qty = self.crypto[ex].get(sym, 0.0)
-                p = prices.get(sym, 0.0)
-                total += qty * p
+            for sym, qty in self.crypto[ex].items():
+                if qty > 0:
+                    p = prices.get(sym, 0.0)
+                    total += qty * p
         return total
 
     def get_balance_lines(self, prices: dict[str, float]) -> list[str]:
@@ -604,8 +604,9 @@ class BalanceTracker:
         parts = []
         for ex in self._exchanges:
             ex_total = self.usdt[ex]
-            for sym in self._symbols:
-                ex_total += self.crypto[ex].get(sym, 0.0) * prices.get(sym, 0.0)
+            for sym, qty in self.crypto[ex].items():
+                if qty > 0:
+                    ex_total += qty * prices.get(sym, 0.0)
             parts.append(f"{ex} ${ex_total:.0f}")
         portfolio = self.get_portfolio_value(prices)
         transfer_count = len(self.transfers)
@@ -636,9 +637,17 @@ class BalanceTracker:
 
     def from_state_dict(self, data: dict) -> None:
         """Restore mutable state from a previously saved dict."""
-        self.usdt = data["usdt"]
-        self.crypto = data["crypto"]
-        self._crypto_usd = data["_crypto_usd"]
+        # Merge saved state with current exchanges (handle added/removed exchanges)
+        saved_usdt = data["usdt"]
+        saved_crypto = data["crypto"]
+        saved_crypto_usd = data["_crypto_usd"]
+        for ex in self._exchanges:
+            if ex in saved_usdt:
+                self.usdt[ex] = saved_usdt[ex]
+            if ex in saved_crypto:
+                self.crypto[ex] = saved_crypto[ex]
+            if ex in saved_crypto_usd:
+                self._crypto_usd[ex] = saved_crypto_usd[ex]
         self._initial_investment = data["_initial_investment"]
         self._initialized = data["_initialized"]
         self.transfers = [
