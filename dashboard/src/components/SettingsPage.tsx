@@ -100,11 +100,11 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     (e: React.ChangeEvent<HTMLInputElement>) => { setDirty(true); fn(Number(e.target.value) || fallback); };
 
   return (
-    <div className="space-y-6 max-w-3xl">
+    <div className="space-y-4 sm:space-y-6 max-w-3xl">
       {/* Capital */}
-      <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Capital</h2>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="block text-xs text-slate-500 mb-1">Total Capital ($)</label>
             <input type="number" value={totalCapital} min={100} onChange={d(setTotalCapital, 1800)}
@@ -141,7 +141,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       </div>
 
       {/* Auto-Rotation */}
-      <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Auto-Rotation</h2>
         <div className="space-y-4">
           <label className="flex items-center gap-3 cursor-pointer">
@@ -150,7 +150,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
             <span className="text-sm text-slate-300">Enable automatic symbol rotation</span>
           </label>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className="block text-xs text-slate-500 mb-1">Min Active Symbols</label>
               <input type="number" value={numActiveSymbols} min={1} max={20} onChange={d(setNumActiveSymbols, 3)}
@@ -179,9 +179,9 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       </div>
 
       {/* Advanced Optimizer */}
-      <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Advanced Optimizer</h2>
-        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
             <label className="block text-xs text-slate-500 mb-1">Safety Multiplier</label>
             <input type="number" value={safetyMultiplier} min={1} step={0.5} onChange={d(setSafetyMultiplier, 2.0)}
@@ -244,7 +244,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       </div>
 
       {/* Security */}
-      <div className="bg-slate-800/50 rounded-lg p-5">
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Security</h2>
         <div className="space-y-4">
           <label className="flex items-center gap-3 cursor-pointer">
@@ -286,9 +286,9 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       </div>
 
       {/* Danger Zone */}
-      <div className="bg-red-950/30 border border-red-900/50 rounded-lg p-5">
+      <div className="bg-red-950/30 border border-red-900/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-red-400 uppercase tracking-wider mb-3">Danger Zone</h2>
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <p className="text-sm text-slate-300">Restart Bot</p>
             <p className="text-xs text-slate-500 mt-0.5">Discard all session data and start fresh with ${totalCapital}.</p>
@@ -301,7 +301,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       </div>
 
       {/* Action Buttons */}
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-3 sm:gap-4">
         <button onClick={handleSave}
           className="px-6 py-2.5 bg-slate-600 hover:bg-slate-500 text-white rounded-lg text-sm font-medium transition-colors">
           Save for Next Restart
