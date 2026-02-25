@@ -251,6 +251,15 @@ ALLOWED_ORIGINS: list[str] = (
 # Dashboard bind host (default localhost — use 0.0.0.0 to expose directly)
 DASHBOARD_BIND_HOST: str = os.environ.get("DASHBOARD_BIND_HOST", "127.0.0.1")
 
+# Demo/testnet API keys (for portfolio comparison)
+BINANCE_TESTNET_API_KEY: str = os.environ.get("BINANCE_TESTNET_API_KEY", "")
+BINANCE_TESTNET_API_SECRET: str = os.environ.get("BINANCE_TESTNET_API_SECRET", "")
+OKX_DEMO_API_KEY: str = os.environ.get("OKX_DEMO_API_KEY", "")
+OKX_DEMO_API_SECRET: str = os.environ.get("OKX_DEMO_API_SECRET", "")
+OKX_DEMO_PASSPHRASE: str = os.environ.get("OKX_DEMO_PASSPHRASE", "")
+BYBIT_DEMO_API_KEY: str = os.environ.get("BYBIT_DEMO_API_KEY", "")
+BYBIT_DEMO_API_SECRET: str = os.environ.get("BYBIT_DEMO_API_SECRET", "")
+
 # Reconnection settings (exponential backoff)
 RECONNECT_INITIAL_DELAY: float = 1.0
 RECONNECT_MAX_DELAY: float = 60.0

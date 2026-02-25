@@ -15,6 +15,7 @@ state/
 settings.json
 api_keys.json
 .env
+REWARDS.md
 
 # Dashboard build artifacts & dependencies
 dashboard/node_modules/
