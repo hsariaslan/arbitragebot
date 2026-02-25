@@ -350,7 +350,7 @@ React/TypeScript SPA served by the Python backend via WebSocket.
 
 ### Pages
 
-- **Dashboard** — Real-time overview: portfolio P&L, trade/transfer stats, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`), balance table, price grid, recent trades/transfers, rotation log
+- **Dashboard** — Real-time overview: portfolio P&L (sim + demo), trade/transfer stats, demo exchange status, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`), balance table, price grid, demo portfolio comparison, recent trades/transfers, rotation log
 - **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist
 - **Settings** — Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: "Restart Bot" button clears saved state and starts fresh with configured capital.
 - **Logs** — Unified log viewer with two sub-tabs:
@@ -391,6 +391,7 @@ Session state survives restarts (including deploys via `systemctl restart`). `St
 - **BalanceTracker**: USDT/crypto balances, transfers, fees, initialization state
 - **ArbitrageMonitor**: Trade history, config snapshots, tick count, session statistics
 - **SymbolOptimizer**: Active symbols, rotations, historical stats, discovery state, dominant pairs
+- **DemoPortfolioFetcher**: Baseline snapshots per exchange (first-fetch balances for delta computation)
 
 **How it works:**
 - Each component implements `to_state_dict()` / `from_state_dict()` for JSON serialization
@@ -411,7 +412,7 @@ Click "Export XLSX" on the Rankings page. 15 sheets: Summary, Rolling Rankings, 
 | File | Purpose |
 |------|---------|
 | `dashboard/src/App.tsx` | Main layout, tab routing, WebSocket state, IP-denied flash prevention |
-| `dashboard/src/types.ts` | All TypeScript interfaces (Trade, SymbolRanking, AdaptiveConfig, ConfigSnapshot, AuthLogEntry, BotLogEntry, etc.) |
+| `dashboard/src/types.ts` | All TypeScript interfaces (Trade, SymbolRanking, AdaptiveConfig, ConfigSnapshot, AuthLogEntry, BotLogEntry, DemoComparisonState, etc.) |
 | `dashboard/src/hooks/useWebSocket.ts` | WebSocket connection, auth flow, state management, export callbacks |
 | `dashboard/src/components/LoginPage.tsx` | Login form with reCAPTCHA integration |
 | `dashboard/src/components/LogsPage.tsx` | Unified Logs page container with Bot Logs / Auth Logs sub-tabs |
@@ -420,9 +421,11 @@ Click "Export XLSX" on the Rankings page. 15 sheets: Summary, Rolling Rankings, 
 | `dashboard/src/components/ExportLogsModal.tsx` | Reusable export modal with time presets, custom UTC picker, filter toggle |
 | `dashboard/src/components/SymbolRankings.tsx` | Main page ranking card |
 | `dashboard/src/components/RankingPage.tsx` | Full ranking analysis page |
+| `dashboard/src/components/DemoComparison.tsx` | Per-exchange demo vs sim comparison cards with discrepancy log |
 | `dashboard/src/components/SettingsPage.tsx` | Settings form with adaptive mode toggle, IP whitelist, restart button |
 | `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 15 sheets |
 | `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings, log export from disk, restart handler |
+| `demo_fetcher.py` | Demo/testnet portfolio fetcher: REST API clients for Binance/OKX/Bybit, baseline snapshots, discrepancy detection |
 | `state_manager.py` | Session state persistence: atomic save/load, periodic saves, clear for fresh restart |
 | `email_notifier.py` | Gmail SMTP email notifications (login alerts, IP block alerts) |
 
@@ -440,6 +443,51 @@ python read_xlsx.py -s Summary               # summary in key-value format
 python read_xlsx.py --list                   # list sheet names and row counts
 python read_xlsx.py -r 50                    # show up to 50 rows per sheet
 ```
+
+## Demo/Testnet Portfolio Comparison
+
+Fetches real portfolio balances from exchange demo/testnet APIs and displays them alongside the simulation to validate accuracy. Prepares for Phase 2 (actual demo order execution).
+
+### Supported Demo Exchanges
+
+| Exchange | API Endpoint | Auth Method |
+|----------|-------------|-------------|
+| Binance | `https://testnet.binance.vision/api/v3/account` | HMAC-SHA256, header `X-MBX-APIKEY` |
+| OKX | `https://www.okx.com/api/v5/account/balance` | HMAC-SHA256 + passphrase, header `x-simulated-trading: 1` |
+| Bybit | `https://api-demo.bybit.com/v5/account/wallet-balance` | HMAC-SHA256 |
+
+Gate.io excluded entirely. Bitget, KuCoin, MEXC continue simulation-only.
+
+### Baseline Snapshot System
+
+Pre-funded testnet balances (Binance ~$10k, OKX ~$5k, Bybit ~$50k) are subtracted so only bot-caused activity is visible:
+
+- **Baseline** = snapshot captured on first successful fetch per exchange (persisted across restarts)
+- **Delta** = `current_balance - baseline` (change since baseline)
+- **Displayed demo value** = `sim_value + delta` (mirrors sim, diverges only when real trades happen)
+- When no demo trades executed: delta = 0, displayed = sim, diff = 0
+
+### Discrepancy Detection
+
+Runs after each poll (15s interval). Compares baseline-adjusted demo values against simulation:
+- USDT balance mismatch (threshold: $1 or 1%)
+- Crypto position mismatches (qty delta vs sim qty)
+- Root cause classification: fee difference, slippage, missing/extra position, stale data
+
+### Dashboard Integration
+
+- **Stats cards**: Cards 2-4 show demo exchange status, demo P&L, discrepancy count, demo $/hr, sim accuracy %
+- **Demo Portfolio Comparison section**: Per-exchange cards (sim vs demo columns for USDT, crypto, total) with color-coded diffs
+- **Discrepancy log**: Scrollable table of recent mismatches with time, exchange, type, values, root cause
+
+### Key Files
+
+| File | Responsibility |
+|------|---------------|
+| `demo_fetcher.py` | `DemoPortfolioFetcher` — REST API clients, baseline management, delta computation, discrepancy detection |
+| `config.py` | Demo API key constants (`BINANCE_TESTNET_API_KEY`, `OKX_DEMO_API_KEY`, `BYBIT_DEMO_API_KEY`, etc.) |
+| `dashboard_server.py` | `_build_demo_state()` — builds baseline-adjusted per-exchange comparison data for dashboard |
+| `state_manager.py` | Persists demo_fetcher baselines via `to_state_dict()` / `from_state_dict()` |
 
 ## Phase 2: Demo/Testnet Order Execution (Planned)
 

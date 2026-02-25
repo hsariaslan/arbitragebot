@@ -1,6 +1,6 @@
 # CoirnaBot
 
-**v0.2.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard.
+**v0.5.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard.
 
 Monitors real-time prices across multiple crypto exchanges via WebSocket, detects price discrepancies, and simulates simultaneous buy/sell orders to profit from the spread.
 
@@ -11,6 +11,7 @@ Monitors real-time prices across multiple crypto exchanges via WebSocket, detect
 - **Adaptive trading**: Dynamic trade sizing, smart rebalancing, dominant exchange detection
 - **Symbol optimizer**: Auto-discovery, scoring, rotation, promotion/demotion with strong-only trading
 - **Real-time dashboard**: React/TypeScript SPA with live portfolio, rankings, trade history, XLSX export
+- **Demo/testnet comparison**: Fetches real portfolio from Binance/OKX/Bybit demo APIs, baseline-adjusted comparison with discrepancy detection
 - **Dashboard security**: Login authentication, rate limiting, reCAPTCHA v2, IP whitelist, email alerts, auth logging
 
 ## Prerequisites
@@ -89,8 +90,10 @@ coirnabot/
   monitor.py              # ArbitrageMonitor — detects opportunities, executes simulated trades
   optimizer.py            # SymbolOptimizer — discovery, scoring, rotation, dominant pairs
   balance.py              # BalanceTracker — simulated capital management, rebalancing
+  demo_fetcher.py         # Demo/testnet portfolio fetcher — REST API clients, baseline snapshots
   dashboard_server.py     # WebSocket server — auth, state broadcast, settings handler
   email_notifier.py       # Gmail SMTP notifications (login alerts, IP block alerts)
+  state_manager.py        # Session state persistence — atomic save/load, periodic saves
   read_xlsx.py            # CLI tool to read exported XLSX files
   fetchers/
     base.py               # BaseFetcher abstract class
@@ -112,10 +115,10 @@ coirnabot/
 
 | Page | Description |
 |------|-------------|
-| **Dashboard** | Live portfolio P&L, symbol rankings, balance table, price grid, recent trades/transfers |
+| **Dashboard** | Live portfolio P&L (sim + demo), demo exchange status, symbol rankings, balance table, price grid, demo comparison, recent trades/transfers |
 | **Rankings** | Rolling/historical rankings, top-10 charts, lifecycle funnel, exchange analysis, XLSX export |
 | **Settings** | Trade amount, capital, optimizer parameters, adaptive mode, IP whitelist |
-| **Auth Log** | Authentication events: logins, failures, blocks, reconnections (filterable) |
+| **Logs** | Unified log viewer: Bot Logs (real-time, filterable) and Auth Logs (login events, IP blocks) with export |
 
 ## Configuration
 
