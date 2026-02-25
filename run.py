@@ -42,7 +42,7 @@ from fetchers.binance import BinanceFetcher
 from fetchers.bitget import BitgetFetcher
 from fetchers.bybit import BybitFetcher
 from fetchers.kucoin import KuCoinFetcher
-from fetchers.mexc import MEXCFetcher
+# from fetchers.mexc import MEXCFetcher  # Disabled (geo-blocked in Japan)
 from fetchers.okx import OKXFetcher
 from monitor import ArbitrageMonitor
 from optimizer import SymbolOptimizer
@@ -95,7 +95,7 @@ async def main() -> None:
         OKXFetcher(),
         BybitFetcher(),
         BitgetFetcher(),
-        MEXCFetcher(),
+        # MEXCFetcher(),  # Disabled (geo-blocked in Japan, re-add in Phase 2)
         KuCoinFetcher(),
     ]
 
@@ -230,6 +230,7 @@ async def main() -> None:
         await asyncio.gather(*tasks)
     except Exception as e:
         logger.error(f"Fatal error: {e}")
+        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None)
         for fetcher in fetchers:
             fetcher.stop()
         monitor.stop()

@@ -96,9 +96,9 @@ OKX_EXCHANGE_NAME: str = "OKX"
 BYBIT_WS_URL: str = "wss://stream.bybit.com/v5/public/spot"
 BYBIT_EXCHANGE_NAME: str = "Bybit"
 
-# MEXC Spot WebSocket
-MEXC_WS_URL: str = "wss://wbs-api.mexc.com/ws"
-MEXC_EXCHANGE_NAME: str = "MEXC"
+# MEXC Spot WebSocket — disabled (geo-blocked in Japan, re-add in Phase 2)
+# MEXC_WS_URL: str = "wss://wbs-api.mexc.com/ws"
+# MEXC_EXCHANGE_NAME: str = "MEXC"
 
 # Bitget Spot WebSocket (v2 API)
 BITGET_WS_URL: str = "wss://ws.bitget.com/v2/ws/public"
@@ -124,14 +124,14 @@ EXCHANGE_TAKER_FEES: dict[str, float] = {
     "Binance": 0.00075,  # 0.075% (base 0.10%, 25% discount paying fees in BNB)
     "OKX": 0.0010,       # 0.10% (base tier, OKB discount requires 500 OKB ~$25k)
     "Bybit": 0.0010,     # 0.10% (MNT/BIT discount NOT available for API users)
-    "MEXC": 0.0005,      # 0.05% (base tier, already lowest)
+    # "MEXC": 0.0005,    # 0.05% — disabled (geo-blocked in Japan)
     "Bitget": 0.0008,    # 0.08% (base 0.10%, 20% discount paying fees in BGB)
     "KuCoin": 0.0008,    # 0.08% (base 0.10%, 20% discount paying fees in KCS)
     "Gate.io": 0.0010,   # 0.10% (base tier, GT discount is minimal ~10%)
 }
 
 # All available exchanges and symbols (used by settings page)
-ALL_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "MEXC", "Bitget", "KuCoin", "Gate.io"]
+ALL_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "Bitget", "KuCoin", "Gate.io"]  # MEXC removed (geo-blocked)
 
 # Active trading configuration (balance-tracked symbols/exchanges) — defaults
 ACTIVE_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "Bitget", "KuCoin"]
@@ -173,7 +173,7 @@ USDT_WITHDRAWAL_FEES: dict[str, float] = {
     "Binance": 0.01,       # BEP20
     "OKX": 0.01,           # Arbitrum (~$0.004 on-chain)
     "Bybit": 0.20,         # BEP20 (Aptos $0 promo available but may expire)
-    "MEXC": 0.01,          # Polygon ($0.007) or BEP20 ($0.01)
+    # "MEXC": 0.01,        # Polygon — disabled (geo-blocked in Japan)
     "Bitget": 0.10,        # Arbitrum (~$0.001 on-chain, Bitget markup ~$0.10)
     "KuCoin": 0.80,        # Polygon (cheapest KuCoin option, still expensive)
     "Gate.io": 0.05,       # Arbitrum/Polygon
