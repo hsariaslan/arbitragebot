@@ -2117,3 +2117,19 @@ class SymbolOptimizer:
         self._prev_strong_set = set(data.get("_prev_strong_set", []))
         self._prev_very_strong_set = set(data.get("_prev_very_strong_set", []))
         self._prev_candidate_set = set(data.get("_prev_candidate_set", []))
+
+        # If discovery was in progress when saved, reset for fresh restart.
+        # Rolling scores (_scores dict) are NOT persisted, so resuming discovery
+        # with stale timestamps and tick counts produces incorrect results.
+        if self._discovery_mode and not self._discovery_complete:
+            self._discovery_start = 0.0  # run() will set to time.time()
+            self._discovery_duration = self._initial_discovery_duration
+            self._tick_count = 0
+            # Clear stale exchange profitability data (matches empty scores)
+            self._exchange_profit_ticks = defaultdict(int)
+            self._exchange_profit_sum = defaultdict(float)
+            self._exchange_buy_ticks = defaultdict(int)
+            self._exchange_sell_ticks = defaultdict(int)
+            logger.info(
+                "[Optimizer] Discovery was in progress — resetting timer for fresh restart"
+            )
