@@ -82,7 +82,7 @@ export default function ExportLogsModal({ open, onClose, onExport, sessionStart,
         <h3 className="text-lg font-semibold text-white mb-4">Export Logs</h3>
 
         {/* Preset buttons */}
-        <div className="grid grid-cols-4 gap-2 mb-4">
+        <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mb-4">
           {PRESETS.map(p => (
             <button
               key={p.value}

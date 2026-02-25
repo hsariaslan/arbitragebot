@@ -16,7 +16,7 @@ export default function LogsPage({ botLogs, authLogs, sendWithCallback, uptimeSe
   return (
     <div className="space-y-4">
       {/* Sub-tab navigation */}
-      <div className="flex items-center gap-1 border-b border-slate-700">
+      <div className="flex items-center gap-1 border-b border-slate-700 overflow-x-auto">
         <button
           onClick={() => setActiveSubTab('bot')}
           className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${

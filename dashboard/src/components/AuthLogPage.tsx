@@ -117,13 +117,13 @@ export default function AuthLogPage({ authLogs, sendWithCallback, uptimeSeconds 
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
         <h2 className="text-lg font-semibold text-white">Auth Log</h2>
         <span className="text-xs text-slate-500">{authLogs.length} total events</span>
       </div>
 
       {/* Filters */}
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <select
           value={filter}
           onChange={e => setFilter(e.target.value)}
@@ -138,7 +138,7 @@ export default function AuthLogPage({ authLogs, sendWithCallback, uptimeSeconds 
           value={search}
           onChange={e => setSearch(e.target.value)}
           placeholder="Search by IP, username, browser..."
-          className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500 placeholder-slate-500 w-64"
+          className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500 placeholder-slate-500 w-full sm:w-64"
         />
         <button
           onClick={() => setShowExportModal(true)}
@@ -146,13 +146,13 @@ export default function AuthLogPage({ authLogs, sendWithCallback, uptimeSeconds 
         >
           Export Logs
         </button>
-        <span className="text-xs text-slate-500 ml-auto">{filtered.length} shown</span>
+        <span className="text-xs text-slate-500 sm:ml-auto">{filtered.length} shown</span>
       </div>
 
       {/* Table */}
       <div className="bg-slate-800/50 rounded-xl border border-slate-700 overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm min-w-[700px]">
             <thead>
               <tr className="border-b border-slate-700 text-slate-400 text-xs">
                 <th className="text-left px-4 py-2.5 font-medium">Time</th>

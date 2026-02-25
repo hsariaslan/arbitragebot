@@ -120,7 +120,7 @@ export default function BotLogsTab({ logs, sendWithCallback, uptimeSeconds }: Bo
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
         <h2 className="text-lg font-semibold text-white">Bot Logs</h2>
         <span className="text-xs text-slate-500">{logs.length} total entries</span>
       </div>
@@ -150,7 +150,7 @@ export default function BotLogsTab({ logs, sendWithCallback, uptimeSeconds }: Bo
           value={search}
           onChange={e => setSearch(e.target.value)}
           placeholder="Search log messages..."
-          className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500 placeholder-slate-500 w-64"
+          className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500 placeholder-slate-500 w-full sm:w-64"
         />
         <button
           onClick={() => setAutoScroll(!autoScroll)}
@@ -169,7 +169,7 @@ export default function BotLogsTab({ logs, sendWithCallback, uptimeSeconds }: Bo
         >
           Export Logs
         </button>
-        <span className="text-xs text-slate-500 ml-auto">{filtered.length} shown</span>
+        <span className="text-xs text-slate-500 sm:ml-auto">{filtered.length} shown</span>
       </div>
 
       {/* Log output (terminal-style) */}
