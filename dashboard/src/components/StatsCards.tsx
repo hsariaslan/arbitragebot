@@ -92,7 +92,7 @@ export default function StatsCards({ portfolio, simulation, profitStats, demoCom
     {
       title: 'Trade Profit',
       main: <PnlValue value={portfolio.trading_pnl} />,
-      sub: <span className="text-amber-400">-${portfolio.transfer_fees.toFixed(2)} fees</span>,
+      sub: <span className="text-amber-400">-${Math.abs(portfolio.transfer_fees).toFixed(2)} fees</span>,
       subLabel: 'Net',
       accent: 'border-cyan-500',
       extra: hasDemo ? (

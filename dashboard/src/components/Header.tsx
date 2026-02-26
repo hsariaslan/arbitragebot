@@ -128,7 +128,7 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
           <div className="h-3 w-px bg-slate-700" />
           <div className="flex items-center gap-1.5">
             <span className="text-slate-500">Net Profit:</span>
-            <PnlText value={portfolio.trading_pnl - portfolio.transfer_fees} />
+            <PnlText value={portfolio.trading_pnl - Math.abs(portfolio.transfer_fees)} />
           </div>
           <div className="h-3 w-px bg-slate-700" />
           <div className="flex items-center gap-1.5">
@@ -138,7 +138,7 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
           <div className="h-3 w-px bg-slate-700" />
           <div className="flex items-center gap-1.5">
             <span className="text-slate-500">Fees:</span>
-            <span className="text-amber-400 font-mono font-medium">-${portfolio.transfer_fees.toFixed(2)}</span>
+            <span className="text-amber-400 font-mono font-medium">-${Math.abs(portfolio.transfer_fees).toFixed(2)}</span>
           </div>
           <div className="h-3 w-px bg-slate-700" />
           <div className="flex items-center gap-1.5">

@@ -546,7 +546,8 @@ class ExchangeInfoManager:
 
         Queries public APIs for OKX, Bitget, KuCoin. Binance and Bybit require
         auth — skipped here (validated in demo_fetcher if keys are available).
-        Overrides USDT_WITHDRAWAL_FEES in-place if actual fees differ.
+        Logs mismatches but does NOT override USDT_WITHDRAWAL_FEES — production
+        config rates are used for simulation to ensure realistic cost estimates.
         """
         from config import USDT_WITHDRAWAL_FEES
 
@@ -584,11 +585,10 @@ class ExchangeInfoManager:
                 )
             else:
                 logger.warning(
-                    "[WithdrawalFees] %s: configured=$%.3f, actual=$%.3f — "
-                    "MISMATCH, overriding with actual fee",
+                    "[WithdrawalFees] %s: production=$%.3f, actual=$%.3f — "
+                    "MISMATCH (simulation keeps production rate)",
                     ex, configured, actual_fee,
                 )
-                USDT_WITHDRAWAL_FEES[ex] = actual_fee
 
         # Log exchanges we can't validate
         skip = []
