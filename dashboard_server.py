@@ -31,7 +31,6 @@ from config import (
     RECAPTCHA_SITE_KEY,
     SYMBOLS,
     TRUSTED_PROXIES,
-    USDT_WITHDRAWAL_FEES,
     verify_dashboard_password,
 )
 from email_notifier import notify_blocked, notify_login
@@ -44,6 +43,7 @@ if TYPE_CHECKING:
     from monitor import ArbitrageMonitor
     from optimizer import SymbolOptimizer
     from state_manager import StateManager
+    from transfer_fee_manager import TransferFeeManager
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,7 @@ class DashboardServer:
         log_handler: DashboardLogHandler | None = None,
         state_manager: "StateManager | None" = None,
         fee_manager: "FeeManager | None" = None,
+        transfer_fee_manager: "TransferFeeManager | None" = None,
     ) -> None:
         self._monitor = monitor
         self._balance = balance
@@ -108,6 +109,7 @@ class DashboardServer:
         self._log_handler = log_handler
         self._state_manager = state_manager
         self._fee_manager = fee_manager
+        self._transfer_fee_mgr = transfer_fee_manager
         self._demo_fetcher: "DemoPortfolioFetcher | None" = None
         if optimizer:
             optimizer.set_dashboard(self)
@@ -814,6 +816,62 @@ class DashboardServer:
         "referral_paid_in": ["same_as_fee", "USDT"],
     }
 
+    _TRANSFER_NETWORK_SCHEMA: dict[str, tuple[type, float | None, float | None]] = {
+        "network": (str, None, None),
+        "fee": (float, 0.0, 100.0),
+        "fee_type": (str, None, None),
+        "percentage_rate": (float, 0.0, 1.0),
+        "percentage_min": (float, 0.0, 100.0),
+        "min_withdrawal": (float, 0.0, 100000.0),
+        "speed_seconds": (float, 0.0, 86400.0),
+        "enabled": (bool, None, None),
+        "notes": (str, None, None),
+    }
+    _TRANSFER_ENUMS: dict[str, list[str]] = {
+        "fee_type": ["flat", "percentage", "conditional"],
+    }
+
+    @classmethod
+    def _validate_transfer_settings(cls, transfer_configs: dict) -> tuple[bool, str]:
+        """Validate per-exchange transfer fee config dict."""
+        if not isinstance(transfer_configs, dict):
+            return False, "transfer_configs must be a dict"
+        for exchange, cfg in transfer_configs.items():
+            if not isinstance(exchange, str):
+                return False, "Exchange name must be a string"
+            if not isinstance(cfg, dict):
+                return False, f"{exchange}: config must be a dict"
+            pref = cfg.get("preferred_network", "auto")
+            if not isinstance(pref, str):
+                return False, f"{exchange}.preferred_network must be a string"
+            networks = cfg.get("networks", [])
+            if not isinstance(networks, list):
+                return False, f"{exchange}.networks must be a list"
+            for i, net in enumerate(networks):
+                if not isinstance(net, dict):
+                    return False, f"{exchange}.networks[{i}] must be a dict"
+                for key, value in net.items():
+                    if key not in cls._TRANSFER_NETWORK_SCHEMA:
+                        return False, f"{exchange}.networks[{i}]: unknown key '{key}'"
+                    expected_type, min_val, max_val = cls._TRANSFER_NETWORK_SCHEMA[key]
+                    if expected_type == bool:
+                        if not isinstance(value, bool):
+                            return False, f"{exchange}.networks[{i}].{key} must be boolean"
+                    elif expected_type == str:
+                        if not isinstance(value, str):
+                            return False, f"{exchange}.networks[{i}].{key} must be a string"
+                        allowed = cls._TRANSFER_ENUMS.get(key, [])
+                        if allowed and value not in allowed:
+                            return False, f"{exchange}.networks[{i}].{key} must be one of {allowed}"
+                    elif expected_type in (int, float):
+                        if not isinstance(value, (int, float)) or isinstance(value, bool):
+                            return False, f"{exchange}.networks[{i}].{key} must be a number"
+                        if min_val is not None and value < min_val:
+                            return False, f"{exchange}.networks[{i}].{key} must be >= {min_val}"
+                        if max_val is not None and value > max_val:
+                            return False, f"{exchange}.networks[{i}].{key} must be <= {max_val}"
+        return True, ""
+
     @classmethod
     def _validate_fee_settings(cls, fee_configs: dict) -> tuple[bool, str]:
         """Validate per-exchange fee config dict."""
@@ -959,6 +1017,29 @@ class DashboardServer:
                     self._fee_manager.real_mode = bool(fee_real_mode)
             await ws.send(json.dumps({"type": "fee_settings_saved", "ok": True}))
             logger.info("[Fee] Fee settings saved and applied")
+
+        elif msg_type == "save_transfer_settings":
+            now = time.time()
+            if now - self._last_settings_save < self._settings_cooldown:
+                await ws.send(json.dumps({
+                    "type": "transfer_settings_error",
+                    "error": f"Please wait {int(self._settings_cooldown)}s between saves.",
+                }))
+                return
+            transfer_data = msg.get("transfer_configs", {})
+            ok, err = self._validate_transfer_settings(transfer_data)
+            if not ok:
+                await ws.send(json.dumps({"type": "transfer_settings_error", "error": err}))
+                return
+            self._last_settings_save = now
+            # Persist to settings.json
+            self._settings["transfer_configs"] = transfer_data
+            save_settings(self._settings)
+            # Hot-apply to TransferFeeManager
+            if self._transfer_fee_mgr:
+                self._transfer_fee_mgr.update_from_settings(transfer_data)
+            await ws.send(json.dumps({"type": "transfer_settings_saved", "ok": True}))
+            logger.info("[Transfer] Transfer fee settings saved and applied")
 
         elif msg_type == "export_bot_logs":
             start_ts = msg.get("start", 0)
@@ -1128,6 +1209,12 @@ class DashboardServer:
             fee_real_mode = settings.get("fee_real_mode")
             if fee_real_mode is not None:
                 self._fee_manager.real_mode = bool(fee_real_mode)
+
+        # Hot-apply transfer fee settings if present
+        if self._transfer_fee_mgr:
+            tc = settings.get("transfer_configs")
+            if tc:
+                self._transfer_fee_mgr.update_from_settings(tc)
 
         # Record config snapshot
         self._monitor.record_config_snapshot("settings_applied")
@@ -1396,6 +1483,7 @@ class DashboardServer:
             "bot_logs": self._log_handler.get_recent() if self._log_handler else [],
             "demo_comparison": self._build_demo_state() if self._demo_fetcher and self._demo_fetcher.enabled else None,
             **(self._fee_manager.to_broadcast_dict() if self._fee_manager else {}),
+            **(self._transfer_fee_mgr.to_broadcast_dict() if self._transfer_fee_mgr else {}),
         }
 
     def _build_demo_state(self) -> dict[str, Any]:
@@ -1514,7 +1602,7 @@ class DashboardServer:
         # Per-exchange transfer worthiness
         exchange_transfer_status: dict[str, Any] = {}
         for ex in balance._exchanges:
-            fee = USDT_WITHDRAWAL_FEES.get(ex, 1.0)
+            fee = self._transfer_fee_mgr.get_withdrawal_fee(ex) if self._transfer_fee_mgr else 1.0
             est_profit = balance._estimated_profit_per_trade
             trades_to_recoup = fee / est_profit if est_profit > 0 else 999
             exchange_transfer_status[ex] = {
