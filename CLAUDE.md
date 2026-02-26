@@ -281,19 +281,19 @@ Each active symbol gets a **trade multiplier** based on its focus tier (see Stro
 
 ### Transfer Fee Awareness
 
-Each exchange has different USDT withdrawal fees (defined in `config.py: USDT_WITHDRAWAL_FEES`):
+Each exchange has different USDT withdrawal fees per network, managed by `TransferFeeManager` in `transfer_fee_manager.py`. Default configs are in `config.py: DEFAULT_TRANSFER_CONFIGS` with full per-network data (8-17 networks per exchange). Three fee types: flat, percentage (KuCoin ERC20: max($5.50, amount × 0.2%)), and conditional (Gate.io TRC20: free if ≥ 2,020 USDT). Effective fees (with "auto" preferred network):
 
-| Exchange | Withdrawal Fee |
-|----------|---------------|
-| Binance  | $0.01 |
-| OKX      | $0.01 |
-| MEXC     | $0.01 |
-| Gate.io  | $0.05 |
-| Bitget   | $0.10 |
-| Bybit    | $0.20 |
-| KuCoin   | $0.80 |
+| Exchange | Cheapest Network | Effective Fee |
+|----------|-----------------|---------------|
+| Bitget   | Plasma          | $0.001 |
+| Binance  | BEP20           | $0.01 |
+| MEXC     | Arbitrum        | $0.00 |
+| Bybit    | Aptos           | $0.00 |
+| OKX      | Polygon         | $0.10 |
+| KuCoin   | Plasma          | $0.40 |
+| Gate.io  | BEP20           | $0.50 |
 
-Before executing an external USDT transfer, the bot checks **transfer worthiness**: if `withdrawal_fee / estimated_profit_per_trade > 50`, the transfer is skipped (not worth the cost). This prevents expensive KuCoin transfers unless highly profitable.
+Before executing an external USDT transfer, the bot checks **transfer worthiness**: if `withdrawal_fee / estimated_profit_per_trade > 50`, the transfer is skipped (not worth the cost). This prevents expensive transfers unless highly profitable. Configurable per-exchange via the Transfer Fees tab in Settings.
 
 ### Adaptive Rebalance Amounts
 
@@ -341,9 +341,10 @@ All snapshots are exported in the XLSX "Configurations" sheet.
 | `monitor.py` | `_compute_trade_size()` — per-symbol adaptive sizing; `_tick()` — trade execution with threshold checks, ROI gate, miss streak tracking; `ConfigSnapshot` dataclass |
 | `balance.py` | `compute_rebalance_amount()` — adaptive rebalance; transfer worthiness check in `_rebalance_usdt()`/`_rebalance_crypto()` |
 | `optimizer.py` | `_compute_scores()` — focus tiers + trade multipliers; `_complete_discovery()` — strong-only activation + concentrated allocation; `_compute_dominant_pairs()` — per-symbol exchange detection; `_evaluate_demotions()` — strong threshold gating; `_track_candidate_transitions()` — strong/very_strong historical tracking |
-| `config.py` | `DEFAULT_FEE_CONFIGS`, `USDT_WITHDRAWAL_FEES`, `ADAPTIVE_MODE` |
+| `config.py` | `DEFAULT_FEE_CONFIGS`, `DEFAULT_TRANSFER_CONFIGS`, `ADAPTIVE_MODE` |
 | `fee_manager.py` | `FeeManager` — centralized fee computation, token discounts, referral cashbacks, zero-fee pairs, real mode |
-| `settings.json` | Runtime settings including `adaptive_mode`, `min_net_profit_pct`, `trade_amount_usd`, `total_capital`, `fee_configs` |
+| `transfer_fee_manager.py` | `TransferFeeManager` — per-exchange per-network withdrawal fees (flat/percentage/conditional), preferred network selection |
+| `settings.json` | Runtime settings including `adaptive_mode`, `min_net_profit_pct`, `trade_amount_usd`, `total_capital`, `fee_configs`, `transfer_configs` |
 
 ## Dashboard
 
@@ -353,9 +354,10 @@ React/TypeScript SPA served by the Python backend via WebSocket.
 
 - **Dashboard** — Real-time overview: portfolio P&L (sim + demo), trade/transfer stats, demo exchange status, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`), balance table, price grid, demo portfolio comparison, recent trades/transfers, rotation log. Fully responsive: 2×2 stats grid, horizontal-scroll tables, bottom tab nav on mobile.
 - **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist. All tables horizontal-scroll on mobile.
-- **Settings** — Two sub-tabs:
+- **Settings** — Three sub-tabs:
   - **General**: Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: "Restart Bot" button clears saved state and starts fresh with configured capital. Form grids stack single-column on mobile.
   - **Fee Management**: Per-exchange fee configuration — base taker rate, token discount toggle+%, fee model (received/spent/token), mechanism (instant/rebate/tier), referral cashback toggle+%+settlement delay, zero-fee pairs. Shows computed effective rates with formula breakdown. Cashback stats (pending/credited). Real mode banner. Save button with 5s cooldown. Hot-applied without restart.
+  - **Transfer Fees**: Per-exchange withdrawal fee configuration — per-network fees (flat/percentage/conditional), preferred network selector (auto=cheapest), enable/disable individual networks. Shows effective fee and cheapest network per exchange. Save button with 5s cooldown. Hot-applied without restart.
 - **Logs** — Unified log viewer with two sub-tabs:
   - **Bot Logs**: Real-time terminal-style log viewer (font-mono, auto-scroll). Filters: level (INFO/WARNING/ERROR), component (Monitor/Optimizer/Balance/exchanges/Dashboard/Auth/Email/Settings/Fee), text search. Export to `.log` file.
   - **Auth Logs**: Authentication event log (login success/failure, blocked IPs, reconnections, IP denials). Filterable by event type with search by IP/username/browser/OS. Export to `.csv` file.
@@ -409,7 +411,7 @@ Session state survives restarts (including deploys via `systemctl restart`). `St
 
 ### XLSX Export
 
-Click "Export XLSX" on the Rankings page. 17 sheets: Summary, Rolling Rankings, Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange (Rolling/Historical), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History, Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations, Fee Configuration, Discrepancies.
+Click "Export XLSX" on the Rankings page. 18 sheets: Summary, Rolling Rankings, Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange (Rolling/Historical), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History, Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations, Fee Configuration, Transfer Configuration, Discrepancies.
 
 ### Key Dashboard Files
 
@@ -426,9 +428,10 @@ Click "Export XLSX" on the Rankings page. 17 sheets: Summary, Rolling Rankings, 
 | `dashboard/src/components/SymbolRankings.tsx` | Main page ranking card |
 | `dashboard/src/components/RankingPage.tsx` | Full ranking analysis page |
 | `dashboard/src/components/DemoComparison.tsx` | Per-exchange demo vs sim comparison cards with discrepancy log |
-| `dashboard/src/components/SettingsPage.tsx` | Settings form with General/Fee Management sub-tabs, adaptive mode toggle, IP whitelist, restart button |
+| `dashboard/src/components/SettingsPage.tsx` | Settings form with General/Fee Management/Transfer Fees sub-tabs, adaptive mode toggle, IP whitelist, restart button |
 | `dashboard/src/components/FeeManagementTab.tsx` | Per-exchange fee configuration UI — discounts, referral cashback, zero-fee pairs |
-| `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 17 sheets |
+| `dashboard/src/components/TransferFeeManagementTab.tsx` | Per-exchange transfer fee configuration UI — per-network fees, preferred network, enable/disable |
+| `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 18 sheets |
 | `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings, log export from disk, restart handler |
 | `demo_fetcher.py` | Demo/testnet portfolio fetcher: REST API clients for Binance/OKX/Bybit, baseline snapshots, discrepancy detection |
 | `state_manager.py` | Session state persistence: atomic save/load, periodic saves, clear for fresh restart |
