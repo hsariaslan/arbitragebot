@@ -13,6 +13,7 @@ from config import (
     ADAPTIVE_MODE,
     AUTO_ROTATE,
     CONFIRMATION_PERIOD_SECONDS,
+    DEFAULT_FEE_CONFIGS,
     DEMOTION_PERIOD_SECONDS,
     DEMOTION_THRESHOLD,
     DISCOVERY_DURATION_SECONDS,
@@ -54,6 +55,8 @@ DEFAULT_SETTINGS: dict = {
     "adaptive_mode": ADAPTIVE_MODE,
     "ip_whitelist_enabled": False,
     "ip_whitelist": [],
+    "fee_configs": DEFAULT_FEE_CONFIGS,
+    "fee_real_mode": False,
 }
 
 
