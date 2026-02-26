@@ -32,6 +32,7 @@ const COMPONENT_OPTIONS = [
   { value: 'Email', label: 'Email' },
   { value: 'Settings', label: 'Settings' },
   { value: 'Fee', label: 'Fee' },
+  { value: 'Transfer', label: 'Transfer' },
 ];
 
 const LEVEL_STYLES: Record<string, { text: string }> = {

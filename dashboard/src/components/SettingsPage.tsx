@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import type { Settings, ExchangeFeeConfig, FeeStats } from '../types';
+import type { Settings, ExchangeFeeConfig, ExchangeTransferConfig, FeeStats } from '../types';
 import FeeManagementTab from './FeeManagementTab';
+import TransferFeeManagementTab from './TransferFeeManagementTab';
 
 interface SettingsPageProps {
   currentSettings: Settings;
@@ -10,11 +11,12 @@ interface SettingsPageProps {
   feeConfigs?: Record<string, ExchangeFeeConfig>;
   feeRealMode?: boolean;
   feeStats?: FeeStats;
+  transferConfigs?: Record<string, ExchangeTransferConfig>;
 }
 
-type SettingsSubTab = 'general' | 'fees';
+type SettingsSubTab = 'general' | 'fees' | 'transfers';
 
-export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage, feeConfigs, feeRealMode, feeStats }: SettingsPageProps) {
+export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage, feeConfigs, feeRealMode, feeStats, transferConfigs }: SettingsPageProps) {
   const [activeSubTab, setActiveSubTab] = useState<SettingsSubTab>('general');
   const [tradeAmount, setTradeAmount] = useState(currentSettings.trade_amount_usd);
   const [totalCapital, setTotalCapital] = useState(currentSettings.total_capital ?? 1800);
@@ -113,7 +115,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     <div className="space-y-4 sm:space-y-6 max-w-3xl">
       {/* Sub-tab navigation */}
       <div className="flex gap-1 bg-slate-800/50 rounded-lg p-1">
-        {([['general', 'General'], ['fees', 'Fee Management']] as const).map(([key, label]) => (
+        {([['general', 'General'], ['fees', 'Fee Management'], ['transfers', 'Transfer Fees']] as const).map(([key, label]) => (
           <button key={key} onClick={() => setActiveSubTab(key)}
             className={`flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
               activeSubTab === key
@@ -130,6 +132,11 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           feeConfigs={feeConfigs}
           feeRealMode={feeRealMode}
           feeStats={feeStats}
+          onSendMessage={onSendMessage}
+        />
+      ) : activeSubTab === 'transfers' ? (
+        <TransferFeeManagementTab
+          transferConfigs={transferConfigs}
           onSendMessage={onSendMessage}
         />
       ) : (

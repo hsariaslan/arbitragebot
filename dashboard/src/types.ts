@@ -349,6 +349,28 @@ export interface FeeStats {
   pending_count: number;
 }
 
+// ── Transfer Fee Management ─────────────────────────────────────────
+
+export interface NetworkFeeConfig {
+  network: string;
+  fee: number;
+  fee_type: 'flat' | 'percentage' | 'conditional';
+  percentage_rate: number;
+  percentage_min: number;
+  min_withdrawal: number;
+  speed_seconds: number;
+  enabled: boolean;
+  notes: string;
+}
+
+export interface ExchangeTransferConfig {
+  preferred_network: string;
+  networks: NetworkFeeConfig[];
+  effective_fee: number;
+  cheapest_network: string;
+  cheapest_fee: number;
+}
+
 // ── Main Dashboard State ────────────────────────────────────────────
 
 export interface DashboardState {
@@ -378,4 +400,6 @@ export interface DashboardState {
   fee_configs?: Record<string, ExchangeFeeConfig>;
   fee_real_mode?: boolean;
   fee_stats?: FeeStats;
+  // Transfer fee management
+  transfer_configs?: Record<string, ExchangeTransferConfig>;
 }

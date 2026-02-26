@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import type { ConfigSnapshot, DemoDiscrepancy, ExchangeFeeConfig, OptimizerState, Portfolio, Simulation, Trade, Transfer } from '../types';
+import type { ConfigSnapshot, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, OptimizerState, Portfolio, Simulation, Trade, Transfer } from '../types';
 
 const tier1 = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'ADAUSDT'];
 const tier2 = ['AVAXUSDT', 'LINKUSDT', 'POLUSDT', 'DOTUSDT', 'NEARUSDT', 'SUIUSDT', 'APTUSDT', 'TRXUSDT'];
@@ -15,6 +15,7 @@ export function exportXlsx(
   allConfigHistory: ConfigSnapshot[] = [],
   demoDiscrepancies: DemoDiscrepancy[] = [],
   feeConfigs?: Record<string, ExchangeFeeConfig>,
+  transferConfigs?: Record<string, ExchangeTransferConfig>,
 ) {
   const wb = XLSX.utils.book_new();
   const now = new Date();
@@ -355,6 +356,42 @@ export function exportXlsx(
     }));
     const wsFees = XLSX.utils.json_to_sheet(feeRows);
     XLSX.utils.book_append_sheet(wb, wsFees, 'Fee Configuration');
+  }
+
+  // 15c. Transfer Configuration Snapshot
+  if (transferConfigs && Object.keys(transferConfigs).length > 0) {
+    const transferRows: Record<string, unknown>[] = [];
+    for (const [ex, cfg] of Object.entries(transferConfigs)) {
+      for (const net of cfg.networks) {
+        transferRows.push({
+          Exchange: ex,
+          Network: net.network,
+          'Fee $': net.fee,
+          Type: net.fee_type,
+          '% Rate': net.fee_type === 'percentage' ? (net.percentage_rate * 100).toFixed(1) + '%' : '',
+          '% Min $': net.fee_type === 'percentage' ? net.percentage_min : '',
+          'Min Withdrawal $': net.min_withdrawal > 0 ? net.min_withdrawal : '',
+          'Speed (s)': net.speed_seconds,
+          Enabled: net.enabled ? 'YES' : 'NO',
+          Notes: net.notes,
+        });
+      }
+      // Summary row
+      transferRows.push({
+        Exchange: ex,
+        Network: `→ Preferred: ${cfg.preferred_network}`,
+        'Fee $': `Effective: $${cfg.effective_fee?.toFixed(3) ?? '?'}`,
+        Type: '',
+        '% Rate': '',
+        '% Min $': '',
+        'Min Withdrawal $': '',
+        'Speed (s)': '',
+        Enabled: `Cheapest: ${cfg.cheapest_network ?? '?'}`,
+        Notes: '',
+      });
+    }
+    const wsTransfer = XLSX.utils.json_to_sheet(transferRows);
+    XLSX.utils.book_append_sheet(wb, wsTransfer, 'Transfer Configuration');
   }
 
   // 16. Discrepancies (demo vs sim)
