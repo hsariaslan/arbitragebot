@@ -39,6 +39,7 @@ from settings import save_settings
 
 if TYPE_CHECKING:
     from balance import BalanceTracker
+    from fee_manager import FeeManager
     from fetchers.base import BaseFetcher
     from monitor import ArbitrageMonitor
     from optimizer import SymbolOptimizer
@@ -97,6 +98,7 @@ class DashboardServer:
         optimizer: "SymbolOptimizer | None" = None,
         log_handler: DashboardLogHandler | None = None,
         state_manager: "StateManager | None" = None,
+        fee_manager: "FeeManager | None" = None,
     ) -> None:
         self._monitor = monitor
         self._balance = balance
@@ -105,6 +107,7 @@ class DashboardServer:
         self._optimizer = optimizer
         self._log_handler = log_handler
         self._state_manager = state_manager
+        self._fee_manager = fee_manager
         self._demo_fetcher: "DemoPortfolioFetcher | None" = None
         if optimizer:
             optimizer.set_dashboard(self)
@@ -793,6 +796,59 @@ class DashboardServer:
                     return False, f"{key} must be <= {max_val}"
         return True, ""
 
+    _FEE_CONFIG_SCHEMA: dict[str, tuple[type, float | None, float | None]] = {
+        "base_taker_rate": (float, 0.0, 0.01),
+        "token_discount_enabled": (bool, None, None),
+        "token_discount_pct": (float, 0.0, 1.0),
+        "fee_mechanism": (str, None, None),
+        "fee_model": (str, None, None),
+        "referral_enabled": (bool, None, None),
+        "referral_cashback_pct": (float, 0.0, 1.0),
+        "referral_settlement_minutes": (float, 0, 10080),
+        "referral_paid_in": (str, None, None),
+        "zero_fee_pairs": (list, None, None),
+    }
+    _FEE_ENUMS: dict[str, list[str]] = {
+        "fee_mechanism": ["instant", "rebate", "tier"],
+        "fee_model": ["received", "spent", "token"],
+        "referral_paid_in": ["same_as_fee", "USDT"],
+    }
+
+    @classmethod
+    def _validate_fee_settings(cls, fee_configs: dict) -> tuple[bool, str]:
+        """Validate per-exchange fee config dict."""
+        if not isinstance(fee_configs, dict):
+            return False, "fee_configs must be a dict"
+        for exchange, cfg in fee_configs.items():
+            if not isinstance(exchange, str):
+                return False, "Exchange name must be a string"
+            if not isinstance(cfg, dict):
+                return False, f"{exchange}: config must be a dict"
+            for key, value in cfg.items():
+                if key not in cls._FEE_CONFIG_SCHEMA:
+                    return False, f"{exchange}: unknown fee setting '{key}'"
+                expected_type, min_val, max_val = cls._FEE_CONFIG_SCHEMA[key]
+                if expected_type == bool:
+                    if not isinstance(value, bool):
+                        return False, f"{exchange}.{key} must be boolean"
+                elif expected_type == str:
+                    if not isinstance(value, str):
+                        return False, f"{exchange}.{key} must be a string"
+                    allowed = cls._FEE_ENUMS.get(key, [])
+                    if allowed and value not in allowed:
+                        return False, f"{exchange}.{key} must be one of {allowed}"
+                elif expected_type == list:
+                    if not isinstance(value, list):
+                        return False, f"{exchange}.{key} must be a list"
+                elif expected_type in (int, float):
+                    if not isinstance(value, (int, float)) or isinstance(value, bool):
+                        return False, f"{exchange}.{key} must be a number"
+                    if min_val is not None and value < min_val:
+                        return False, f"{exchange}.{key} must be >= {min_val}"
+                    if max_val is not None and value > max_val:
+                        return False, f"{exchange}.{key} must be <= {max_val}"
+        return True, ""
+
     @staticmethod
     def _validate_security_settings(settings: dict) -> tuple[bool, str]:
         """Validate security settings dict."""
@@ -875,6 +931,34 @@ class DashboardServer:
             save_settings(self._settings)
             await ws.send(json.dumps({"type": "security_settings_saved", "ok": True}))
             logger.info("[Dashboard] Security settings saved")
+
+        elif msg_type == "save_fee_settings":
+            now = time.time()
+            if now - self._last_settings_save < self._settings_cooldown:
+                await ws.send(json.dumps({
+                    "type": "fee_settings_error",
+                    "error": f"Please wait {int(self._settings_cooldown)}s between saves.",
+                }))
+                return
+            fee_data = msg.get("fee_configs", {})
+            fee_real_mode = msg.get("fee_real_mode", None)
+            ok, err = self._validate_fee_settings(fee_data)
+            if not ok:
+                await ws.send(json.dumps({"type": "fee_settings_error", "error": err}))
+                return
+            self._last_settings_save = now
+            # Persist to settings.json
+            self._settings["fee_configs"] = fee_data
+            if fee_real_mode is not None:
+                self._settings["fee_real_mode"] = bool(fee_real_mode)
+            save_settings(self._settings)
+            # Hot-apply to FeeManager
+            if self._fee_manager:
+                self._fee_manager.update_from_settings(fee_data)
+                if fee_real_mode is not None:
+                    self._fee_manager.real_mode = bool(fee_real_mode)
+            await ws.send(json.dumps({"type": "fee_settings_saved", "ok": True}))
+            logger.info("[Fee] Fee settings saved and applied")
 
         elif msg_type == "export_bot_logs":
             start_ts = msg.get("start", 0)
@@ -1035,6 +1119,15 @@ class DashboardServer:
 
         # execution_mode: persisted to settings.json but requires restart
         # (no hot-apply — executor creation happens at startup)
+
+        # Hot-apply fee settings if present
+        if self._fee_manager:
+            fee_configs = settings.get("fee_configs")
+            if fee_configs:
+                self._fee_manager.update_from_settings(fee_configs)
+            fee_real_mode = settings.get("fee_real_mode")
+            if fee_real_mode is not None:
+                self._fee_manager.real_mode = bool(fee_real_mode)
 
         # Record config snapshot
         self._monitor.record_config_snapshot("settings_applied")
@@ -1302,6 +1395,7 @@ class DashboardServer:
             "auth_logs": self._auth_events,
             "bot_logs": self._log_handler.get_recent() if self._log_handler else [],
             "demo_comparison": self._build_demo_state() if self._demo_fetcher and self._demo_fetcher.enabled else None,
+            **(self._fee_manager.to_broadcast_dict() if self._fee_manager else {}),
         }
 
     def _build_demo_state(self) -> dict[str, Any]:

@@ -20,8 +20,6 @@ from balance import BalanceTracker
 from config import (
     ACTIVE_EXCHANGES,
     ACTIVE_SYMBOLS,
-    EXCHANGE_FEE_MODELS,
-    EXCHANGE_TAKER_FEES,
     MAX_DATA_AGE_SECONDS,
     MONITOR_INTERVAL_SECONDS,
     TRADE_AMOUNT_USD,
@@ -31,6 +29,7 @@ from config import (
 if TYPE_CHECKING:
     from exchange_info import ExchangeInfoManager
     from executor import DemoExecutor
+    from fee_manager import FeeManager
     from fetchers.base import BaseFetcher
     from optimizer import SymbolOptimizer
     from state_manager import StateManager
@@ -116,11 +115,13 @@ class ArbitrageMonitor:
         adaptive_mode: bool = True,
         log_file: "Path | None" = None,
         exchange_info: "ExchangeInfoManager | None" = None,
+        fee_manager: "FeeManager | None" = None,
     ) -> None:
         self._fetchers = fetchers
         self._balance = balance
         self._log_file = log_file
         self._exchange_info = exchange_info
+        self._fee_manager = fee_manager
         self._running: bool = False
         self._paused: bool = False
         self._symbols: list[str] = symbols or ACTIVE_SYMBOLS
@@ -251,8 +252,8 @@ class ArbitrageMonitor:
 
         # ROI gate: estimated rebalance cost vs expected profit from enabled trades
         rebal_amount = self._trade_amount * 3
-        buy_fee = EXCHANGE_TAKER_FEES.get(buy_ex, 0.001)
-        sell_fee = EXCHANGE_TAKER_FEES.get(sell_ex, 0.001)
+        buy_fee = self._fee_manager.get_taker_fee(buy_ex) if self._fee_manager else 0.001
+        sell_fee = self._fee_manager.get_taker_fee(sell_ex) if self._fee_manager else 0.001
         est_cost = rebal_amount * (buy_fee + sell_fee)  # two internal transfers
         trades_enabled = rebal_amount / max(self._trade_amount, 1)
         est_profit = trades_enabled * self._balance._estimated_profit_per_trade
@@ -612,6 +613,16 @@ class ArbitrageMonitor:
         if self._balance and self._balance._in_transit:
             self._balance.deliver_in_transit()
 
+        # Credit referral cashbacks whose settlement time has passed
+        if self._fee_manager and self._balance:
+            credited = self._fee_manager.credit_due_cashbacks()
+            for cb in credited:
+                if cb.exchange in self._balance.usdt:
+                    self._balance.usdt[cb.exchange] += cb.cashback_usd
+                    logger.info(
+                        f"[Fee] Cashback credited: {cb.exchange} +${cb.cashback_usd:.4f}"
+                    )
+
         rows: list[tuple[str, str, float, str, float, float, float, float, float]] = []
 
         # Track per-exchange data age for this tick's display
@@ -710,8 +721,8 @@ class ArbitrageMonitor:
                         continue
 
                     spread_pct = (bid_j - ask_i) / ask_i * 100
-                    buy_fee = EXCHANGE_TAKER_FEES.get(ex_buy, 0.001)
-                    sell_fee = EXCHANGE_TAKER_FEES.get(ex_sell, 0.001)
+                    buy_fee = self._fee_manager.get_taker_fee(ex_buy, symbol) if self._fee_manager else 0.001
+                    sell_fee = self._fee_manager.get_taker_fee(ex_sell, symbol) if self._fee_manager else 0.001
                     fee_pct = (buy_fee + sell_fee) * 100
                     net_pct = spread_pct - fee_pct
                     profit_usd = self._trade_amount * (net_pct / 100)
@@ -802,14 +813,34 @@ class ArbitrageMonitor:
                         if can_trade:
                             miss_key = f"{sym}:{buy_ex}:{sell_ex}"
                             self._miss_streak[miss_key] = 0
-                            buy_fee_rate = EXCHANGE_TAKER_FEES.get(buy_ex, 0.001)
-                            sell_fee_rate = EXCHANGE_TAKER_FEES.get(sell_ex, 0.001)
+                            buy_fee_rate = self._fee_manager.get_taker_fee(buy_ex, sym) if self._fee_manager else 0.001
+                            sell_fee_rate = self._fee_manager.get_taker_fee(sell_ex, sym) if self._fee_manager else 0.001
+                            buy_fee_model = self._fee_manager.get_fee_model(buy_ex) if self._fee_manager else "received"
+                            sell_fee_model = self._fee_manager.get_fee_model(sell_ex) if self._fee_manager else "received"
                             trade_adj = self._balance.execute_trade(
                                 buy_ex, sell_ex, sym, trade_size,
                                 ask_p, bid_p, buy_fee_rate, sell_fee_rate,
-                                buy_fee_model=EXCHANGE_FEE_MODELS.get(buy_ex, "received"),
-                                sell_fee_model=EXCHANGE_FEE_MODELS.get(sell_ex, "received"),
+                                buy_fee_model=buy_fee_model,
+                                sell_fee_model=sell_fee_model,
                             )
+                            logger.info(
+                                f"[Fee] {sym} {buy_ex}->{sell_ex}: "
+                                f"buy={buy_fee_rate*100:.4f}% sell={sell_fee_rate*100:.4f}% "
+                                f"model={buy_fee_model}/{sell_fee_model}"
+                            )
+                            # Record referral cashback if enabled
+                            if self._fee_manager:
+                                buy_cb = self._fee_manager.record_referral_cashback(
+                                    buy_ex, sym, trade_size, buy_fee_rate
+                                )
+                                sell_cb = self._fee_manager.record_referral_cashback(
+                                    sell_ex, sym, trade_size, sell_fee_rate
+                                )
+                                if buy_cb > 0 or sell_cb > 0:
+                                    logger.info(
+                                        f"[Fee] Referral pending: "
+                                        f"{buy_ex}=${buy_cb:.4f} {sell_ex}=${sell_cb:.4f}"
+                                    )
                         else:
                             trade_adj = None
                             self._balance.skipped_trades += 1

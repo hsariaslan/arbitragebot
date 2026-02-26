@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from config import (
-    EXCHANGE_TAKER_FEES,
     MAX_DATA_AGE_SECONDS,
     SYMBOLS,
 )
@@ -31,6 +30,7 @@ from config import (
 if TYPE_CHECKING:
     from balance import BalanceTracker, Transfer
     from dashboard_server import DashboardServer
+    from fee_manager import FeeManager
     from fetchers.base import BaseFetcher
     from monitor import ArbitrageMonitor
 
@@ -185,6 +185,7 @@ class SymbolOptimizer:
         all_symbols: list[str] | None = None,
         trade_amount: float = 100.0,
         total_capital: float = 1800.0,
+        fee_manager: "FeeManager | None" = None,
         num_active_symbols: int = 3,
         max_active_symbols: int = 8,
         scoring_window: int = 1800,
@@ -207,6 +208,7 @@ class SymbolOptimizer:
         self._all_symbols: list[str] = all_symbols or SYMBOLS
         self._trade_amount = trade_amount
         self._total_capital = total_capital
+        self._fee_manager = fee_manager
         self._min_active_symbols = num_active_symbols
         self._max_active_symbols = max(max_active_symbols, num_active_symbols)
         self._scoring_window = scoring_window
@@ -422,8 +424,8 @@ class SymbolOptimizer:
                     if i == j:
                         continue
                     spread_pct = (bid_j - ask_i) / ask_i * 100
-                    buy_fee = EXCHANGE_TAKER_FEES.get(ex_buy, 0.001)
-                    sell_fee = EXCHANGE_TAKER_FEES.get(ex_sell, 0.001)
+                    buy_fee = self._fee_manager.get_taker_fee(ex_buy, symbol) if self._fee_manager else 0.001
+                    sell_fee = self._fee_manager.get_taker_fee(ex_sell, symbol) if self._fee_manager else 0.001
                     fee_pct = (buy_fee + sell_fee) * 100
                     net_pct = spread_pct - fee_pct
 
@@ -574,8 +576,8 @@ class SymbolOptimizer:
                     logger.debug("[Discovery]   Fee pairs:")
                     for i, ex1 in enumerate(ex_list):
                         for ex2 in ex_list[i + 1:]:
-                            fee1 = EXCHANGE_TAKER_FEES.get(ex1, 0.001)
-                            fee2 = EXCHANGE_TAKER_FEES.get(ex2, 0.001)
+                            fee1 = self._fee_manager.get_taker_fee(ex1) if self._fee_manager else 0.001
+                            fee2 = self._fee_manager.get_taker_fee(ex2) if self._fee_manager else 0.001
                             combined = (fee1 + fee2) * 100
                             logger.debug(
                                 f"[Discovery]     {ex1}+{ex2}: {combined:.3f}%"
@@ -1154,7 +1156,7 @@ class SymbolOptimizer:
             alloc = total_alloc * (w / total_sell_w) if total_sell_w > 0 else self._trade_amount
             if ex not in self._balance.usdt or self._balance.usdt[ex] < alloc:
                 continue
-            fee_rate = EXCHANGE_TAKER_FEES.get(ex, 0.001)
+            fee_rate = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
             fee_usd = alloc * fee_rate
             new_qty = (alloc - fee_usd) / new_price
             self._balance.usdt[ex] -= alloc
@@ -1248,7 +1250,10 @@ class SymbolOptimizer:
 
         # Switching cost: uses actual exchange counts per symbol (concentrated)
         avg_fee_rate = (
-            sum(EXCHANGE_TAKER_FEES.get(ex, 0.001) for ex in self._active_exchanges)
+            sum(
+                (self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001)
+                for ex in self._active_exchanges
+            )
             / max(len(self._active_exchanges), 1)
         )
 
@@ -1373,7 +1378,7 @@ class SymbolOptimizer:
         for ex in self._balance._exchanges:
             old_qty = self._balance.crypto[ex].get(old_symbol, 0.0)
             if old_qty > 0:
-                fee_rate = EXCHANGE_TAKER_FEES.get(ex, 0.001)
+                fee_rate = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
                 gross_usd = old_qty * old_price
                 fee_usd = gross_usd * fee_rate
                 self._balance.crypto[ex][old_symbol] = 0.0
@@ -1410,7 +1415,7 @@ class SymbolOptimizer:
             alloc = total_alloc * (w / total_sell_w) if total_sell_w > 0 else self._trade_amount
             if ex not in self._balance.usdt or self._balance.usdt[ex] < alloc:
                 continue
-            fee_rate = EXCHANGE_TAKER_FEES.get(ex, 0.001)
+            fee_rate = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
             fee_usd = alloc * fee_rate
             new_qty = (alloc - fee_usd) / new_price
             self._balance.usdt[ex] -= alloc
@@ -1634,7 +1639,7 @@ class SymbolOptimizer:
         for ex in removed_sellers:
             qty = self._balance.crypto[ex].get(symbol, 0.0)
             if qty > 0:
-                fee_rate = EXCHANGE_TAKER_FEES.get(ex, 0.001)
+                fee_rate = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
                 gross = qty * price
                 fee = gross * fee_rate
                 self._balance.crypto[ex][symbol] = 0.0
@@ -1661,7 +1666,7 @@ class SymbolOptimizer:
                 alloc = min(per_new, avail)
                 if alloc < 1.0:
                     continue
-                fee_rate = EXCHANGE_TAKER_FEES.get(ex, 0.001)
+                fee_rate = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
                 fee = alloc * fee_rate
                 qty = (alloc - fee) / price
                 self._balance.usdt[ex] -= alloc
@@ -1808,7 +1813,7 @@ class SymbolOptimizer:
             sells = ex_sell_count.get(ex, 0)
             total = buys + sells
             profit = ex_profit_sum.get(ex, 0)
-            fee = EXCHANGE_TAKER_FEES.get(ex, 0.001)
+            fee = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
             exchange_list.append({
                 "exchange": ex,
                 "as_buyer": buys,

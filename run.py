@@ -39,6 +39,7 @@ load_env()
 from balance import BalanceTracker
 from config import ACTIVE_SYMBOLS, MIN_WARMUP_TICKS, SYMBOLS
 from exchange_info import ExchangeInfoManager
+from fee_manager import FeeManager
 from dashboard_server import DashboardLogHandler, DashboardServer
 from fetchers.binance import BinanceFetcher
 from fetchers.bitget import BitgetFetcher
@@ -92,6 +93,12 @@ async def main() -> None:
     total_capital = settings.get("total_capital", 1800.0)
     adaptive_mode = settings.get("adaptive_mode", True)
 
+    # Initialize FeeManager from settings (backward compatible — empty → defaults)
+    fee_manager = FeeManager.from_settings_dict(
+        settings.get("fee_configs", {}),
+        real_mode=settings.get("fee_real_mode", False),
+    )
+
     fetchers = [
         BinanceFetcher(),
         OKXFetcher(),
@@ -136,6 +143,7 @@ async def main() -> None:
         trade_amount=trade_amount,
         adaptive_mode=adaptive_mode,
         exchange_info=exchange_info,
+        fee_manager=fee_manager,
     )
     monitor = ArbitrageMonitor(
         fetchers,
@@ -149,6 +157,7 @@ async def main() -> None:
         adaptive_mode=adaptive_mode,
         log_file=log_file,
         exchange_info=exchange_info,
+        fee_manager=fee_manager,
     )
     optimizer = SymbolOptimizer(
         fetchers=fetchers,
@@ -159,6 +168,7 @@ async def main() -> None:
         all_symbols=SYMBOLS,
         trade_amount=trade_amount,
         total_capital=total_capital,
+        fee_manager=fee_manager,
         num_active_symbols=settings.get("num_active_symbols", 3),
         scoring_window=settings.get("scoring_window", 1800),
         evaluation_interval=settings.get("evaluation_interval", 300),
@@ -182,6 +192,8 @@ async def main() -> None:
         balance.from_state_dict(saved["balance"])
         monitor.from_state_dict(saved["monitor"])
         optimizer.from_state_dict(saved["optimizer"])
+        if "fee_manager" in saved:
+            fee_manager.from_state_dict(saved["fee_manager"])
         # Sync symbols across components to match restored optimizer state
         if optimizer._active_symbols:
             monitor.update_symbols(optimizer._active_symbols)
@@ -197,12 +209,14 @@ async def main() -> None:
     dashboard = DashboardServer(
         monitor, balance, fetchers, settings,
         optimizer=optimizer, log_handler=log_handler, state_manager=state_mgr,
+        fee_manager=fee_manager,
     )
 
     # Demo/testnet portfolio comparison (optional — needs API keys in .env)
     from demo_fetcher import DemoPortfolioFetcher
     demo_fetcher = DemoPortfolioFetcher(
         balance_tracker=balance, fetchers=fetchers, poll_interval=15.0,
+        fee_manager=fee_manager,
     )
     if saved and "demo_fetcher" in saved:
         demo_fetcher.from_state_dict(saved["demo_fetcher"])
@@ -268,7 +282,7 @@ async def main() -> None:
 
     def shutdown_handler():
         logger.info("Shutdown signal received, saving state...")
-        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None)
+        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None, fee_manager=fee_manager)
         state_mgr.stop()
         if demo_fetcher.enabled:
             demo_fetcher.stop()
@@ -289,7 +303,8 @@ async def main() -> None:
     tasks.append(asyncio.create_task(optimizer.run()))
     tasks.append(asyncio.create_task(dashboard.run()))
     tasks.append(asyncio.create_task(state_mgr.periodic_save(
-        balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None
+        balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None,
+        fee_manager=fee_manager,
     )))
     if demo_fetcher.enabled:
         tasks.append(asyncio.create_task(demo_fetcher.run()))
@@ -298,7 +313,7 @@ async def main() -> None:
         await asyncio.gather(*tasks)
     except Exception as e:
         logger.error(f"Fatal error: {e}")
-        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None)
+        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None, fee_manager=fee_manager)
         for fetcher in fetchers:
             fetcher.stop()
         monitor.stop()

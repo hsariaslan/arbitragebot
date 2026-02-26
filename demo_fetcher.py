@@ -23,12 +23,16 @@ from config import (
     BINANCE_TESTNET_API_SECRET,
     BYBIT_DEMO_API_KEY,
     BYBIT_DEMO_API_SECRET,
-    EXCHANGE_TAKER_FEES,
     OKX_DEMO_API_KEY,
     OKX_DEMO_API_SECRET,
     OKX_DEMO_PASSPHRASE,
     SYMBOLS,
 )
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fee_manager import FeeManager
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +84,12 @@ class DemoPortfolioFetcher:
         fetchers: list,
         poll_interval: float = 15.0,
         max_discrepancies: int = 200,
+        fee_manager: "FeeManager | None" = None,
     ) -> None:
         from balance import BalanceTracker
 
         self._balance: BalanceTracker = balance_tracker
+        self._fee_manager = fee_manager
         self._fetchers = fetchers
         self._poll_interval = poll_interval
         self._max_discrepancies = max_discrepancies
@@ -105,6 +111,8 @@ class DemoPortfolioFetcher:
 
         # Fee rate validation: track which exchanges have been validated (D-04)
         self._fee_validated: dict[str, bool] = {}
+        # Actual demo/testnet fee rates (may differ from production config)
+        self._demo_fee_rates: dict[str, float] = {}
 
         # Determine which exchanges have keys configured
         self._configured: dict[str, bool] = {
@@ -393,24 +401,35 @@ class DemoPortfolioFetcher:
     # ── Fee rate validation (D-04) ──────────────────────────────────────
 
     def _validate_fee_rate(self, exchange: str, actual_rate: float) -> None:
-        """Compare actual fee rate with configured rate. Warn + override if different."""
+        """Compare actual demo/testnet fee rate with configured production rate.
+
+        IMPORTANT: Demo/testnet fee rates often differ from production (e.g.,
+        Binance testnet = 0%, OKX demo returns negative notation). We log the
+        mismatch but NEVER override config — the simulation must use production
+        rates to produce realistic profit estimates. However, in real mode,
+        we feed actual rates to FeeManager.
+        """
         self._fee_validated[exchange] = True
-        configured = EXCHANGE_TAKER_FEES.get(exchange, 0.001)
+        # Some exchanges (OKX) return fee rates as negative values
+        # (convention: negative = fee charged). Normalize to positive.
+        actual_rate = abs(actual_rate)
+        configured = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
+
+        # Store demo rate separately (for demo execution cost estimation)
+        self._demo_fee_rates[exchange] = actual_rate
 
         if abs(actual_rate - configured) < 1e-7:
             logger.info(
                 f"[FeeValidation] {exchange}: configured={configured*100:.4f}%, "
-                f"actual={actual_rate*100:.4f}% — OK"
+                f"demo={actual_rate*100:.4f}% — OK (matches production)"
             )
             return
 
-        # Mismatch detected
+        # Mismatch: demo rate differs from production — log but do NOT override
         logger.warning(
-            f"[FeeValidation] {exchange}: configured={configured*100:.4f}%, "
-            f"actual={actual_rate*100:.4f}% — MISMATCH, overriding with actual rate"
+            f"[FeeValidation] {exchange}: production={configured*100:.4f}%, "
+            f"demo={actual_rate*100:.4f}% — MISMATCH (simulation keeps production rate)"
         )
-        # Override in-place so all code using EXCHANGE_TAKER_FEES gets the real rate
-        EXCHANGE_TAKER_FEES[exchange] = actual_rate
 
         # Record as discrepancy
         self.recent_discrepancies.append(Discrepancy(
@@ -422,10 +441,14 @@ class DemoPortfolioFetcher:
             demo_value=actual_rate * 100,
             diff_abs=abs(actual_rate - configured) * 100,
             diff_pct=((actual_rate - configured) / configured) * 100 if configured else 0,
-            root_cause=f"Exchange actual taker fee ({actual_rate*100:.4f}%) differs from "
-                       f"configured ({configured*100:.4f}%). Overridden at runtime.",
+            root_cause=f"Demo/testnet taker fee ({actual_rate*100:.4f}%) differs from "
+                       f"production config ({configured*100:.4f}%). Simulation uses production rate.",
         ))
         self.total_discrepancy_count += 1
+
+        # In real mode, feed actual API rate to FeeManager
+        if self._fee_manager and self._fee_manager.real_mode:
+            self._fee_manager.set_real_rate(exchange, actual_rate)
 
     async def _fetch_okx_fee_rate(self, session: aiohttp.ClientSession) -> None:
         """Fetch OKX actual taker fee rate (one-time after first successful balance fetch)."""
@@ -652,7 +675,7 @@ class DemoPortfolioFetcher:
             return "Minor drift: likely fee calculation difference or rounding"
 
         # Check if the difference is roughly a fee amount
-        fee_rate = EXCHANGE_TAKER_FEES.get(exchange, 0.001)
+        fee_rate = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
         expected_fee_impact = max(sim_val, demo_val) * fee_rate * 100
         if abs(abs(diff_pct) - expected_fee_impact) < expected_fee_impact * 0.5:
             return f"Fee difference: exchange may charge different rate than configured {fee_rate*100:.3f}%"

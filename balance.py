@@ -21,12 +21,16 @@ from dataclasses import dataclass
 from config import (
     ACTIVE_EXCHANGES,
     ACTIVE_SYMBOLS,
-    EXCHANGE_TAKER_FEES,
     INITIAL_BALANCE_PER_SYMBOL,
     REBALANCE_AMOUNT,
     REBALANCE_THRESHOLD,
     USDT_WITHDRAWAL_FEES,
 )
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fee_manager import FeeManager
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +87,9 @@ class BalanceTracker:
         trade_amount: float = 50.0,
         adaptive_mode: bool = True,
         exchange_info: "ExchangeInfoManager | None" = None,
+        fee_manager: "FeeManager | None" = None,
     ) -> None:
+        self._fee_manager = fee_manager
         self._exchanges = exchanges or ACTIVE_EXCHANGES
         self._symbols = symbols or ACTIVE_SYMBOLS
         self._exchange_info = exchange_info
@@ -401,7 +407,7 @@ class BalanceTracker:
                 internal_price = p
 
         if internal_sym and internal_price > 0 and best_value >= rebal + REBALANCE_THRESHOLD:
-            internal_cost = rebal * EXCHANGE_TAKER_FEES.get(exchange, 0.001)
+            internal_cost = rebal * (self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001)
 
         # --- Pick cheapest ---
         if external_source and external_cost <= internal_cost:
@@ -519,7 +525,7 @@ class BalanceTracker:
             if crypto_sources:
                 crypto_rebal = min_rebal
 
-        internal_buy_cost = crypto_rebal * EXCHANGE_TAKER_FEES.get(exchange, 0.001)
+        internal_buy_cost = crypto_rebal * (self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001)
         transfer_qty = crypto_rebal / price
 
         if crypto_sources:
@@ -563,7 +569,7 @@ class BalanceTracker:
 
         # --- Option 2: Internal buy with local USDT ---
         if self.usdt[exchange] >= rebal:
-            fee_rate = EXCHANGE_TAKER_FEES.get(exchange, 0.001)
+            fee_rate = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
             fee_usd = rebal * fee_rate
             buy_qty = (rebal - fee_usd) / price
             self.usdt[exchange] -= rebal
@@ -620,7 +626,7 @@ class BalanceTracker:
                     )
                     return None
 
-            fee_rate = EXCHANGE_TAKER_FEES.get(exchange, 0.001)
+            fee_rate = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
             buy_fee = ext_buy_rebal * fee_rate
 
             # Transfer USDT
