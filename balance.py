@@ -24,13 +24,13 @@ from config import (
     INITIAL_BALANCE_PER_SYMBOL,
     REBALANCE_AMOUNT,
     REBALANCE_THRESHOLD,
-    USDT_WITHDRAWAL_FEES,
 )
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from fee_manager import FeeManager
+    from transfer_fee_manager import TransferFeeManager
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +88,10 @@ class BalanceTracker:
         adaptive_mode: bool = True,
         exchange_info: "ExchangeInfoManager | None" = None,
         fee_manager: "FeeManager | None" = None,
+        transfer_fee_manager: "TransferFeeManager | None" = None,
     ) -> None:
         self._fee_manager = fee_manager
+        self._transfer_fee_mgr = transfer_fee_manager
         self._exchanges = exchanges or ACTIVE_EXCHANGES
         self._symbols = symbols or ACTIVE_SYMBOLS
         self._exchange_info = exchange_info
@@ -156,6 +158,12 @@ class BalanceTracker:
     def initialized(self) -> bool:
         return self._initialized
 
+    def _get_withdrawal_fee(self, exchange: str, amount: float = 0.0) -> float:
+        """Get withdrawal fee for an exchange, using TransferFeeManager if available."""
+        if self._transfer_fee_mgr:
+            return self._transfer_fee_mgr.get_withdrawal_fee(exchange, amount)
+        return 1.0
+
     def update_symbols(self, symbols: list[str]) -> None:
         """Update active symbols list and ensure crypto dicts have entries."""
         self._symbols = list(symbols)
@@ -176,6 +184,9 @@ class BalanceTracker:
             rebalance_cooldown=self._rebalance_cooldown,
             trade_amount=self._trade_amount,
             adaptive_mode=self._adaptive_mode,
+            exchange_info=self._exchange_info,
+            fee_manager=self._fee_manager,
+            transfer_fee_manager=self._transfer_fee_mgr,
         )
         logger.info("[Balance] Reset complete")
 
@@ -376,9 +387,9 @@ class BalanceTracker:
         if eligible:
             external_source = min(
                 eligible,
-                key=lambda ex: USDT_WITHDRAWAL_FEES.get(ex, 1.0),
+                key=lambda ex: self._get_withdrawal_fee(ex),
             )
-            external_cost = USDT_WITHDRAWAL_FEES.get(external_source, 1.0)
+            external_cost = self._get_withdrawal_fee(external_source)
 
             # Transfer worthiness check (adaptive mode only)
             if self._adaptive_mode and self._estimated_profit_per_trade > 0:
@@ -532,11 +543,11 @@ class BalanceTracker:
             # Pick source with cheapest withdrawal fee
             best_source = min(
                 crypto_sources,
-                key=lambda ex: USDT_WITHDRAWAL_FEES.get(ex, 1.0),
+                key=lambda ex: self._get_withdrawal_fee(ex),
             )
             # Use USDT withdrawal fee as proxy for token withdrawal fee
             # (same networks, similar fees)
-            external_crypto_cost = USDT_WITHDRAWAL_FEES.get(best_source, 1.0)
+            external_crypto_cost = self._get_withdrawal_fee(best_source)
 
             # Transfer worthiness check
             if self._adaptive_mode and self._estimated_profit_per_trade > 0:
@@ -609,11 +620,11 @@ class BalanceTracker:
                 ext_buy_rebal = min_rebal
         richest_ex = min(
             eligible,
-            key=lambda ex: USDT_WITHDRAWAL_FEES.get(ex, 1.0),
+            key=lambda ex: self._get_withdrawal_fee(ex),
             default=None,
         )
         if richest_ex:
-            withdrawal_fee = USDT_WITHDRAWAL_FEES.get(richest_ex, 1.0)
+            withdrawal_fee = self._get_withdrawal_fee(richest_ex)
 
             # Transfer worthiness check (adaptive mode only)
             if self._adaptive_mode and self._estimated_profit_per_trade > 0:

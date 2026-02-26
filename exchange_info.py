@@ -597,16 +597,14 @@ class ExchangeInfoManager:
 
     # ─── D-16: Withdrawal Fee Validation ────────────────────────
 
-    async def validate_withdrawal_fees(self) -> None:
+    async def validate_withdrawal_fees(self, transfer_fee_mgr=None) -> None:
         """Fetch actual USDT withdrawal fees from exchanges and compare with config.
 
         Queries public APIs for OKX, Bitget, KuCoin. Binance and Bybit require
         auth — skipped here (validated in demo_fetcher if keys are available).
-        Logs mismatches but does NOT override USDT_WITHDRAWAL_FEES — production
+        Logs mismatches but does NOT override configured rates — production
         config rates are used for simulation to ensure realistic cost estimates.
         """
-        from config import USDT_WITHDRAWAL_FEES
-
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             tasks = []
@@ -632,7 +630,7 @@ class ExchangeInfoManager:
                 continue
 
             actual_fee = result
-            configured = USDT_WITHDRAWAL_FEES.get(ex, 0.0)
+            configured = transfer_fee_mgr.get_withdrawal_fee(ex) if transfer_fee_mgr else 0.0
 
             if abs(actual_fee - configured) < 0.001:
                 logger.info(

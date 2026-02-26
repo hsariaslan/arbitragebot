@@ -100,6 +100,12 @@ async def main() -> None:
         real_mode=settings.get("fee_real_mode", False),
     )
 
+    # Initialize TransferFeeManager from settings (backward compatible — empty → defaults)
+    from transfer_fee_manager import TransferFeeManager
+    transfer_fee_manager = TransferFeeManager.from_settings_dict(
+        settings.get("transfer_configs", {}),
+    )
+
     fetchers = [
         BinanceFetcher(),
         OKXFetcher(),
@@ -135,7 +141,7 @@ async def main() -> None:
     await exchange_info.fetch_all()
 
     # D-16: Validate USDT withdrawal fees against live exchange data
-    await exchange_info.validate_withdrawal_fees()
+    await exchange_info.validate_withdrawal_fees(transfer_fee_manager)
 
     balance = BalanceTracker(
         exchanges=active_exchanges,
@@ -146,6 +152,7 @@ async def main() -> None:
         adaptive_mode=adaptive_mode,
         exchange_info=exchange_info,
         fee_manager=fee_manager,
+        transfer_fee_manager=transfer_fee_manager,
     )
     monitor = ArbitrageMonitor(
         fetchers,
@@ -212,6 +219,7 @@ async def main() -> None:
         monitor, balance, fetchers, settings,
         optimizer=optimizer, log_handler=log_handler, state_manager=state_mgr,
         fee_manager=fee_manager,
+        transfer_fee_manager=transfer_fee_manager,
     )
 
     # Demo/testnet portfolio comparison (optional — needs API keys in .env)
