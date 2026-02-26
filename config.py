@@ -235,7 +235,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
 ALL_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "Bitget", "KuCoin", "Gate.io"]  # MEXC removed (geo-blocked)
 
 # Active trading configuration (balance-tracked symbols/exchanges) — defaults
-ACTIVE_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "Bitget", "KuCoin"]
+ACTIVE_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "Bitget", "KuCoin", "Gate.io"]
 ACTIVE_SYMBOLS: list[str] = ["SNXUSDT", "DYDXUSDT", "PENDLEUSDT", "AXSUSDT"]
 
 # Settings file path

@@ -44,6 +44,7 @@ from dashboard_server import DashboardLogHandler, DashboardServer
 from fetchers.binance import BinanceFetcher
 from fetchers.bitget import BitgetFetcher
 from fetchers.bybit import BybitFetcher
+from fetchers.gateio import GateIOFetcher
 from fetchers.kucoin import KuCoinFetcher
 # from fetchers.mexc import MEXCFetcher  # Disabled (geo-blocked in Japan)
 from fetchers.okx import OKXFetcher
@@ -106,6 +107,7 @@ async def main() -> None:
         BitgetFetcher(),
         # MEXCFetcher(),  # Disabled (geo-blocked in Japan, re-add in Phase 2)
         KuCoinFetcher(),
+        GateIOFetcher(),
     ]
 
     # Derive active exchanges from fetchers, use configured default symbols

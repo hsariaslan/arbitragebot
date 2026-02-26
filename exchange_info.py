@@ -29,6 +29,7 @@ from config import (
     BYBIT_EXCHANGE_NAME,
     BITGET_EXCHANGE_NAME,
     KUCOIN_EXCHANGE_NAME,
+    GATEIO_EXCHANGE_NAME,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ _API_URLS = {
     BYBIT_EXCHANGE_NAME: "https://api.bybit.com/v5/market/instruments-info",
     BITGET_EXCHANGE_NAME: "https://api.bitget.com/api/v2/spot/public/symbols",
     KUCOIN_EXCHANGE_NAME: "https://api.kucoin.com/api/v1/symbols",
+    GATEIO_EXCHANGE_NAME: "https://api.gateio.ws/api/v4/spot/currency_pairs",
 }
 
 # Persist cache here as fallback if API calls fail
@@ -261,6 +263,8 @@ class ExchangeInfoManager:
                 return await self._fetch_bitget(session)
             elif exchange == KUCOIN_EXCHANGE_NAME:
                 return await self._fetch_kucoin(session)
+            elif exchange == GATEIO_EXCHANGE_NAME:
+                return await self._fetch_gateio(session)
             else:
                 logger.debug("[ExchangeInfo] No fetcher for %s", exchange)
                 return 0
@@ -506,6 +510,58 @@ class ExchangeInfoManager:
         logger.info("[ExchangeInfo] KuCoin: loaded %d/%d symbols", count, len(SYMBOLS))
         return count
 
+    async def _fetch_gateio(self, session: aiohttp.ClientSession) -> int:
+        """Gate.io: GET /api/v4/spot/currency_pairs — returns all spot pairs."""
+        url = _API_URLS[GATEIO_EXCHANGE_NAME]
+        async with session.get(url) as resp:
+            data = await resp.json()
+
+        # Gate.io symbol format: "BTC_USDT" -> map to "BTCUSDT"
+        target_map: dict[str, str] = {}
+        for sym in SYMBOLS:
+            base = sym.replace("USDT", "")
+            gate_id = f"{base}_USDT"
+            target_map[gate_id] = sym
+
+        count = 0
+        for pair_info in data:
+            pair_id = pair_info.get("id", "")
+            symbol = target_map.get(pair_id)
+            if not symbol:
+                continue
+
+            # amount_precision/precision are integer decimal places (like Bitget)
+            qty_prec = int(pair_info.get("amount_precision", 0))
+            price_prec = int(pair_info.get("precision", 0))
+            lot_step = Decimal(10) ** Decimal(-qty_prec)
+            tick_size = Decimal(10) ** Decimal(-price_prec)
+
+            try:
+                min_qty = Decimal(pair_info.get("min_base_amount", "0"))
+            except InvalidOperation:
+                min_qty = Decimal("0")
+
+            try:
+                min_notional = Decimal(pair_info.get("min_quote_amount", "1"))
+            except InvalidOperation:
+                min_notional = Decimal("1")
+
+            rules = SymbolRules(
+                symbol=symbol,
+                exchange=GATEIO_EXCHANGE_NAME,
+                lot_size_step=lot_step,
+                min_qty=min_qty,
+                tick_size=tick_size,
+                min_notional=min_notional,
+                base_precision=qty_prec,
+                quote_precision=price_prec,
+            )
+            self._rules[f"{GATEIO_EXCHANGE_NAME}:{symbol}"] = rules
+            count += 1
+
+        logger.info("[ExchangeInfo] Gate.io: loaded %d/%d symbols", count, len(SYMBOLS))
+        return count
+
     # ─── Cache Persistence ───────────────────────────────────────
 
     def _save_cache(self) -> None:
@@ -592,10 +648,9 @@ class ExchangeInfoManager:
 
         # Log exchanges we can't validate
         skip = []
-        if BINANCE_EXCHANGE_NAME in self._exchanges:
-            skip.append(BINANCE_EXCHANGE_NAME)
-        if BYBIT_EXCHANGE_NAME in self._exchanges:
-            skip.append(BYBIT_EXCHANGE_NAME)
+        for ex in (BINANCE_EXCHANGE_NAME, BYBIT_EXCHANGE_NAME, GATEIO_EXCHANGE_NAME):
+            if ex in self._exchanges:
+                skip.append(ex)
         if skip:
             logger.info(
                 "[WithdrawalFees] Skipped %s (requires auth — "
