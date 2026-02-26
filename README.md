@@ -1,6 +1,6 @@
 # CoirnaBot
 
-**v0.7.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard and demo order execution.
+**v0.8.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee management.
 
 Monitors real-time prices across multiple crypto exchanges via WebSocket, detects price discrepancies, and executes simultaneous buy/sell orders to profit from the spread. Supports simulation mode and demo/testnet execution with automatic discrepancy detection.
 
@@ -15,6 +15,7 @@ Monitors real-time prices across multiple crypto exchanges via WebSocket, detect
 - **Exchange trading rules**: Lot size rounding, min notional validation, tick size correction, fee rate validation, withdrawal fee validation at startup
 - **Real-time dashboard**: React/TypeScript SPA with live portfolio, rankings, trade history, XLSX export, fully responsive mobile UI
 - **Demo/testnet comparison**: Fetches real portfolio from Binance/OKX/Bybit demo APIs, baseline-adjusted comparison with discrepancy detection
+- **Comprehensive fee management**: Per-exchange fee configs with token discounts, referral cashbacks, zero-fee pairs, sim/real mode toggle, hot-apply from dashboard
 - **Dashboard security**: Login authentication, rate limiting, reCAPTCHA v2, IP whitelist, email alerts, auth logging
 
 ## Prerequisites
@@ -89,6 +90,7 @@ Press `Ctrl+C` to stop gracefully.
 coirnabot/
   run.py                  # Entry point — starts all fetchers, monitor, optimizer, dashboard
   config.py               # All configuration constants (symbols, exchanges, fees, thresholds)
+  fee_manager.py          # FeeManager — token discounts, referral cashbacks, zero-fee pairs
   settings.py             # Runtime settings loader (settings.json)
   monitor.py              # ArbitrageMonitor — detects opportunities, executes simulated trades
   optimizer.py            # SymbolOptimizer — discovery, scoring, rotation, dominant pairs
@@ -111,7 +113,7 @@ coirnabot/
       types.ts            # TypeScript interfaces
       hooks/useWebSocket.ts  # WebSocket connection and auth flow
       components/         # LoginPage, Header, SymbolRankings, RankingPage, SettingsPage, AuthLogPage, etc.
-      utils/exportXlsx.ts # XLSX export (15 sheets)
+      utils/exportXlsx.ts # XLSX export (17 sheets)
 ```
 
 ## Dashboard Pages
@@ -120,7 +122,7 @@ coirnabot/
 |------|-------------|
 | **Dashboard** | Live portfolio P&L (sim + demo), demo exchange status, symbol rankings, balance table, price grid, demo comparison, recent trades/transfers |
 | **Rankings** | Rolling/historical rankings, top-10 charts, lifecycle funnel, exchange analysis, XLSX export |
-| **Settings** | Trade amount, capital, optimizer parameters, adaptive mode, IP whitelist |
+| **Settings** | General (trade amount, capital, optimizer parameters, adaptive mode, IP whitelist) + Fee Management (per-exchange fee config) |
 | **Logs** | Unified log viewer: Bot Logs (real-time, filterable) and Auth Logs (login events, IP blocks) with export |
 
 ## Configuration

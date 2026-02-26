@@ -341,8 +341,9 @@ All snapshots are exported in the XLSX "Configurations" sheet.
 | `monitor.py` | `_compute_trade_size()` — per-symbol adaptive sizing; `_tick()` — trade execution with threshold checks, ROI gate, miss streak tracking; `ConfigSnapshot` dataclass |
 | `balance.py` | `compute_rebalance_amount()` — adaptive rebalance; transfer worthiness check in `_rebalance_usdt()`/`_rebalance_crypto()` |
 | `optimizer.py` | `_compute_scores()` — focus tiers + trade multipliers; `_complete_discovery()` — strong-only activation + concentrated allocation; `_compute_dominant_pairs()` — per-symbol exchange detection; `_evaluate_demotions()` — strong threshold gating; `_track_candidate_transitions()` — strong/very_strong historical tracking |
-| `config.py` | `EXCHANGE_TAKER_FEES`, `USDT_WITHDRAWAL_FEES`, `ADAPTIVE_MODE` |
-| `settings.json` | Runtime settings including `adaptive_mode`, `min_net_profit_pct`, `trade_amount_usd`, `total_capital` |
+| `config.py` | `DEFAULT_FEE_CONFIGS`, `USDT_WITHDRAWAL_FEES`, `ADAPTIVE_MODE` |
+| `fee_manager.py` | `FeeManager` — centralized fee computation, token discounts, referral cashbacks, zero-fee pairs, real mode |
+| `settings.json` | Runtime settings including `adaptive_mode`, `min_net_profit_pct`, `trade_amount_usd`, `total_capital`, `fee_configs` |
 
 ## Dashboard
 
@@ -352,9 +353,11 @@ React/TypeScript SPA served by the Python backend via WebSocket.
 
 - **Dashboard** — Real-time overview: portfolio P&L (sim + demo), trade/transfer stats, demo exchange status, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`), balance table, price grid, demo portfolio comparison, recent trades/transfers, rotation log. Fully responsive: 2×2 stats grid, horizontal-scroll tables, bottom tab nav on mobile.
 - **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist. All tables horizontal-scroll on mobile.
-- **Settings** — Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: "Restart Bot" button clears saved state and starts fresh with configured capital. Form grids stack single-column on mobile.
+- **Settings** — Two sub-tabs:
+  - **General**: Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: "Restart Bot" button clears saved state and starts fresh with configured capital. Form grids stack single-column on mobile.
+  - **Fee Management**: Per-exchange fee configuration — base taker rate, token discount toggle+%, fee model (received/spent/token), mechanism (instant/rebate/tier), referral cashback toggle+%+settlement delay, zero-fee pairs. Shows computed effective rates with formula breakdown. Cashback stats (pending/credited). Real mode banner. Save button with 5s cooldown. Hot-applied without restart.
 - **Logs** — Unified log viewer with two sub-tabs:
-  - **Bot Logs**: Real-time terminal-style log viewer (font-mono, auto-scroll). Filters: level (INFO/WARNING/ERROR), component (Monitor/Optimizer/Balance/exchanges/Dashboard/Auth/Email/Settings), text search. Export to `.log` file.
+  - **Bot Logs**: Real-time terminal-style log viewer (font-mono, auto-scroll). Filters: level (INFO/WARNING/ERROR), component (Monitor/Optimizer/Balance/exchanges/Dashboard/Auth/Email/Settings/Fee), text search. Export to `.log` file.
   - **Auth Logs**: Authentication event log (login success/failure, blocked IPs, reconnections, IP denials). Filterable by event type with search by IP/username/browser/OS. Export to `.csv` file.
   - **Export**: Presets (1 Hour, 6 Hours, Today, 1 Day, Current Session, All, Custom UTC datetime picker). "Apply current filters" checkbox auto-checks when UI filters are active. Reads from disk log files for cross-day ranges.
 
@@ -392,6 +395,7 @@ Session state survives restarts (including deploys via `systemctl restart`). `St
 - **ArbitrageMonitor**: Trade history, config snapshots, tick count, session statistics
 - **SymbolOptimizer**: Active symbols, rotations, historical stats, discovery state, dominant pairs
 - **DemoPortfolioFetcher**: Baseline snapshots per exchange (first-fetch balances for delta computation)
+- **FeeManager**: Pending referral cashbacks and total credited cashback amount
 
 **How it works:**
 - Each component implements `to_state_dict()` / `from_state_dict()` for JSON serialization
@@ -405,7 +409,7 @@ Session state survives restarts (including deploys via `systemctl restart`). `St
 
 ### XLSX Export
 
-Click "Export XLSX" on the Rankings page. 16 sheets: Summary, Rolling Rankings, Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange (Rolling/Historical), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History, Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations, Discrepancies.
+Click "Export XLSX" on the Rankings page. 17 sheets: Summary, Rolling Rankings, Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange (Rolling/Historical), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History, Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations, Fee Configuration, Discrepancies.
 
 ### Key Dashboard Files
 
@@ -422,8 +426,9 @@ Click "Export XLSX" on the Rankings page. 16 sheets: Summary, Rolling Rankings, 
 | `dashboard/src/components/SymbolRankings.tsx` | Main page ranking card |
 | `dashboard/src/components/RankingPage.tsx` | Full ranking analysis page |
 | `dashboard/src/components/DemoComparison.tsx` | Per-exchange demo vs sim comparison cards with discrepancy log |
-| `dashboard/src/components/SettingsPage.tsx` | Settings form with adaptive mode toggle, IP whitelist, restart button |
-| `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 16 sheets |
+| `dashboard/src/components/SettingsPage.tsx` | Settings form with General/Fee Management sub-tabs, adaptive mode toggle, IP whitelist, restart button |
+| `dashboard/src/components/FeeManagementTab.tsx` | Per-exchange fee configuration UI — discounts, referral cashback, zero-fee pairs |
+| `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 17 sheets |
 | `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings, log export from disk, restart handler |
 | `demo_fetcher.py` | Demo/testnet portfolio fetcher: REST API clients for Binance/OKX/Bybit, baseline snapshots, discrepancy detection |
 | `state_manager.py` | Session state persistence: atomic save/load, periodic saves, clear for fresh restart |
@@ -483,7 +488,7 @@ Comprehensive sim-vs-demo validation system. See `DISCREPANCIES.md` for the full
 - D-03: Price tick size — prices rounded to tick_size
 - D-07: Stale price detection — data age tracked per trade in `SimulatedTrade.data_age_ms`
 
-**Fee rate validation** (D-04): On first successful demo fetch per exchange, actual fee rates are queried from exchange APIs (Binance: from `/api/v3/account` commissionRates, OKX: `/api/v5/account/trade-fee`, Bybit: `/v5/account/fee-rate`). If actual rate differs from `config.py:EXCHANGE_TAKER_FEES`, a WARNING is logged and the rate is overridden in-place.
+**Fee rate validation** (D-04): On first successful demo fetch per exchange, actual fee rates are queried from exchange APIs (Binance: from `/api/v3/account` commissionRates, OKX: `/api/v5/account/trade-fee`, Bybit: `/v5/account/fee-rate`). If actual rate differs from the FeeManager production config, a WARNING is logged. Simulation keeps the production rate for realistic P&L; in Real Mode, actual API rates override config via `FeeManager.set_real_rate()`.
 
 **Quantity rounding** in `balance.py:execute_trade()`: When `exchange_info` is available, buy and sell quantities are rounded DOWN to lot_size_step. Unspent USDT stays in balance (realistic behavior). Returns an adjustment dict with raw/rounded quantities and rounding impact.
 
@@ -503,7 +508,7 @@ Comprehensive sim-vs-demo validation system. See `DISCREPANCIES.md` for the full
 | `DISCREPANCIES.md` | All 20 discrepancy types documented with priority, status, detection, fix |
 | `exchange_info.py` | `ExchangeInfoManager` — fetches lot sizes, tick sizes, min notionals from all 5 exchanges at startup |
 | `demo_fetcher.py` | `DemoPortfolioFetcher` — REST API clients, baseline management, delta computation, discrepancy detection, fee rate validation |
-| `config.py` | Demo API key constants, `EXCHANGE_TAKER_FEES` (overridden at runtime by validated rates) |
+| `config.py` | Demo API key constants, `DEFAULT_FEE_CONFIGS` (7 exchanges, 10 fields each) |
 | `balance.py` | `execute_trade()` — quantity rounding via exchange rules, returns adjustment dict |
 | `monitor.py` | `_compute_trade_size()` — min notional/qty validation; `SimulatedTrade` — rounding/age metadata |
 | `dashboard_server.py` | `_build_demo_state()` — builds baseline-adjusted per-exchange comparison data for dashboard |
@@ -567,7 +572,7 @@ Monitor._tick() detects opportunity
 - `"spent"`: fee added to spent amount
 - `"token"`: fee from discount token (BNB/BGB/KCS)
 
-Per-exchange config: `config.py:EXCHANGE_FEE_MODELS`.
+Per-exchange config via `FeeManager.get_fee_model(exchange)`. Configured in Fee Management tab.
 
 ### In-Transit Tracking (D-17)
 
@@ -600,6 +605,43 @@ In demo mode, external USDT transfers use `InTransitFund` with estimated network
 | Test | Kamatera Tokyo (30-day free trial) with demo API keys | $0 |
 | Production | Contabo Tokyo with real API keys | ~$7.50/mo |
 | Optimized | 3 VPS: Tokyo (Binance) + Singapore (Bybit/Bitget/KuCoin/OKX) + Bangkok (MEXC + orchestrator) | ~$22.50/mo |
+
+## Fee Management
+
+Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed by `FeeManager` in `fee_manager.py`, configurable from the dashboard Fee Management tab.
+
+### Fee Structure Per Exchange
+
+| Exchange | Base Rate | Token Discount | Effective Rate | Mechanism | Fee Model |
+|----------|-----------|---------------|---------------|-----------|-----------|
+| Binance | 0.10% | BNB 25% (enabled) | 0.075% | instant | token |
+| OKX | 0.10% | OKB (disabled) | 0.10% | tier | received |
+| Bybit | 0.10% | MNT/BIT (disabled) | 0.10% | tier | received |
+| MEXC | 0.05% | MX (disabled) | 0.05% | instant | received |
+| Bitget | 0.10% | BGB 20% (enabled) | 0.08% | instant | token |
+| KuCoin | 0.10% | KCS 20% (enabled) | 0.08% | rebate | token |
+| Gate.io | 0.10% | GT (disabled) | 0.10% | instant | received |
+
+### Features
+
+- **Token discounts**: Per-exchange toggle with configurable %. Effective rate = base × (1 - discount%).
+- **Referral cashbacks**: Delayed settlement tracked as `PendingCashback`. Each cashback has an expected credit time (exchange-dependent: 0–1080 min). Credited to USDT balance when settlement time passes. NOT subtracted from trade fee (it's delayed income, not instant discount).
+- **Zero-fee pairs**: Override list per exchange (e.g., Gate.io BTC/USDT → 0% fee). Checked before all other rate computation.
+- **Fee mechanisms**: `instant` (discount applied immediately), `rebate` (KCS — credited back), `tier` (volume-based, OKX/Bybit).
+- **Fee models**: `received` (fee from received asset), `spent` (added to cost), `token` (from discount token balance).
+- **Sim/Real mode**: Simulation uses configured rates. Real mode overrides with API-queried rates from `DemoPortfolioFetcher`.
+- **Hot-apply**: Fee settings changed in dashboard are applied instantly without restart.
+- **State persistence**: Pending cashbacks survive restarts via `StateManager`.
+- **[Fee] logging**: Every trade logs fee details and referral cashback amounts. Filterable in Bot Logs.
+
+### Key Files
+
+| File | Responsibility |
+|------|---------------|
+| `fee_manager.py` | `FeeManager` class, `ExchangeFeeConfig` dataclass, `PendingCashback` tracking, settings serialization, broadcast dict |
+| `config.py` | `DEFAULT_FEE_CONFIGS` — 7 exchanges × 10 fields (base rates, discounts, mechanisms, models, referral, zero-fee) |
+| `dashboard_server.py` | `save_fee_settings` handler with validation schema, hot-apply, broadcast via `to_broadcast_dict()` |
+| `dashboard/src/components/FeeManagementTab.tsx` | Per-exchange fee config UI with computed effective rates |
 
 ## VPS Infrastructure
 
