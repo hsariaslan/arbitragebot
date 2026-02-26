@@ -14,6 +14,7 @@ from config import (
     AUTO_ROTATE,
     CONFIRMATION_PERIOD_SECONDS,
     DEFAULT_FEE_CONFIGS,
+    DEFAULT_TRANSFER_CONFIGS,
     DEMOTION_PERIOD_SECONDS,
     DEMOTION_THRESHOLD,
     DISCOVERY_DURATION_SECONDS,
@@ -57,6 +58,7 @@ DEFAULT_SETTINGS: dict = {
     "ip_whitelist": [],
     "fee_configs": DEFAULT_FEE_CONFIGS,
     "fee_real_mode": False,
+    "transfer_configs": DEFAULT_TRANSFER_CONFIGS,
 }
 
 

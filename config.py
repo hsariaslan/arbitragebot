@@ -269,19 +269,154 @@ INITIAL_BALANCE_PER_SYMBOL: float = 160.0  # $160 per symbol per exchange (split
 REBALANCE_AMOUNT: float = 200.0            # Transfer $200 when rebalancing (2× trade size)
 REBALANCE_THRESHOLD: float = 50.0          # Trigger rebalance when below $50 buffer
 
-# USDT withdrawal fees (cheapest available network per exchange)
-# Binance: BEP20 $0.01 | OKX: Arbitrum ~$0.004 | Bybit: Aptos $0 promo or BEP20 $0.20
-# MEXC: Polygon $0.007 | Bitget: Arbitrum ~$0.10 | KuCoin: Polygon $0.80 (expensive!)
-# Gate.io: Arbitrum/Polygon $0.05
+# DEPRECATED: Use TransferFeeManager via DEFAULT_TRANSFER_CONFIGS instead.
+# Kept for backward compatibility reference only.
 USDT_WITHDRAWAL_FEES: dict[str, float] = {
-    "Binance": 0.01,       # BEP20
-    "OKX": 0.01,           # Arbitrum (~$0.004 on-chain)
-    "Bybit": 0.20,         # BEP20 (Aptos $0 promo available but may expire)
-    # "MEXC": 0.01,        # Polygon — disabled (geo-blocked in Japan)
-    "Bitget": 0.10,        # Arbitrum (~$0.001 on-chain, Bitget markup ~$0.10)
-    "KuCoin": 0.80,        # Polygon (cheapest KuCoin option, still expensive)
-    "Gate.io": 0.05,       # Arbitrum/Polygon
+    "Binance": 0.01, "OKX": 0.30, "Bybit": 0.20,
+    "Bitget": 0.001, "KuCoin": 0.40, "Gate.io": 0.50,
 }
+
+# ── Per-exchange per-network USDT withdrawal fee configs ──────────────
+# Verified Feb 2026 from official APIs. See TRANSFER_FEES.md for full details.
+# Each exchange has multiple networks with different fees/speeds/conditions.
+# fee_type: "flat" (fixed USD), "percentage" (rate + min), "conditional" (free if >= min_withdrawal)
+#
+# Network shorthand: _n(network, fee, speed, min_w, fee_type, pct_rate, pct_min, notes)
+def _n(
+    network: str, fee: float, speed: float = 3.0, min_w: float = 10.0,
+    fee_type: str = "flat", pct_rate: float = 0.0, pct_min: float = 0.0,
+    notes: str = "",
+) -> dict:
+    return {
+        "network": network, "fee": fee, "fee_type": fee_type,
+        "percentage_rate": pct_rate, "percentage_min": pct_min,
+        "min_withdrawal": min_w, "speed_seconds": speed,
+        "enabled": True, "notes": notes,
+    }
+
+DEFAULT_TRANSFER_CONFIGS: dict[str, dict] = {
+    # ── Binance (17 networks, confirmed) ──
+    "Binance": {
+        "preferred_network": "auto",
+        "networks": [
+            _n("BEP20", 0.01, 3),
+            _n("Plasma", 0.012, 1),
+            _n("opBNB", 0.015, 1),
+            _n("Aptos", 0.02, 1),
+            _n("Kaia", 0.02, 2),
+            _n("AVAX C-Chain", 0.04, 2),
+            _n("Optimism", 0.04, 2),
+            _n("Celo", 0.05, 5),
+            _n("Polygon", 0.07, 3),
+            _n("Tezos", 0.10, 30),
+            _n("Scroll", 0.10, 2),
+            _n("Arbitrum", 0.10, 1),
+            _n("Kava", 0.20, 6),
+            _n("NEAR", 0.20, 1),
+            _n("Solana", 0.30, 1),
+            _n("ERC20", 0.50, 12),
+            _n("TRC20", 1.00, 5),
+        ],
+    },
+    # ── OKX (8 networks, dynamic fees — conservative estimates) ──
+    "OKX": {
+        "preferred_network": "auto",
+        "networks": [
+            _n("Polygon", 0.10, 3, notes="dynamic $0.01-0.10"),
+            _n("Solana", 0.10, 1, notes="dynamic"),
+            _n("BEP20", 0.30, 3, notes="dynamic $0.20-0.50"),
+            _n("AVAX C-Chain", 0.30, 2, notes="dynamic"),
+            _n("Arbitrum", 0.50, 1, notes="dynamic"),
+            _n("Optimism", 0.50, 2, notes="dynamic"),
+            _n("TRC20", 1.00, 5, notes="dynamic $0.10-2.30"),
+            _n("ERC20", 3.00, 12, notes="dynamic"),
+        ],
+    },
+    # ── Bybit (9 networks, dynamic fees) ──
+    "Bybit": {
+        "preferred_network": "auto",
+        "networks": [
+            _n("Aptos", 0.00, 1, notes="promo, may expire"),
+            _n("Plasma", 0.00, 1, notes="likely supported"),
+            _n("BEP20", 0.20, 3, notes="dynamic $0.20-0.50"),
+            _n("Arbitrum", 0.50, 1, notes="dynamic"),
+            _n("Optimism", 0.50, 2, notes="dynamic"),
+            _n("Polygon", 0.50, 3, notes="dynamic"),
+            _n("Solana", 0.50, 1, notes="dynamic"),
+            _n("TRC20", 1.60, 5, notes="confirmed"),
+            _n("ERC20", 3.00, 12, notes="estimated"),
+        ],
+    },
+    # ── MEXC (6 networks, geo-blocked) ──
+    "MEXC": {
+        "preferred_network": "auto",
+        "networks": [
+            _n("Arbitrum", 0.00, 1, notes="permanent free"),
+            _n("Polygon", 0.007, 3, notes="very cheap"),
+            _n("BEP20", 0.00, 3, notes="promo"),
+            _n("Solana", 0.01, 1, notes="near-zero"),
+            _n("TRC20", 1.00, 5),
+            _n("ERC20", 3.00, 12, notes="estimated"),
+        ],
+    },
+    # ── Bitget (12 networks, API-verified) ──
+    "Bitget": {
+        "preferred_network": "auto",
+        "networks": [
+            _n("Plasma", 0.001, 1, notes="verified, cheapest"),
+            _n("Aptos", 0.03, 1, notes="verified"),
+            _n("Morph", 0.10, 2, notes="verified"),
+            _n("AVAX C-Chain", 0.11, 2, notes="verified"),
+            _n("BEP20", 0.15, 3, notes="verified"),
+            _n("Arbitrum", 0.15, 1, notes="verified"),
+            _n("Optimism", 0.15, 2, notes="verified"),
+            _n("TON", 0.15, 2, notes="verified"),
+            _n("Polygon", 0.20, 3, notes="verified"),
+            _n("Solana", 1.00, 1, notes="verified"),
+            _n("TRC20", 1.50, 5, notes="verified"),
+            _n("ERC20", 1.60, 12, notes="verified"),
+        ],
+    },
+    # ── KuCoin (16 networks, API-verified) ──
+    "KuCoin": {
+        "preferred_network": "auto",
+        "networks": [
+            _n("Plasma", 0.40, 1, 5, notes="verified"),
+            _n("KCC", 0.50, 3, 1, notes="verified"),
+            _n("Aptos", 0.50, 1, 1, notes="verified"),
+            _n("NEAR", 0.50, 1, 3, notes="verified"),
+            _n("TON", 0.50, 2, 1, notes="verified"),
+            _n("Polygon", 0.80, 3, 1.6, notes="verified"),
+            _n("BEP20", 1.00, 3, notes="verified"),
+            _n("Arbitrum", 1.00, 1, 5, notes="verified"),
+            _n("Optimism", 1.00, 2, 3, notes="verified"),
+            _n("AVAX C-Chain", 1.00, 2, 2, notes="verified"),
+            _n("KAVA EVM", 1.00, 3, 3, notes="verified"),
+            _n("Polkadot", 1.00, 5, 10, notes="verified"),
+            _n("Tezos", 1.00, 30, 2, notes="verified"),
+            _n("Solana", 1.50, 1, 3, notes="verified"),
+            _n("TRC20", 1.50, 5, 3, notes="verified"),
+            _n("ERC20", 5.50, 12, 30, "percentage", 0.002, 5.50, "verified, 0.2% rate"),
+        ],
+    },
+    # ── Gate.io (8 networks) ──
+    "Gate.io": {
+        "preferred_network": "auto",
+        "networks": [
+            _n("TRC20", 0.00, 5, 2020, "conditional", notes="free if >= 2,020 USDT"),
+            _n("BEP20", 0.50, 3, notes="promo may have expired"),
+            _n("Arbitrum", 0.50, 1, notes="estimated"),
+            _n("Optimism", 0.50, 2, notes="estimated"),
+            _n("Polygon", 0.50, 3, notes="estimated"),
+            _n("Solana", 0.50, 1, notes="estimated"),
+            _n("AVAX C-Chain", 0.50, 2, notes="estimated"),
+            _n("ERC20", 4.00, 12, notes="estimated"),
+        ],
+    },
+}
+
+# Clean up helper from module namespace
+del _n
 
 # Dashboard WebSocket server
 DASHBOARD_WS_PORT: int = 8765
