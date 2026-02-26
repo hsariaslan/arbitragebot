@@ -461,7 +461,7 @@ Fetches real portfolio balances from exchange demo/testnet APIs and displays the
 | OKX | `https://www.okx.com/api/v5/account/balance` | HMAC-SHA256 + passphrase, header `x-simulated-trading: 1` |
 | Bybit | `https://api-demo.bybit.com/v5/account/wallet-balance` | HMAC-SHA256 |
 
-Gate.io excluded entirely. Bitget, KuCoin, MEXC continue simulation-only.
+Gate.io, Bitget, KuCoin, MEXC continue simulation-only (no demo/testnet APIs available).
 
 ### Baseline Snapshot System
 
@@ -506,7 +506,7 @@ Comprehensive sim-vs-demo validation system. See `DISCREPANCIES.md` for the full
 | File | Responsibility |
 |------|---------------|
 | `DISCREPANCIES.md` | All 20 discrepancy types documented with priority, status, detection, fix |
-| `exchange_info.py` | `ExchangeInfoManager` — fetches lot sizes, tick sizes, min notionals from all 5 exchanges at startup |
+| `exchange_info.py` | `ExchangeInfoManager` — fetches lot sizes, tick sizes, min notionals from all 6 exchanges at startup |
 | `demo_fetcher.py` | `DemoPortfolioFetcher` — REST API clients, baseline management, delta computation, discrepancy detection, fee rate validation |
 | `config.py` | Demo API key constants, `DEFAULT_FEE_CONFIGS` (7 exchanges, 10 fields each) |
 | `balance.py` | `execute_trade()` — quantity rounding via exchange rules, returns adjustment dict |

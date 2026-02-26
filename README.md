@@ -1,12 +1,12 @@
 # CoirnaBot
 
-**v0.8.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee management.
+**v0.8.1-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee management.
 
 Monitors real-time prices across multiple crypto exchanges via WebSocket, detects price discrepancies, and executes simultaneous buy/sell orders to profit from the spread. Supports simulation mode and demo/testnet execution with automatic discrepancy detection.
 
 ## Features
 
-- **5 exchanges**: Binance, OKX, Bybit, Bitget, KuCoin (all via WebSocket)
+- **6 exchanges**: Binance, OKX, Bybit, Bitget, KuCoin, Gate.io (all via WebSocket)
 - **60 symbols**: Tiered from BTC/ETH majors to volatile alts, all USDT pairs
 - **Adaptive trading**: Dynamic trade sizing, smart rebalancing, dominant exchange detection
 - **Symbol optimizer**: Auto-discovery, scoring, rotation, promotion/demotion with strong-only trading
