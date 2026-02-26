@@ -1,14 +1,21 @@
 import { useState, useEffect } from 'react';
-import type { Settings } from '../types';
+import type { Settings, ExchangeFeeConfig, FeeStats } from '../types';
+import FeeManagementTab from './FeeManagementTab';
 
 interface SettingsPageProps {
   currentSettings: Settings;
   onSave: (settings: Settings) => void;
   onApply: (settings: Settings) => void;
   onSendMessage: (msg: object) => void;
+  feeConfigs?: Record<string, ExchangeFeeConfig>;
+  feeRealMode?: boolean;
+  feeStats?: FeeStats;
 }
 
-export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage }: SettingsPageProps) {
+type SettingsSubTab = 'general' | 'fees';
+
+export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage, feeConfigs, feeRealMode, feeStats }: SettingsPageProps) {
+  const [activeSubTab, setActiveSubTab] = useState<SettingsSubTab>('general');
   const [tradeAmount, setTradeAmount] = useState(currentSettings.trade_amount_usd);
   const [totalCapital, setTotalCapital] = useState(currentSettings.total_capital ?? 1800);
   const [showConfirm, setShowConfirm] = useState(false);
@@ -104,6 +111,29 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
 
   return (
     <div className="space-y-4 sm:space-y-6 max-w-3xl">
+      {/* Sub-tab navigation */}
+      <div className="flex gap-1 bg-slate-800/50 rounded-lg p-1">
+        {([['general', 'General'], ['fees', 'Fee Management']] as const).map(([key, label]) => (
+          <button key={key} onClick={() => setActiveSubTab(key)}
+            className={`flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              activeSubTab === key
+                ? 'bg-slate-700 text-white'
+                : 'text-slate-400 hover:text-slate-300 hover:bg-slate-700/50'
+            }`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {activeSubTab === 'fees' ? (
+        <FeeManagementTab
+          feeConfigs={feeConfigs}
+          feeRealMode={feeRealMode}
+          feeStats={feeStats}
+          onSendMessage={onSendMessage}
+        />
+      ) : (
+      <>
       {/* Capital */}
       <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Capital</h2>
@@ -376,6 +406,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             </div>
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   );

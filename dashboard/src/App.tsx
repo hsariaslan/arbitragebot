@@ -178,6 +178,7 @@ export default function App() {
             allTransfers={state.all_transfers}
             allConfigHistory={state.all_config_history}
             demoDiscrepancies={state.demo_comparison?.recent_discrepancies}
+            feeConfigs={state.fee_configs}
           />
         ) : activeTab === 'settings' ? (
           <SettingsPage
@@ -185,6 +186,9 @@ export default function App() {
             onSave={handleSaveSettings}
             onApply={handleApplySettings}
             onSendMessage={send}
+            feeConfigs={state.fee_configs}
+            feeRealMode={state.fee_real_mode}
+            feeStats={state.fee_stats}
           />
         ) : (
           <LogsPage

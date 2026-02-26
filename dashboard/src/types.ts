@@ -97,6 +97,9 @@ export interface Settings {
   // Security
   ip_whitelist_enabled?: boolean;
   ip_whitelist?: string[];
+  // Fee management
+  fee_configs?: Record<string, ExchangeFeeConfig>;
+  fee_real_mode?: boolean;
   // Legacy fields (may be present in old settings)
   active_exchanges?: string[];
   active_symbols?: string[];
@@ -323,6 +326,29 @@ export interface DemoComparisonState {
   demo_portfolio_total: number;  // demo exchanges + sim fallback for non-demo exchanges
 }
 
+// ── Fee Management ──────────────────────────────────────────────────
+
+export interface ExchangeFeeConfig {
+  base_taker_rate: number;
+  token_discount_enabled: boolean;
+  token_discount_pct: number;
+  effective_taker_rate: number;
+  effective_rate_after_referral: number;
+  fee_mechanism: 'instant' | 'rebate' | 'tier';
+  fee_model: 'received' | 'spent' | 'token';
+  referral_enabled: boolean;
+  referral_cashback_pct: number;
+  referral_settlement_minutes: number;
+  referral_paid_in: 'same_as_fee' | 'USDT';
+  zero_fee_pairs: string[];
+}
+
+export interface FeeStats {
+  pending_cashback_total: number;
+  credited_cashback_total: number;
+  pending_count: number;
+}
+
 // ── Main Dashboard State ────────────────────────────────────────────
 
 export interface DashboardState {
@@ -348,4 +374,8 @@ export interface DashboardState {
   auth_logs?: AuthLogEntry[];
   bot_logs?: BotLogEntry[];
   demo_comparison?: DemoComparisonState | null;
+  // Fee management
+  fee_configs?: Record<string, ExchangeFeeConfig>;
+  fee_real_mode?: boolean;
+  fee_stats?: FeeStats;
 }

@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import type { ConfigSnapshot, DemoDiscrepancy, OptimizerState, Portfolio, Simulation, Trade, Transfer } from '../types';
+import type { ConfigSnapshot, DemoDiscrepancy, ExchangeFeeConfig, OptimizerState, Portfolio, Simulation, Trade, Transfer } from '../types';
 
 const tier1 = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'ADAUSDT'];
 const tier2 = ['AVAXUSDT', 'LINKUSDT', 'POLUSDT', 'DOTUSDT', 'NEARUSDT', 'SUIUSDT', 'APTUSDT', 'TRXUSDT'];
@@ -14,6 +14,7 @@ export function exportXlsx(
   allTransfers: Transfer[] = [],
   allConfigHistory: ConfigSnapshot[] = [],
   demoDiscrepancies: DemoDiscrepancy[] = [],
+  feeConfigs?: Record<string, ExchangeFeeConfig>,
 ) {
   const wb = XLSX.utils.book_new();
   const now = new Date();
@@ -334,6 +335,26 @@ export function exportXlsx(
     }));
     const wsConfig = XLSX.utils.json_to_sheet(configRows);
     XLSX.utils.book_append_sheet(wb, wsConfig, 'Configurations');
+  }
+
+  // 15b. Fee Configuration Snapshot
+  if (feeConfigs && Object.keys(feeConfigs).length > 0) {
+    const feeRows = Object.entries(feeConfigs).map(([ex, cfg]) => ({
+      Exchange: ex,
+      'Base Rate %': (cfg.base_taker_rate * 100).toFixed(4),
+      'Token Discount': cfg.token_discount_enabled ? 'ON' : 'OFF',
+      'Discount %': (cfg.token_discount_pct * 100).toFixed(1),
+      'Effective Rate %': (cfg.effective_taker_rate * 100).toFixed(4),
+      'Mechanism': cfg.fee_mechanism,
+      'Fee Model': cfg.fee_model,
+      'Referral': cfg.referral_enabled ? 'ON' : 'OFF',
+      'Referral %': (cfg.referral_cashback_pct * 100).toFixed(1),
+      'Settlement (min)': cfg.referral_settlement_minutes,
+      'After Referral %': (cfg.effective_rate_after_referral * 100).toFixed(4),
+      'Zero-Fee Pairs': cfg.zero_fee_pairs.join(', '),
+    }));
+    const wsFees = XLSX.utils.json_to_sheet(feeRows);
+    XLSX.utils.book_append_sheet(wb, wsFees, 'Fee Configuration');
   }
 
   // 16. Discrepancies (demo vs sim)
