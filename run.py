@@ -165,6 +165,7 @@ async def main() -> None:
         exchanges=active_exchanges,
         trade_amount=trade_amount,
         min_net_profit_pct=settings.get("min_net_profit_pct", 0.02),
+        min_misses_before_rebalance=int(settings.get("min_misses_before_rebalance", 5)),
         rebalance_roi_horizon=settings.get("rebalance_roi_horizon", 1800),
         total_capital=total_capital,
         adaptive_mode=adaptive_mode,

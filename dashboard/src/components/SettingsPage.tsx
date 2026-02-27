@@ -36,6 +36,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [demotionPeriod, setDemotionPeriod] = useState(currentSettings.demotion_period ?? 600);
   const [minNetProfitPct, setMinNetProfitPct] = useState(currentSettings.min_net_profit_pct ?? 0.02);
   const [rebalanceCooldown, setRebalanceCooldown] = useState(currentSettings.rebalance_cooldown ?? 30);
+  const [minMissesBeforeRebalance, setMinMissesBeforeRebalance] = useState(currentSettings.min_misses_before_rebalance ?? 5);
   const [rebalanceRoiHorizon, setRebalanceRoiHorizon] = useState(currentSettings.rebalance_roi_horizon ?? 1800);
   const [adaptiveMode, setAdaptiveMode] = useState(currentSettings.adaptive_mode ?? true);
   const [executionMode, setExecutionMode] = useState(currentSettings.execution_mode ?? 'simulation');
@@ -63,6 +64,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setDemotionPeriod(currentSettings.demotion_period ?? 600);
       setMinNetProfitPct(currentSettings.min_net_profit_pct ?? 0.02);
       setRebalanceCooldown(currentSettings.rebalance_cooldown ?? 30);
+      setMinMissesBeforeRebalance(currentSettings.min_misses_before_rebalance ?? 5);
       setRebalanceRoiHorizon(currentSettings.rebalance_roi_horizon ?? 1800);
       setAdaptiveMode(currentSettings.adaptive_mode ?? true);
       setExecutionMode(currentSettings.execution_mode ?? 'simulation');
@@ -88,6 +90,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     demotion_period: demotionPeriod,
     min_net_profit_pct: minNetProfitPct,
     rebalance_cooldown: rebalanceCooldown,
+    min_misses_before_rebalance: minMissesBeforeRebalance,
     rebalance_roi_horizon: rebalanceRoiHorizon,
     adaptive_mode: adaptiveMode,
     execution_mode: executionMode,
@@ -285,6 +288,13 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             <input type="number" value={rebalanceCooldown} min={0} onChange={d(setRebalanceCooldown, 30)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
             <p className="text-xs text-slate-500 mt-1">Min seconds between rebalances per exchange</p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Miss Streak Before Rebalance</label>
+            <input type="number" value={minMissesBeforeRebalance} min={1} max={100} step={1}
+              onChange={d(setMinMissesBeforeRebalance, 5)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+            <p className="text-xs text-slate-500 mt-1">Consecutive missed trades before triggering rebalance</p>
           </div>
           <div>
             <label className="block text-xs text-slate-500 mb-1">Rebalance ROI Horizon (s)</label>

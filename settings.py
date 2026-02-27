@@ -52,6 +52,7 @@ DEFAULT_SETTINGS: dict = {
     "demotion_period": DEMOTION_PERIOD_SECONDS,
     "min_net_profit_pct": MIN_NET_PROFIT_PCT,
     "rebalance_cooldown": REBALANCE_COOLDOWN_SECONDS,
+    "min_misses_before_rebalance": 5,
     "rebalance_roi_horizon": REBALANCE_ROI_HORIZON,
     "adaptive_mode": ADAPTIVE_MODE,
     "ip_whitelist_enabled": False,

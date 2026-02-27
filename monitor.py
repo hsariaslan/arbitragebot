@@ -47,6 +47,7 @@ class ConfigSnapshot:
     adaptive_mode: bool
     min_net_profit_pct: float
     rebalance_cooldown: float
+    min_misses_before_rebalance: int
     rebalance_roi_horizon: int
     total_capital: float
     num_active_symbols: int
@@ -115,6 +116,7 @@ class ArbitrageMonitor:
         log_file: "Path | None" = None,
         exchange_info: "ExchangeInfoManager | None" = None,
         fee_manager: "FeeManager | None" = None,
+        min_misses_before_rebalance: int = 5,
     ) -> None:
         self._fetchers = fetchers
         self._balance = balance
@@ -144,7 +146,7 @@ class ArbitrageMonitor:
         # profitable ticks that couldn't execute due to insufficient balance.
         # Key: "sym:buy_ex:sell_ex" → consecutive miss count
         self._miss_streak: dict[str, int] = {}
-        self._min_misses_before_rebalance: int = 15
+        self._min_misses_before_rebalance: int = min_misses_before_rebalance
 
         # Track all spread observations (even non-profitable) per symbol
         # Each entry: (spread_pct, fee_pct, net_pct, buy_ex, sell_ex)
@@ -383,6 +385,7 @@ class ArbitrageMonitor:
             adaptive_mode=self._adaptive_mode,
             min_net_profit_pct=self._min_net_profit_pct,
             rebalance_cooldown=self._balance._rebalance_cooldown if self._balance else 0,
+            min_misses_before_rebalance=self._min_misses_before_rebalance,
             rebalance_roi_horizon=self._rebalance_roi_horizon,
             total_capital=self._total_capital,
             num_active_symbols=len(self._optimizer.active_symbols) if self._optimizer else 0,

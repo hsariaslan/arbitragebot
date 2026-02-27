@@ -331,6 +331,7 @@ export function exportXlsx(
       'Avg Trade Size $': c.avg_trade_size,
       'Min Net Profit %': c.min_net_profit_pct,
       'Rebalance Cooldown (s)': c.rebalance_cooldown,
+      'Miss Streak Threshold': c.min_misses_before_rebalance,
       'ROI Horizon (s)': c.rebalance_roi_horizon,
       'Total Capital $': c.total_capital,
       'Active Symbols': c.num_active_symbols,

@@ -91,6 +91,7 @@ export interface Settings {
   demotion_period?: number;
   min_net_profit_pct?: number;
   rebalance_cooldown?: number;
+  min_misses_before_rebalance?: number;
   rebalance_roi_horizon?: number;
   adaptive_mode?: boolean;
   execution_mode?: string;
@@ -246,6 +247,7 @@ export interface ConfigSnapshot {
   adaptive_mode: boolean;
   min_net_profit_pct: number;
   rebalance_cooldown: number;
+  min_misses_before_rebalance: number;
   rebalance_roi_horizon: number;
   total_capital: number;
   num_active_symbols: number;

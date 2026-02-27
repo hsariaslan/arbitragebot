@@ -764,6 +764,7 @@ class DashboardServer:
         "demotion_period": (int, 0, 86400),
         "min_net_profit_pct": (float, 0, 10),
         "rebalance_cooldown": (float, 0, 3600),
+        "min_misses_before_rebalance": (int, 1, 100),
         "rebalance_roi_horizon": (int, 0, 86400),
         "adaptive_mode": (bool, None, None),
         "execution_mode": (str, None, None),
@@ -1195,6 +1196,8 @@ class DashboardServer:
         # Update balance cooldown and trade amount
         if "rebalance_cooldown" in settings:
             self._balance._rebalance_cooldown = settings["rebalance_cooldown"]
+        if "min_misses_before_rebalance" in settings:
+            self._monitor._min_misses_before_rebalance = int(settings["min_misses_before_rebalance"])
         self._balance._trade_amount = trade_amount
         self._balance._max_rebalance = trade_amount * 4
 
@@ -1472,6 +1475,7 @@ class DashboardServer:
                     "adaptive_mode": c.adaptive_mode,
                     "min_net_profit_pct": c.min_net_profit_pct,
                     "rebalance_cooldown": c.rebalance_cooldown,
+                    "min_misses_before_rebalance": c.min_misses_before_rebalance,
                     "rebalance_roi_horizon": c.rebalance_roi_horizon,
                     "total_capital": c.total_capital,
                     "num_active_symbols": c.num_active_symbols,
