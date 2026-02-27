@@ -11,8 +11,7 @@ xlsx/
 screenshots/
 state/
 
-# Settings with potential secrets
-settings.json
+# Secrets
 api_keys.json
 .env
 REWARDS.md
