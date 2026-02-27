@@ -643,11 +643,12 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 - **Token discounts**: Per-exchange toggle with configurable %. Effective rate = base × (1 - discount%). Gate.io GT gives 10% at VIP 0. Pionex has no discount token (only volume-based VIP tiers).
 - **Referral cashbacks**: Enabled for all exchanges except Bitfinex (0% fees already). Tracked as `PendingCashback` with exchange-specific settlement times: instant (Bitget, 0 min), hourly (Binance/Pionex, 60 min), ~90 min (OKX), or daily (Bybit/MEXC/KuCoin/Gate.io, 1440 min). Credited cashback is added to USDT balance and included in net profit calculations (`net_profit = trading_pnl - transfer_fees + credited_cashback`). Displayed in Trade Profit card (credited + pending).
 - **Zero-fee pairs**: Override list per exchange (e.g., Gate.io BTC/USDT → 0% fee). Checked before all other rate computation.
-- **Fee mechanisms**: `instant` (discount applied immediately), `rebate` (KCS — credited back), `tier` (volume-based, OKX/Bybit).
-- **Fee models**: `received` (fee from received asset), `spent` (added to cost), `token` (from discount token balance).
+- **Fee mechanisms**: `instant` (discount applied immediately), `rebate` (KCS — credited back), `tier` (volume-based, OKX/Bybit). **Note**: Stored as metadata only — no code branches on mechanism type. All mechanisms are treated as instant rate reductions via `effective_taker_rate`.
+- **Fee models**: `received` (fee from received asset), `spent` (added to cost), `token` (from discount token balance). **Actively used** in `balance.execute_trade()` — controls how balances change per trade. The `token` model means full crypto/USDT received (fee from discount token), which compounds favorably over hundreds of trades.
 - **Sim/Real mode**: Simulation uses configured rates. Real mode overrides with API-queried rates from `DemoPortfolioFetcher`.
 - **Hot-apply**: Fee settings changed in dashboard are applied instantly without restart.
 - **State persistence**: Pending cashbacks survive restarts via `StateManager`.
+- **Scoring fee**: `get_scoring_fee()` returns time-weighted fee including referral cashback for scoring/selection/threshold decisions. Instant cashback (0 min) = 100% weight, hourly (≤120 min) = 75%, daily (>120 min) = 50%. Makes the bot prefer exchanges with fast cashback (e.g., Bitget instant at 0.064% scoring fee vs KuCoin daily at 0.072%). `get_taker_fee()` remains for actual trade execution and cashback recording (no double-counting).
 - **Profit integration**: Credited cashbacks are added to `net_profit` in `get_net_profit_stats()` and considered in rebalance gates (`_should_rebalance()`). This means cashback income offsets transfer fees in profitability calculations.
 - **[Fee] logging**: Every trade logs fee details and referral cashback amounts. Filterable in Bot Logs.
 
@@ -745,6 +746,7 @@ Detailed reference documents in `documentations/`:
 |------|----------|
 | `documentations/EXCHANGES.md` | All 9 exchanges: fees, discounts, server locations, latencies, WebSocket details, withdrawal fees per network, geo-restrictions, dropped exchanges |
 | `documentations/VPS.md` | VPS deployment strategy: latency matrix (9 exchanges × 5 locations), geo-restriction matrix, 4 VPS options (A-D), inter-VPS communication, orchestrator architecture, phased deployment plan |
+| `documentations/BOT_DECISION_MAKING.md` | Complete decision reference: fee computation (scoring vs taker), discovery, scoring, focus tiers, pair selection, threshold, trade sizing, execution, dominant pairs, capital allocation, rebalancing (6 gates), symbol lifecycle, net profit awareness, flow diagrams |
 
 ## Technology Stack
 
