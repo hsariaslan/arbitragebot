@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { ExchangeTransferConfig } from '../types';
 
-const EXCHANGE_ORDER = ['Binance', 'OKX', 'Bybit', 'MEXC', 'Bitget', 'KuCoin', 'Gate.io'];
+const EXCHANGE_ORDER = ['Binance', 'OKX', 'Bybit', 'MEXC', 'Bitget', 'KuCoin', 'Gate.io', 'Pionex', 'Bitfinex'];
 
 interface TransferFeeManagementTabProps {
   transferConfigs?: Record<string, ExchangeTransferConfig>;

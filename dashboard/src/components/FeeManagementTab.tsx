@@ -54,7 +54,7 @@ const DEFAULT_CONFIGS: Record<string, ExchangeFeeConfig> = {
   },
 };
 
-const EXCHANGE_ORDER = ['Binance', 'OKX', 'Bybit', 'MEXC', 'Bitget', 'KuCoin', 'Gate.io'];
+const EXCHANGE_ORDER = ['Binance', 'OKX', 'Bybit', 'MEXC', 'Bitget', 'KuCoin', 'Gate.io', 'Pionex', 'Bitfinex'];
 
 const TOKEN_NAMES: Record<string, string> = {
   Binance: 'BNB', Bitget: 'BGB', KuCoin: 'KCS', 'Gate.io': 'GT', MEXC: 'MX',
