@@ -142,6 +142,42 @@ class FeeManager:
 
         return cfg.effective_taker_rate
 
+    def get_scoring_fee(self, exchange: str, symbol: str = "") -> float:
+        """Get fee rate for scoring and exchange ranking decisions.
+
+        Unlike get_taker_fee() which returns the actual fee per trade,
+        this returns a time-weighted rate that factors in referral cashback:
+        - Instant (0 min): 100% cashback applied — effectively a fee reduction
+        - Hourly (≤120 min): 75% applied — fast capital return
+        - Daily (>120 min): 50% applied — eventual income
+
+        Used in: scoring, threshold checks, pair selection, trade sizing.
+        NOT used in: trade execution, rebalance cost, cashback recording.
+        """
+        cfg = self._configs.get(exchange)
+        if cfg is None:
+            return 0.001
+
+        if symbol and symbol in cfg.zero_fee_pairs:
+            return 0.0
+
+        if self._real_mode and exchange in self._real_rates:
+            rate = self._real_rates[exchange]
+        else:
+            rate = cfg.effective_taker_rate
+
+        if cfg.referral_enabled and cfg.referral_cashback_pct > 0:
+            settlement = cfg.referral_settlement_minutes
+            if settlement <= 0:
+                weight = 1.0
+            elif settlement <= 120:
+                weight = 0.75
+            else:
+                weight = 0.50
+            rate *= 1.0 - cfg.referral_cashback_pct * weight
+
+        return rate
+
     def get_fee_model(self, exchange: str) -> str:
         """Get fee deduction model for an exchange.
 
@@ -318,6 +354,7 @@ class FeeManager:
             d["effective_rate_after_referral"] = round(
                 cfg.effective_rate_after_referral, 8
             )
+            d["scoring_fee"] = round(self.get_scoring_fee(ex), 8)
             configs_out[ex] = d
 
         return {

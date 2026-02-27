@@ -716,7 +716,7 @@ class ArbitrageMonitor:
                     if internal_spread > self._exchange_spread_max[ex_name]:
                         self._exchange_spread_max[ex_name] = internal_spread
 
-            best_net = float("-inf")
+            best_scoring_net = float("-inf")
             best_row = None
 
             for i, (ex_buy, _, ask_i, _, ask_depth_i) in enumerate(exchange_prices):
@@ -731,14 +731,21 @@ class ArbitrageMonitor:
                         continue
 
                     spread_pct = (bid_j - ask_i) / ask_i * 100
-                    buy_fee = self._fee_manager.get_taker_fee(ex_buy, symbol) if self._fee_manager else 0.001
-                    sell_fee = self._fee_manager.get_taker_fee(ex_sell, symbol) if self._fee_manager else 0.001
-                    fee_pct = (buy_fee + sell_fee) * 100
+
+                    # Scoring fees for pair selection (includes cashback weighting)
+                    s_buy = self._fee_manager.get_scoring_fee(ex_buy, symbol) if self._fee_manager else 0.001
+                    s_sell = self._fee_manager.get_scoring_fee(ex_sell, symbol) if self._fee_manager else 0.001
+                    scoring_net = spread_pct - (s_buy + s_sell) * 100
+
+                    # Taker fees for profit calculation (actual fee charged)
+                    t_buy = self._fee_manager.get_taker_fee(ex_buy, symbol) if self._fee_manager else 0.001
+                    t_sell = self._fee_manager.get_taker_fee(ex_sell, symbol) if self._fee_manager else 0.001
+                    fee_pct = (t_buy + t_sell) * 100
                     net_pct = spread_pct - fee_pct
                     profit_usd = self._trade_amount * (net_pct / 100)
 
-                    if net_pct > best_net:
-                        best_net = net_pct
+                    if scoring_net > best_scoring_net:
+                        best_scoring_net = scoring_net
                         best_row = (symbol, ex_buy, ask_i, ex_sell, bid_j,
                                     spread_pct, fee_pct, net_pct, profit_usd)
 
@@ -749,18 +756,18 @@ class ArbitrageMonitor:
                 # Record observation (all, not just profitable)
                 self._all_observations.append((sym, spread, fee, net, buy_ex, sell_ex))
 
-                # Minimum net% threshold (net is already after fees)
+                # Minimum net% threshold (scoring_net includes cashback weighting)
                 pair_min_net = self._min_net_profit_pct
 
-                # Simulate trade if profitable and above minimum threshold
-                if net > 0 and net >= pair_min_net:
+                # Simulate trade if profitable after cashback and above threshold
+                if best_scoring_net > 0 and best_scoring_net >= pair_min_net:
                     self._interval_profitable += 1
                     can_trade = True
 
                     # Compute trade size (adaptive or static)
                     if self._adaptive_mode:
                         trade_size = self._compute_trade_size(
-                            buy_ex, sell_ex, sym, net, bid_p,
+                            buy_ex, sell_ex, sym, best_scoring_net, bid_p,
                         )
                     else:
                         trade_size = self._trade_amount

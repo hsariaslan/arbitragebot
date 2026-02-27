@@ -424,8 +424,8 @@ class SymbolOptimizer:
                     if i == j:
                         continue
                     spread_pct = (bid_j - ask_i) / ask_i * 100
-                    buy_fee = self._fee_manager.get_taker_fee(ex_buy, symbol) if self._fee_manager else 0.001
-                    sell_fee = self._fee_manager.get_taker_fee(ex_sell, symbol) if self._fee_manager else 0.001
+                    buy_fee = self._fee_manager.get_scoring_fee(ex_buy, symbol) if self._fee_manager else 0.001
+                    sell_fee = self._fee_manager.get_scoring_fee(ex_sell, symbol) if self._fee_manager else 0.001
                     fee_pct = (buy_fee + sell_fee) * 100
                     net_pct = spread_pct - fee_pct
 
