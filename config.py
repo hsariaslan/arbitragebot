@@ -112,6 +112,14 @@ KUCOIN_EXCHANGE_NAME: str = "KuCoin"
 GATEIO_WS_URL: str = "wss://api.gateio.ws/ws/v4/"
 GATEIO_EXCHANGE_NAME: str = "Gate.io"
 
+# Pionex Spot WebSocket (public stream)
+PIONEX_WS_URL: str = "wss://ws.pionex.com/wsPub"
+PIONEX_EXCHANGE_NAME: str = "Pionex"
+
+# Bitfinex Spot WebSocket (v2 public API)
+BITFINEX_WS_URL: str = "wss://api-pub.bitfinex.com/ws/2"
+BITFINEX_EXCHANGE_NAME: str = "Bitfinex"
+
 # Arbitrage monitor refresh interval
 MONITOR_INTERVAL_SECONDS: float = 1.0
 
@@ -229,13 +237,37 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": ["BTCUSDT"],
     },
+    "Pionex": {
+        "base_taker_rate": 0.0005,  # 0.05% flat (never decreases at any VIP tier)
+        "token_discount_enabled": False,
+        "token_discount_pct": 0.0,
+        "fee_mechanism": "instant",
+        "fee_model": "received",
+        "referral_enabled": False,
+        "referral_cashback_pct": 0.0,
+        "referral_settlement_minutes": 0,
+        "referral_paid_in": "same_as_fee",
+        "zero_fee_pairs": [],
+    },
+    "Bitfinex": {
+        "base_taker_rate": 0.0,  # 0.00% permanent since Dec 17, 2025
+        "token_discount_enabled": False,
+        "token_discount_pct": 0.0,
+        "fee_mechanism": "instant",
+        "fee_model": "received",
+        "referral_enabled": False,
+        "referral_cashback_pct": 0.0,
+        "referral_settlement_minutes": 0,
+        "referral_paid_in": "same_as_fee",
+        "zero_fee_pairs": [],
+    },
 }
 
 # All available exchanges and symbols (used by settings page)
-ALL_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "Bitget", "KuCoin", "Gate.io"]  # MEXC removed (geo-blocked)
+ALL_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "Bitget", "KuCoin", "Gate.io", "Pionex", "Bitfinex"]
 
 # Active trading configuration (balance-tracked symbols/exchanges) — defaults
-ACTIVE_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "Bitget", "KuCoin", "Gate.io"]
+ACTIVE_EXCHANGES: list[str] = ["Binance", "OKX", "Bybit", "Bitget", "KuCoin", "Gate.io", "Pionex", "Bitfinex"]
 ACTIVE_SYMBOLS: list[str] = ["SNXUSDT", "DYDXUSDT", "PENDLEUSDT", "AXSUSDT"]
 
 # Settings file path
@@ -411,6 +443,39 @@ DEFAULT_TRANSFER_CONFIGS: dict[str, dict] = {
             _n("Solana", 0.50, 1, notes="estimated"),
             _n("AVAX C-Chain", 0.50, 2, notes="estimated"),
             _n("ERC20", 4.00, 12, notes="estimated"),
+        ],
+    },
+    # ── Pionex (6 networks, estimated) ──
+    "Pionex": {
+        "preferred_network": "auto",
+        "networks": [
+            _n("Arbitrum", 0.20, 1, notes="estimated <$0.20"),
+            _n("Optimism", 0.20, 2, notes="estimated <$0.20"),
+            _n("BEP20", 0.80, 3, notes="confirmed"),
+            _n("TRC20", 1.00, 5, notes="confirmed"),
+            _n("Solana", 1.00, 1, notes="estimated"),
+            _n("ERC20", 10.00, 12, notes="confirmed, avoid"),
+        ],
+    },
+    # ── Bitfinex (15 networks, most free via USDT0) ──
+    "Bitfinex": {
+        "preferred_network": "auto",
+        "networks": [
+            _n("TRC20", 0.00, 5, notes="free"),
+            _n("Arbitrum", 0.00, 1, notes="free via USDT0"),
+            _n("Optimism", 0.00, 1, notes="free via USDT0"),
+            _n("Polygon", 0.00, 3, notes="free via USDT0"),
+            _n("Avalanche", 0.00, 2, notes="free"),
+            _n("TON", 0.00, 2, notes="free"),
+            _n("Aptos", 0.00, 2, notes="free"),
+            _n("Near", 0.00, 2, notes="free"),
+            _n("Solana", 0.00, 1, notes="free, some sources say $0.50"),
+            _n("Cosmos", 0.00, 3, notes="free"),
+            _n("Tezos", 0.00, 3, notes="free"),
+            _n("Polkadot", 0.00, 3, notes="free"),
+            _n("Celo", 0.00, 3, notes="free"),
+            _n("Kava", 0.00, 3, notes="free"),
+            _n("ERC20", 0.50, 12, notes="dynamic, ~$0.50, only network with fee"),
         ],
     },
 }

@@ -48,6 +48,8 @@ from fetchers.gateio import GateIOFetcher
 from fetchers.kucoin import KuCoinFetcher
 # from fetchers.mexc import MEXCFetcher  # Disabled (geo-blocked in Japan)
 from fetchers.okx import OKXFetcher
+from fetchers.pionex import PionexFetcher
+from fetchers.bitfinex import BitfinexFetcher
 from monitor import ArbitrageMonitor
 from optimizer import SymbolOptimizer
 from settings import load_settings
@@ -114,6 +116,8 @@ async def main() -> None:
         # MEXCFetcher(),  # Disabled (geo-blocked in Japan, re-add in Phase 2)
         KuCoinFetcher(),
         GateIOFetcher(),
+        PionexFetcher(),
+        BitfinexFetcher(),
     ]
 
     # Derive active exchanges from fetchers, use configured default symbols
