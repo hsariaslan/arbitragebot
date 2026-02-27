@@ -1,12 +1,12 @@
 # CoirnaBot
 
-**v0.9.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
+**v0.10.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
 
-Monitors real-time prices across multiple crypto exchanges via WebSocket, detects price discrepancies, and executes simultaneous buy/sell orders to profit from the spread. Supports simulation mode and demo/testnet execution with automatic discrepancy detection.
+Monitors real-time prices across 9 crypto exchanges via WebSocket, detects price discrepancies, and executes simultaneous buy/sell orders to profit from the spread. Supports simulation mode and demo/testnet execution with automatic discrepancy detection.
 
 ## Features
 
-- **6 exchanges**: Binance, OKX, Bybit, Bitget, KuCoin, Gate.io (all via WebSocket)
+- **9 exchanges**: Bitfinex (0% fees), Binance, OKX, Bybit, MEXC, Bitget, KuCoin, Gate.io, Pionex (all via WebSocket)
 - **60 symbols**: Tiered from BTC/ETH majors to volatile alts, all USDT pairs
 - **Adaptive trading**: Dynamic trade sizing, smart rebalancing, dominant exchange detection
 - **Symbol optimizer**: Auto-discovery, scoring, rotation, promotion/demotion with strong-only trading
@@ -16,6 +16,7 @@ Monitors real-time prices across multiple crypto exchanges via WebSocket, detect
 - **Real-time dashboard**: React/TypeScript SPA with live portfolio, rankings, trade history, XLSX export, fully responsive mobile UI
 - **Demo/testnet comparison**: Fetches real portfolio from Binance/OKX/Bybit demo APIs, baseline-adjusted comparison with discrepancy detection
 - **Comprehensive fee management**: Per-exchange fee configs with token discounts, referral cashbacks, zero-fee pairs, sim/real mode toggle, hot-apply from dashboard
+- **Transfer fee management**: Per-exchange per-network withdrawal fees (flat/percentage/conditional), preferred network selection, hot-apply from dashboard
 - **Dashboard security**: Login authentication, rate limiting, reCAPTCHA v2, IP whitelist, email alerts, auth logging
 
 ## Prerequisites
@@ -91,6 +92,7 @@ coirnabot/
   run.py                  # Entry point — starts all fetchers, monitor, optimizer, dashboard
   config.py               # All configuration constants (symbols, exchanges, fees, thresholds)
   fee_manager.py          # FeeManager — token discounts, referral cashbacks, zero-fee pairs
+  transfer_fee_manager.py # TransferFeeManager — per-network withdrawal fees
   settings.py             # Runtime settings loader (settings.json)
   monitor.py              # ArbitrageMonitor — detects opportunities, executes simulated trades
   optimizer.py            # SymbolOptimizer — discovery, scoring, rotation, dominant pairs
@@ -107,6 +109,9 @@ coirnabot/
     bybit.py              # Bybit WebSocket fetcher
     bitget.py             # Bitget WebSocket fetcher
     kucoin.py             # KuCoin WebSocket fetcher (REST token + WS)
+    gateio.py             # Gate.io WebSocket fetcher
+    pionex.py             # Pionex WebSocket fetcher (aggregated from Binance)
+    bitfinex.py           # Bitfinex WebSocket fetcher (0% fees, dual-connection)
   dashboard/
     src/
       App.tsx             # Main layout, tab routing
@@ -122,7 +127,7 @@ coirnabot/
 |------|-------------|
 | **Dashboard** | Live portfolio P&L (sim + demo), demo exchange status, symbol rankings, balance table, price grid, demo comparison, recent trades/transfers |
 | **Rankings** | Rolling/historical rankings, top-10 charts, lifecycle funnel, exchange analysis, XLSX export |
-| **Settings** | General (trade amount, capital, optimizer parameters, adaptive mode, IP whitelist) + Fee Management (per-exchange fee config) |
+| **Settings** | General (trade amount, capital, optimizer parameters, adaptive mode, IP whitelist) + Fee Management (per-exchange fee config) + Transfer Fees (per-network withdrawal fees) |
 | **Logs** | Unified log viewer: Bot Logs (real-time, filterable) and Auth Logs (login events, IP blocks) with export |
 
 ## Configuration

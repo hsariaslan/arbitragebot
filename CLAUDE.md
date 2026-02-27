@@ -22,21 +22,25 @@ Build an AI-powered cross-exchange crypto arbitrage bot that monitors real-time 
 
 **Why NOT "buy-transfer-sell":** Transferring crypto between exchanges takes minutes to hours. By the time funds arrive, the price gap has closed. Pre-funded parallel execution eliminates this problem entirely.
 
-## Supported Exchanges (7 Active)
+## Supported Exchanges (9 Active)
 
-All 7 exchanges have working WebSocket fetchers implemented.
+All 9 exchanges have working WebSocket fetchers implemented.
 
 | Rank | Exchange | Taker Fee (w/ Discount) | Discount Token | WebSocket | Symbols |
 |------|----------|------------------------|----------------|-----------|---------|
-| 1 | **Binance** | 0.075% | BNB (25% off) | URL-param streams | 58/60 (no HYPEUSDT) |
-| 2 | **OKX** | 0.10% | OKB (requires 500 OKB ~$25k) | Post-connect JSON | 60/60 |
-| 3 | **Bybit** | 0.075% | MNT/BIT (25% off) | Post-connect JSON | 58/60 (no ZECUSDT) |
-| 4 | **MEXC** | 0.05% | None needed (already lowest) | Post-connect JSON | 60/60 |
-| 5 | **Bitget** | 0.08% | BGB (20% off) | Post-connect JSON | 60/60 |
-| 6 | **KuCoin** | 0.08% | KCS (20% off) | REST token + WS | 60/60 |
-| 7 | **Gate.io** | 0.10% | GT (~10% off, minimal) | Post-connect JSON | 60/60 |
+| 1 | **Bitfinex** | 0.00% | None needed (permanent 0%) | Post-connect JSON (arrays) | ~40-50/60 |
+| 2 | **Binance** | 0.075% | BNB (25% off) | URL-param streams | 58/60 (no HYPEUSDT) |
+| 3 | **OKX** | 0.10% | OKB (requires 500 OKB ~$25k) | Post-connect JSON | 60/60 |
+| 4 | **Bybit** | 0.075% | MNT/BIT (25% off) | Post-connect JSON | 58/60 (no ZECUSDT) |
+| 5 | **MEXC** | 0.05% | None needed (already lowest) | Post-connect JSON | 60/60 |
+| 6 | **Bitget** | 0.08% | BGB (20% off) | Post-connect JSON | 60/60 |
+| 7 | **KuCoin** | 0.08% | KCS (20% off) | REST token + WS | 60/60 |
+| 8 | **Gate.io** | 0.10% | GT (~10% off, minimal) | Post-connect JSON | 60/60 |
+| 9 | **Pionex** | 0.05% | None (flat rate, no VIP tiers) | Post-connect JSON | 60/60 |
 
 **MEXC note:** Currently geo-blocked from user's location. Will use with future VPS deployment.
+**Pionex note:** Aggregates ~50-60% of order book from Binance (per CTO statement) — Pionex↔Binance arbitrage will be near-zero. Value is in Pionex vs OKX/KuCoin/Gate.io/Bybit/Bitget pairs.
+**Bitfinex note:** 0% taker/maker fees permanent since Dec 17, 2025. Free USDT withdrawals on 14 networks. Uses `tBTCUST` symbol format (UST not USDT). 30 sub limit per WS connection — uses 2 connections for 60 symbols. No BEP20 support. ~40-50 of 60 symbols available as UST pairs.
 
 ### Dropped Exchanges
 
@@ -45,13 +49,15 @@ All 7 exchanges have working WebSocket fetchers implemented.
 | **HTX (Huobi)** | 0.20%/0.20% base fees — too expensive for arbitrage. 25% HT discount still yields 0.15%. Also uses gzip-compressed binary WS messages. |
 | **Kraken** | 0.25%/0.40% base fees — way too expensive. Only ~11/20 original USDT pairs available. |
 | **Crypto.com** | No Plasma support, missing symbols, poor fit for strategy. |
+| **Deepcoin** | Scam/near-scam. ScamAdviser 0/10, claimed 0% fees are actually 0.10%/0.10%, advance-fee withdrawal scam patterns. |
+| **WEEX** | 0.10%/0.10% spot fees (no advantage), Trustpilot 2.4/5, Georgia cease-and-desist order, account freezing complaints, opaque withdrawal fees. |
 
 ## Fee Considerations
 
 For arbitrage, fees are critical. A typical opportunity is 0.1-0.3%. Fee math:
 - Buy fee + Sell fee = total cost
 - If total cost >= price gap, no profit
-- **MEXC (0.05% taker)** and **Binance/Bybit (0.075% with token discount)** are the most cost-effective pairs
+- **MEXC/Pionex (0.05% taker)** and **Binance/Bybit (0.075% with token discount)** are the most cost-effective pairs
 
 ### How to Claim Fee Discounts
 
@@ -95,7 +101,7 @@ ARB, OP, FIL, ATOM, INJ
 
 ### Tier 4 - High Volume Additions (40 symbols)
 
-Sorted by ~24h volume. 38/40 available on all 7 exchanges.
+Sorted by ~24h volume. 38/40 available on all 8 exchanges.
 
 AAVE, BCH, PEPE, ZEC (6/7, not Bybit), LTC, HYPE (6/7, not Binance), XLM, UNI, ENA, SNX, TON, SHIB, ICP, ETC, TRUMP, HBAR, CHZ, AXS, PENGU, WLD, WIF, RENDER, ONDO, STRK, CRV, AR, FET, LDO, ALGO, EIGEN, PENDLE, APE, TIA, FLOKI, W, GRT, ORDI, JUP, COMP, DYDX
 
@@ -122,16 +128,16 @@ AAVE, BCH, PEPE, ZEC (6/7, not Bybit), LTC, HYPE (6/7, not Binance), XLM, UNI, E
 
 ### USDT Withdrawal Fees Per Exchange
 
-| Network | Binance | OKX | Bybit | MEXC | Bitget | KuCoin | Gate.io |
-|---------|---------|-----|-------|------|--------|--------|---------|
-| **BEP20** | $0.01 | <$0.50 | ~$0.20 | $0 (promo) | ~$0.30-0.50 | ~$0.50-1.00 | $0 (promo) |
-| **Plasma** | $0.01 | Likely yes | ~$0 | Unconfirmed | Partial | Unconfirmed | Unconfirmed |
-| **Arbitrum** | $0.10 | <$0.50 | ~$1.00 | **$0 (FREE)** | ~$0 (promo) | ~$0.50-1.00 | ~$0.50 |
-| **Optimism** | $0.04 | <$0.50 | ~$1.00 | Low | Low (promo) | Unconfirmed | Low |
-| **Polygon** | $0.07 | Low | ~$1.00 | Low | Low | Low | Low |
-| **Solana** | $0.30 | Low | ~$1.00 | Near-zero | $0 (promo) | ~$0.50-1.00 | Low |
-| **TRC20** | $1.00 | ~$0.10-2.30 | ~$0.10-1.60 | $1.00 | ~$1.00 | $1.50 | **$0 (FREE)** |
-| **ERC20** | $0.80 | >$3.00 | ~$3.00 | Higher | ~$0.50 | $5.50 | Higher |
+| Network | Binance | OKX | Bybit | MEXC | Bitget | KuCoin | Gate.io | Pionex | Bitfinex |
+|---------|---------|-----|-------|------|--------|--------|---------|--------|----------|
+| **BEP20** | $0.01 | <$0.50 | ~$0.20 | $0 (promo) | ~$0.30-0.50 | ~$0.50-1.00 | $0 (promo) | $0.80 | — |
+| **Plasma** | $0.01 | Likely yes | ~$0 | Unconfirmed | Partial | Unconfirmed | Unconfirmed | — | — |
+| **Arbitrum** | $0.10 | <$0.50 | ~$1.00 | **$0 (FREE)** | ~$0 (promo) | ~$0.50-1.00 | ~$0.50 | $0.20 | **$0 (FREE)** |
+| **Optimism** | $0.04 | <$0.50 | ~$1.00 | Low | Low (promo) | Unconfirmed | Low | $0.20 | **$0 (FREE)** |
+| **Polygon** | $0.07 | Low | ~$1.00 | Low | Low | Low | Low | — | **$0 (FREE)** |
+| **Solana** | $0.30 | Low | ~$1.00 | Near-zero | $0 (promo) | ~$0.50-1.00 | Low | $1.00 | **$0 (FREE)** |
+| **TRC20** | $1.00 | ~$0.10-2.30 | ~$0.10-1.60 | $1.00 | ~$1.00 | $1.50 | **$0 (FREE)** | $1.00 | **$0 (FREE)** |
+| **ERC20** | $0.80 | >$3.00 | ~$3.00 | Higher | ~$0.50 | $5.50 | Higher | $10.00 | ~$0.50 |
 
 ### Cheapest Rebalancing Routes
 
@@ -142,6 +148,8 @@ AAVE, BCH, PEPE, ZEC (6/7, not Bybit), LTC, HYPE (6/7, not Binance), XLM, UNI, E
 | Gate.io → anywhere | TRC20 | $0 (free) | ~3-5s |
 | Gate.io → anywhere | BEP20 | $0 (promo) | ~3s |
 | Bybit → anywhere | Plasma | ~$0 | Sub-second |
+| Pionex → anywhere | Arbitrum | $0.20 | ~0.3s |
+| Bitfinex → anywhere | TRC20/Arbitrum/Optimism | $0 (free) | ~0.3-5s |
 | Anyone → Binance | BEP20 | Varies by sender | ~3s |
 
 ### Plasma Network Details
@@ -160,15 +168,15 @@ Transfer each coin on its own native chain (e.g., SOL on Solana, XRP on XRP Ledg
 
 ## WebSocket Implementation Details
 
-| Aspect | Binance | OKX | Bybit | MEXC | Bitget | KuCoin | Gate.io |
-|--------|---------|-----|-------|------|--------|--------|---------|
-| Subscribe | URL params | Post-connect | Post-connect | Post-connect | Post-connect | Post-connect | Post-connect |
-| Symbol format | `btcusdt` | `BTC-USDT` | `BTCUSDT` | `BTCUSDT` | `BTCUSDT` | `BTC-USDT` | `BTC_USDT` |
-| Ping type | WS-level (lib) | String `"ping"` | JSON `{"op":"ping"}` | JSON `{"method":"PING"}` | String `"ping"` | JSON `{"type":"ping"}` | JSON `{"channel":"spot.ping"}` |
-| Ping interval | 20s (auto) | 15s | 18s | 15s | 25s | 18s | 15s |
-| Has last_price | Yes | Yes | Yes | No | Yes | Yes | No |
-| Has volume | Yes | Yes | Yes | No | Yes | No | No |
-| Special | — | — | Delta merging | 30 sub limit | — | REST token first | Per-symbol subscribe |
+| Aspect | Binance | OKX | Bybit | MEXC | Bitget | KuCoin | Gate.io | Pionex | Bitfinex |
+|--------|---------|-----|-------|------|--------|--------|---------|--------|----------|
+| Subscribe | URL params | Post-connect | Post-connect | Post-connect | Post-connect | Post-connect | Post-connect | Post-connect | Post-connect |
+| Symbol format | `btcusdt` | `BTC-USDT` | `BTCUSDT` | `BTCUSDT` | `BTCUSDT` | `BTC-USDT` | `BTC_USDT` | `BTC_USDT` | `tBTCUST` |
+| Ping type | WS-level (lib) | String `"ping"` | JSON `{"op":"ping"}` | JSON `{"method":"PING"}` | String `"ping"` | JSON `{"type":"ping"}` | JSON `{"channel":"spot.ping"}` | JSON `{"op":"PING"}` | JSON `{"event":"ping"}` |
+| Ping interval | 20s (auto) | 15s | 18s | 15s | 25s | 18s | 15s | 15s | 15s |
+| Has last_price | Yes | Yes | Yes | No | Yes | Yes | No | Yes (TRADE topic) | Yes |
+| Has volume | Yes | Yes | Yes | No | Yes | No | No | No | Yes |
+| Special | — | — | Delta merging | 30 sub limit | — | REST token first | Per-symbol subscribe | DEPTH+TRADE topics | Array data, 30 sub limit, 2 connections |
 
 ## Key Technical Requirements
 
@@ -195,7 +203,7 @@ Transfer each coin on its own native chain (e.g., SOL on Solana, XRP on XRP Ledg
 
 ### Capital Management
 
-- 60 symbols x 7 exchanges = many balance positions to manage
+- 60 symbols x 9 exchanges = many balance positions to manage
 - Automated rebalancing triggers when imbalances exceed threshold
 - Track withdrawal limits and cooldowns per exchange
 
@@ -292,6 +300,8 @@ Each exchange has different USDT withdrawal fees per network, managed by `Transf
 | OKX      | Polygon         | $0.10 |
 | KuCoin   | Plasma          | $0.40 |
 | Gate.io  | BEP20           | $0.50 |
+| Pionex   | Arbitrum        | $0.20 |
+| Bitfinex | TRC20/Arb/Opt   | $0.00 |
 
 Before executing an external USDT transfer, the bot checks **transfer worthiness**: if `withdrawal_fee / estimated_profit_per_trade > 50`, the transfer is skipped (not worth the cost). This prevents expensive transfers unless highly profitable. Configurable per-exchange via the Transfer Fees tab in Settings.
 
@@ -624,6 +634,8 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 | Bitget | 0.10% | BGB 20% (enabled) | 0.08% | instant | token |
 | KuCoin | 0.10% | KCS 20% (enabled) | 0.08% | rebate | token |
 | Gate.io | 0.10% | GT (disabled) | 0.10% | instant | received |
+| Pionex | 0.05% | None (flat) | 0.05% | instant | received |
+| Bitfinex | 0.00% | None (permanent 0%) | 0.00% | instant | received |
 
 ### Features
 
@@ -665,6 +677,13 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 | Bitget | Singapore | AWS ap-southeast-1 | ~68ms |
 | KuCoin | Singapore | AWS | ~68ms |
 | MEXC | Singapore | AWS | ~68ms |
+| Pionex | Unknown (likely Asia) | Unknown | ~30-70ms (est.) |
+
+### Pionex Geo-Restrictions
+
+Pionex is **blocked** in: US, Singapore, China, Canada, UK, Netherlands, Spain, Cuba, Iran, North Korea, and others.
+Pionex **Japan status** is uncertain — not on the general restricted list, but may be KYC-restricted.
+Pionex is **likely accessible** in: Turkey, Thailand (not on restricted list, but not a guarantee).
 
 ### MEXC Geo-Restrictions
 
