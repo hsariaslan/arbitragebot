@@ -59,6 +59,8 @@ class PionexFetcher(BaseFetcher):
         super().__init__(symbols)
         # Track last trade prices per symbol (TRADE topic updates these)
         self._last_prices: dict[str, str] = {}
+        # Symbols confirmed unavailable on Pionex (skip on reconnect)
+        self._invalid_symbols: set[str] = set()
 
     @property
     def exchange_name(self) -> str:
@@ -109,13 +111,9 @@ class PionexFetcher(BaseFetcher):
         if op == "PING":
             return None
 
-        # Ignore subscription confirmations and errors
+        # Ignore subscription confirmations and errors (handled in sub-connection _listen)
         msg_type = raw_message.get("type", "")
         if msg_type in ("SUBSCRIBED", "UNSUBSCRIBED", "ERROR"):
-            if msg_type == "ERROR":
-                logger.warning(
-                    f"[{self.exchange_name}] Server error: {raw_message}"
-                )
             return None
 
         topic = raw_message.get("topic", "")
@@ -220,37 +218,71 @@ class _PionexSubConnection:
         self._parent = parent
         self._symbols = symbols
         self._index = index
+        # Track subscription state per connection attempt
+        self._confirmed_symbols: set[str] = set()
+        self._subscription_order: list[str] = []
+        self._got_invalid_error: bool = False
 
     async def run(self) -> None:
-        # Stagger connections: 2s delay per connection to avoid IP rate limit
+        # Stagger connections: 5s delay per connection to avoid IP rate limit
         if self._index > 0:
-            await asyncio.sleep(self._index * 2.0)
+            await asyncio.sleep(self._index * 5.0)
 
         delay = RECONNECT_INITIAL_DELAY
         while self._parent._running:
+            # Filter out known invalid symbols
+            valid = [s for s in self._symbols if s not in self._parent._invalid_symbols]
+            if not valid:
+                logger.info(
+                    f"[{self._parent.exchange_name}] Sub-connection {self._index}: "
+                    f"no valid symbols remaining, stopping"
+                )
+                return
+
             try:
-                await self._connect_and_listen()
+                await self._connect_and_listen(valid)
                 delay = RECONNECT_INITIAL_DELAY
             except Exception as e:
                 if not self._parent._running:
                     break
-                logger.error(f"[{self._parent.exchange_name}] Sub-connection error: {e}")
-                await asyncio.sleep(delay)
-                delay = min(delay * RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY)
+                # After disconnect, identify invalid symbols from unconfirmed subscriptions
+                if self._got_invalid_error:
+                    self._identify_invalid_symbols()
+                    delay = RECONNECT_INITIAL_DELAY  # retry quickly with fixed symbol list
+                else:
+                    logger.error(f"[{self._parent.exchange_name}] Sub-connection error: {e}")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY)
 
-    async def _connect_and_listen(self) -> None:
+    def _identify_invalid_symbols(self) -> None:
+        """After a disconnect with INVALID_SYMBOL, find the first unconfirmed symbol."""
+        for s in self._subscription_order:
+            if s not in self._confirmed_symbols and s not in self._parent._invalid_symbols:
+                self._parent._invalid_symbols.add(s)
+                logger.warning(
+                    f"[{self._parent.exchange_name}] {s} not available on Pionex, "
+                    f"will skip on reconnect"
+                )
+                break  # only mark the first unconfirmed (server disconnects at first error)
+
+    async def _connect_and_listen(self, symbols: list[str]) -> None:
         url = self._parent._build_ws_url()
         kwargs = self._parent._ws_connect_kwargs()
+
+        # Reset subscription tracking
+        self._confirmed_symbols = set()
+        self._subscription_order = list(symbols)
+        self._got_invalid_error = False
 
         async with websockets.connect(url, **kwargs) as ws:
             self._parent._ws_connected = True
             logger.info(
-                f"[{self._parent.exchange_name}] Sub-connection for "
-                f"{len(self._symbols)} symbols connected"
+                f"[{self._parent.exchange_name}] Sub-connection {self._index} for "
+                f"{len(symbols)} symbols connected"
             )
 
             # Subscribe with throttling to avoid rate limiting
-            for s in self._symbols:
+            for s in symbols:
                 pionex_sym = PionexFetcher._to_pionex_symbol(s)
                 await ws.send(json.dumps({
                     "op": "SUBSCRIBE",
@@ -263,11 +295,13 @@ class _PionexSubConnection:
                     "topic": "TRADE",
                     "symbol": pionex_sym,
                 }))
-                await asyncio.sleep(0.15)  # Throttle: 150ms between symbols (rate limit: 10 req/s)
+                await asyncio.sleep(0.25)  # Throttle: 250ms between symbols (safe for 10 req/s)
 
+            skipped = len(self._symbols) - len(symbols)
+            skip_msg = f" ({skipped} skipped)" if skipped else ""
             logger.info(
                 f"[{self._parent.exchange_name}] Subscribed to "
-                f"{len(self._symbols)} symbols (DEPTH+TRADE)"
+                f"{len(symbols)} symbols (DEPTH+TRADE){skip_msg}"
             )
 
             listener = asyncio.create_task(self._listen(ws))
@@ -298,6 +332,27 @@ class _PionexSubConnection:
                         "op": "PONG",
                         "timestamp": int(time.time() * 1000),
                     }))
+                    continue
+
+                # Handle subscription confirmations and errors
+                msg_type = message.get("type", "")
+                if msg_type == "SUBSCRIBED":
+                    sym = message.get("symbol", "")
+                    if sym:
+                        self._confirmed_symbols.add(
+                            PionexFetcher._from_pionex_symbol(sym)
+                        )
+                    continue
+                if msg_type == "ERROR":
+                    code = message.get("code", "")
+                    if code == "INVALID_SYMBOL":
+                        self._got_invalid_error = True
+                    else:
+                        logger.warning(
+                            f"[{self._parent.exchange_name}] Server error: {message}"
+                        )
+                    continue
+                if msg_type == "UNSUBSCRIBED":
                     continue
 
                 t0 = time.time()
