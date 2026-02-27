@@ -396,6 +396,7 @@ Full authentication system for the WebSocket dashboard:
 - **Format**: UTC timestamps via `time.gmtime` converter: `YYYY-MM-DD HH:MM:SS [LEVEL] [Component] message`
 - **Daily rotation**: `TimedRotatingFileHandler` rotates at 00:00 UTC, keeps 30 days. Files: `logs/coirnabot.log` (current), `logs/coirnabot.log.YYYY-MM-DD` (rotated).
 - **DashboardLogHandler**: Custom `logging.Handler` in `dashboard_server.py`. Captures entries in-memory (`deque` for live broadcast, `list` for session export). Parses `[Component]` prefix from log messages.
+- **Latency logging**: `[Latency]` component prefix. Every 60s logs per-exchange: processing time (avg/min/max ms), data freshness (avg/max age ms), symbols with data count. Also logs first-data-after-connect timing. Filterable in Bot Logs tab.
 - **Disk export**: `_read_bot_logs_from_disk()` reads rotated + current log files for cross-day export ranges. `_read_auth_logs_from_disk()` reads JSONL files. Both use `asyncio.to_thread()` for non-blocking I/O.
 
 ### State Persistence
@@ -676,14 +677,21 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 | Bybit | Singapore | AWS ap-southeast-1 | ~68ms |
 | Bitget | Singapore | AWS ap-southeast-1 | ~68ms |
 | KuCoin | Singapore | AWS | ~68ms |
-| MEXC | Singapore | AWS | ~68ms |
-| Pionex | Unknown (likely Asia) | Unknown | ~30-70ms (est.) |
+| Gate.io | Singapore | AWS ap-southeast-1 | ~68ms |
+| MEXC | Singapore | AWS ap-southeast-1 | ~68ms |
+| Pionex | Virginia, USA (likely) | AWS us-east-1 (via Cloudflare) | ~160ms |
+| Bitfinex | Zug, Switzerland | Bare-metal (Market Synergy) | ~250ms |
 
 ### Pionex Geo-Restrictions
 
 Pionex is **blocked** in: US, Singapore, China, Canada, UK, Netherlands, Spain, Cuba, Iran, North Korea, and others.
-Pionex **Japan status** is uncertain — not on the general restricted list, but may be KYC-restricted.
-Pionex is **likely accessible** in: Turkey, Thailand (not on restricted list, but not a guarantee).
+Pionex is **KYC-blocked in Japan** (confirmed — Japan phone code 81 is on the official unsupported list).
+Pionex is **accessible** in: Turkey, Thailand, Germany (monitor EU MiCA for Pionex).
+
+### Bitfinex Geo-Restrictions
+
+Bitfinex is **blocked** in: US, Canada, Cuba, Iran, North Korea, Syria, Crimea, and other sanctioned regions.
+Bitfinex is **not blocked** in: Japan (FSA warnings but no IP block), Thailand, Germany, Turkey, Singapore.
 
 ### MEXC Geo-Restrictions
 
@@ -699,15 +707,17 @@ Tokyo VPS: MEXC API access works but monitor for enforcement. Use `mexc.fm` doma
 - **Why**: Best value — 4× RAM needed, unlimited bandwidth for 6 WebSocket streams (~0.9 TB/mo)
 - **Location**: Tokyo — <1ms to Binance, ~68ms to SG exchanges
 
-### Optimized Plan: 3 VPS (~$22.50/mo)
+### Optimized Plan: 3 VPS (~$22.50/mo) — Recommended
 
-| VPS | Location | Exchanges | Latency | Cost |
-|-----|----------|-----------|---------|:----:|
-| VPS 1 | Tokyo | Binance | <1ms | ~$7.50 |
-| VPS 2 | Singapore | Bybit, Bitget, KuCoin, OKX | <1ms | ~$7.50 |
-| VPS 3 | Bangkok | MEXC + **Orchestrator** | 25ms to SG, 91ms to Tokyo | ~$7.50 |
+| VPS | Location | Exchanges | Worst Latency | Cost |
+|-----|----------|-----------|:-------------:|:----:|
+| VPS 1 | Tokyo | Binance (<1ms), OKX (35ms) | 35ms | ~$7.50 |
+| VPS 2 | Bangkok | Bybit (25ms), Bitget (25ms), KuCoin (25ms), Gate.io (25ms), MEXC (25ms), Pionex (~200ms) + **Orchestrator** | ~200ms | ~$7.50 |
+| VPS 3 | Frankfurt | Bitfinex (~5ms) | ~5ms | ~$7.50 |
 
-Bangkok orchestrator has lowest aggregate latency to all VPS locations (116ms total vs 159ms for Tokyo).
+Bangkok is the optimal orchestrator location (all 9 exchanges accessible, lowest aggregate inter-VPS latency). Bitfinex at 0% fees deserves dedicated low-latency VPS (~5ms vs ~250ms from Tokyo).
+
+See `documentations/VPS.md` for full latency matrix, geo-restriction matrix, and 4 VPS configuration options (2-5 VPS).
 
 ### VPS Provider Comparison (Tokyo)
 
@@ -724,7 +734,16 @@ Bangkok orchestrator has lowest aggregate latency to all VPS locations (116ms to
 - **RAM**: 2 GB sufficient (6 WS connections ~200MB + dashboard build ~500MB peak)
 - **CPU**: 1 vCPU fine — WebSocket parsing is not CPU-bound
 - **Storage**: 40+ GB needed for logs, CSV, node_modules, dashboard build
-- **Bandwidth**: ~0.9 TB/mo estimated (6 exchanges × 60 symbols × ~1KB/update × 1/sec)
+- **Bandwidth**: ~0.9 TB/mo estimated (9 exchanges × 60 symbols × ~1KB/update × 1/sec)
+
+## Documentation
+
+Detailed reference documents in `documentations/`:
+
+| File | Contents |
+|------|----------|
+| `documentations/EXCHANGES.md` | All 9 exchanges: fees, discounts, server locations, latencies, WebSocket details, withdrawal fees per network, geo-restrictions, dropped exchanges |
+| `documentations/VPS.md` | VPS deployment strategy: latency matrix (9 exchanges × 5 locations), geo-restriction matrix, 4 VPS options (A-D), inter-VPS communication, orchestrator architecture, phased deployment plan |
 
 ## Technology Stack
 
