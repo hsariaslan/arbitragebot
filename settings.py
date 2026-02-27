@@ -74,6 +74,11 @@ def load_settings() -> dict:
             for key, default in DEFAULT_SETTINGS.items():
                 if key not in settings:
                     settings[key] = default
+                elif isinstance(default, dict) and isinstance(settings[key], dict):
+                    # Deep merge dict configs — add new exchanges/keys from defaults
+                    for sub_key, sub_val in default.items():
+                        if sub_key not in settings[key]:
+                            settings[key][sub_key] = sub_val
             return settings
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"[Settings] Failed to load {SETTINGS_FILE}: {e}, using defaults")
