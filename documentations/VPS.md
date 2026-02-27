@@ -251,6 +251,79 @@ Pionex at ~160ms from Tokyo or ~200ms from Bangkok is acceptable because:
 3. These cross-exchange spreads are typically wider and persist longer
 4. A dedicated Virginia VPS ($7.50/mo) for one 0.05% exchange is not justified
 
+## Measured Latency Data (Kamatera Tokyo VPS)
+
+Real-world measurements from the Phase 1 test VPS (Kamatera Tokyo, 2 vCPU, 2 GB RAM). Data captured 2026-02-27.
+
+### First Data After Connect
+
+Time from WebSocket connection to first usable price update:
+
+| Exchange | First Data (ms) | Notes |
+|----------|:--------------:|-------|
+| KuCoin | **22** | REST token + WS connect, fastest overall |
+| Gate.io | **31** | Instant — subscribe-on-connect |
+| Binance | **37** | URL-param streams, near-instant |
+| OKX | **64** | Post-connect subscribe |
+| Bitget | **85** | Post-connect subscribe |
+| Bybit | **88** | Post-connect subscribe (orderbook + tickers) |
+| Bitfinex | **1,312** | 2 connections × 30 symbols, Zug origin (~250ms RTT) |
+| Pionex | **5,891** | 3 connections staggered 5s apart, 250ms throttle per symbol |
+
+Pionex's 5.9s is dominated by the stagger delay (5s between sub-connections) and per-symbol subscription throttle (250ms × 20 symbols = 5s). Actual network RTT is ~160ms.
+
+### Processing Latency (Per Message)
+
+Time to parse a WebSocket message and update internal state. Sub-millisecond across all exchanges — CPU is never the bottleneck.
+
+| Exchange | Avg (ms) | Min (ms) | Max (ms) | Messages/min |
+|----------|:--------:|:--------:|:--------:|:------------:|
+| Bitget | 0.01 | 0.01 | 0.16 | ~12,900 |
+| KuCoin | 0.01 | 0.00 | 0.08 | ~17,200 |
+| Gate.io | 0.01 | 0.01 | 0.12 | ~2,600 |
+| OKX | 0.01 | 0.01 | 0.20 | ~9,700 |
+| Bybit | 0.01 | 0.00 | 0.23 | ~23,200 |
+| Pionex | 0.01 | 0.00 | 1.92 | ~4,400 |
+| Binance | 0.02 | 0.01 | 0.15 | ~3,600 |
+| Bitfinex | 0.02 | 0.00 | 0.03 | ~120 |
+
+**Bybit** has the highest message volume (~23k/min) due to separate orderbook + ticker streams. **Bitfinex** has the lowest (~120/min) due to fewer UST pairs and lower update frequency.
+
+### Data Freshness (Price Staleness)
+
+The most important metric for arbitrage: how old is the price data when a tick fires? This reflects **exchange-side update frequency**, not network latency.
+
+| Exchange | Avg Age (ms) | Max Age (ms) | Symbols | Verdict |
+|----------|:----------:|:----------:|:-------:|---------|
+| Bitget | **66** | 311 | 60/60 | Excellent — sub-100ms average |
+| Bybit | **401** | 1,293 | 59/60 | Good — under 500ms |
+| KuCoin | **677** | 4,979 | 60/60 | Good — some symbols update slowly |
+| Pionex | **827** | 5,336 | 58/60 | Acceptable — DEPTH topic updates are batched |
+| OKX | **1,037** | 7,132 | 60/60 | Fair — some symbols >1s stale |
+| Binance | **1,334** | 11,562 | 59/60 | Fair — surprisingly high for co-located |
+| Gate.io | **5,854** | 28,933 | 60/60 | Poor — exchange pushes updates infrequently |
+| Bitfinex | **20,298** | 118,683 | 36/60 | Poor — only 36/60 UST pairs, very low frequency |
+
+**Key observations:**
+- **Bitget** is the freshest exchange at 66ms avg — its WebSocket pushes rapid ticker updates.
+- **Binance** freshness (1.3s avg) is higher than expected for a Tokyo-hosted exchange. This is because Binance uses combined streams (URL-param) that batch updates, not per-symbol push.
+- **Gate.io** at 5.9s avg is an exchange-side issue — the `spot.tickers` channel has low update frequency for many alt pairs.
+- **Bitfinex** at 20.3s avg with only 36/60 symbols reflects both the limited UST pair coverage (~40-50 of 60 symbols) and very low trade frequency on available pairs. Not a network issue — Bitfinex simply doesn't generate frequent updates for most alts.
+- **Pionex** freshness (827ms) is better than expected given the ~160ms RTT, because the DEPTH topic pushes snapshots frequently for actively traded pairs.
+
+### Latency Summary by Exchange Tier
+
+| Tier | Exchanges | Freshness | Trading Impact |
+|------|-----------|-----------|---------------|
+| **Tier 1** (Real-time) | Bitget, Bybit | <500ms avg | Captures all opportunities including fast-closing ones |
+| **Tier 2** (Near-real-time) | KuCoin, Pionex, OKX | 500ms-1.1s avg | Captures most opportunities; may miss sub-second spreads |
+| **Tier 3** (Delayed) | Binance | ~1.3s avg | Fair for majors, some opportunities stale by arrival |
+| **Tier 4** (Slow) | Gate.io, Bitfinex | 5.9s-20.3s avg | Only captures persistent wide spreads |
+
+**Tier 4 mitigation:**
+- Gate.io: Still profitable due to zero-fee BTC/USDT pair and wider spreads on alts. Consider Gate.io `spot.order_book` channel for per-symbol depth updates (higher frequency but more bandwidth).
+- Bitfinex: 0% fee advantage compensates for staleness — any Bitfinex pair only needs 1 side's fee (the other exchange). Persistent spreads of 0.05%+ are common enough to be profitable despite 20s average staleness.
+
 ## Network Topology Notes
 
 ### Cloudflare-Proxied Exchanges
