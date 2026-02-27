@@ -148,7 +148,7 @@ EXCHANGE_FEE_MODELS: dict[str, str] = {
     "Bybit": "received",    # Default: fee from received asset
     "Bitget": "token",      # BGB fee payment enabled → fee from BGB balance
     "KuCoin": "token",      # KCS fee payment enabled → fee from KCS balance
-    "Gate.io": "received",  # GT discount is minimal, use default model
+    "Gate.io": "token",      # GT debit enabled → fee from GT balance
 }
 
 # Comprehensive fee configs for FeeManager (replaces flat dicts above)
@@ -159,9 +159,9 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "token_discount_pct": 0.25,
         "fee_mechanism": "instant",
         "fee_model": "token",
-        "referral_enabled": False,
-        "referral_cashback_pct": 0.0,
-        "referral_settlement_minutes": 30,
+        "referral_enabled": True,
+        "referral_cashback_pct": 0.20,  # 20% cashback, hourly settlement
+        "referral_settlement_minutes": 60,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
     },
@@ -171,8 +171,8 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "token_discount_pct": 0.0,
         "fee_mechanism": "tier",
         "fee_model": "received",
-        "referral_enabled": False,
-        "referral_cashback_pct": 0.0,
+        "referral_enabled": True,
+        "referral_cashback_pct": 0.20,  # 20% cashback, ~90min settlement
         "referral_settlement_minutes": 90,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
@@ -183,9 +183,9 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "token_discount_pct": 0.0,
         "fee_mechanism": "tier",
         "fee_model": "received",
-        "referral_enabled": False,
-        "referral_cashback_pct": 0.0,
-        "referral_settlement_minutes": 720,
+        "referral_enabled": True,
+        "referral_cashback_pct": 0.20,  # 20% cashback, daily settlement
+        "referral_settlement_minutes": 1440,
         "referral_paid_in": "USDT",
         "zero_fee_pairs": [],
     },
@@ -195,9 +195,9 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "token_discount_pct": 0.20,
         "fee_mechanism": "instant",
         "fee_model": "received",
-        "referral_enabled": False,
-        "referral_cashback_pct": 0.0,
-        "referral_settlement_minutes": 720,
+        "referral_enabled": True,
+        "referral_cashback_pct": 0.20,  # 20% cashback, daily settlement
+        "referral_settlement_minutes": 1440,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
     },
@@ -207,10 +207,10 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "token_discount_pct": 0.20,
         "fee_mechanism": "instant",
         "fee_model": "token",
-        "referral_enabled": False,
-        "referral_cashback_pct": 0.0,
-        "referral_settlement_minutes": 1080,
-        "referral_paid_in": "USDT",
+        "referral_enabled": True,
+        "referral_cashback_pct": 0.20,  # 20% instant fee discount
+        "referral_settlement_minutes": 0,
+        "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
     },
     "KuCoin": {
@@ -219,33 +219,33 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "token_discount_pct": 0.20,
         "fee_mechanism": "rebate",
         "fee_model": "token",
-        "referral_enabled": False,
-        "referral_cashback_pct": 0.0,
-        "referral_settlement_minutes": 1080,
+        "referral_enabled": True,
+        "referral_cashback_pct": 0.20,  # 20% cashback, daily settlement
+        "referral_settlement_minutes": 1440,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
     },
     "Gate.io": {
         "base_taker_rate": 0.001,
-        "token_discount_enabled": False,
+        "token_discount_enabled": True,  # GT token 10% discount at VIP 0
         "token_discount_pct": 0.10,
         "fee_mechanism": "instant",
-        "fee_model": "received",
-        "referral_enabled": False,
-        "referral_cashback_pct": 0.0,
-        "referral_settlement_minutes": 0,
+        "fee_model": "token",  # GT debit: fee paid from GT balance
+        "referral_enabled": True,
+        "referral_cashback_pct": 0.20,  # 20% cashback, daily settlement
+        "referral_settlement_minutes": 1440,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": ["BTCUSDT"],
     },
     "Pionex": {
-        "base_taker_rate": 0.0005,  # 0.05% flat (never decreases at any VIP tier)
-        "token_discount_enabled": False,
+        "base_taker_rate": 0.0005,  # 0.05% base (VIP tiers exist but volume-gated)
+        "token_discount_enabled": False,  # No native discount token
         "token_discount_pct": 0.0,
         "fee_mechanism": "instant",
         "fee_model": "received",
-        "referral_enabled": False,
-        "referral_cashback_pct": 0.0,
-        "referral_settlement_minutes": 0,
+        "referral_enabled": True,
+        "referral_cashback_pct": 0.20,  # 20% cashback, hourly settlement
+        "referral_settlement_minutes": 60,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
     },
@@ -255,7 +255,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "token_discount_pct": 0.0,
         "fee_mechanism": "instant",
         "fee_model": "received",
-        "referral_enabled": False,
+        "referral_enabled": False,  # 0% fees, no cashback needed
         "referral_cashback_pct": 0.0,
         "referral_settlement_minutes": 0,
         "referral_paid_in": "same_as_fee",
