@@ -52,6 +52,20 @@ const DEFAULT_CONFIGS: Record<string, ExchangeFeeConfig> = {
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 0,
     referral_paid_in: 'same_as_fee', zero_fee_pairs: ['BTCUSDT'],
   },
+  Pionex: {
+    base_taker_rate: 0.0005, token_discount_enabled: false, token_discount_pct: 0,
+    effective_taker_rate: 0.0005, effective_rate_after_referral: 0.0005,
+    fee_mechanism: 'instant', fee_model: 'received',
+    referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 0,
+    referral_paid_in: 'same_as_fee', zero_fee_pairs: [],
+  },
+  Bitfinex: {
+    base_taker_rate: 0, token_discount_enabled: false, token_discount_pct: 0,
+    effective_taker_rate: 0, effective_rate_after_referral: 0,
+    fee_mechanism: 'instant', fee_model: 'received',
+    referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 0,
+    referral_paid_in: 'same_as_fee', zero_fee_pairs: [],
+  },
 };
 
 const EXCHANGE_ORDER = ['Binance', 'OKX', 'Bybit', 'MEXC', 'Bitget', 'KuCoin', 'Gate.io', 'Pionex', 'Bitfinex'];
