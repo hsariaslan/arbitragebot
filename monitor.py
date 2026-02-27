@@ -47,7 +47,7 @@ class ConfigSnapshot:
     adaptive_mode: bool
     min_net_profit_pct: float
     rebalance_cooldown: float
-    min_misses_before_rebalance: int
+    min_misses_before_rebalance: int = 5
     rebalance_roi_horizon: int
     total_capital: float
     num_active_symbols: int
