@@ -262,15 +262,16 @@ class ArbitrageMonitor:
             if trading_pnl + credited_cb < self._balance.total_transfer_fees:
                 return False
 
-        # ROI gate: estimated rebalance cost vs expected profit from enabled trades
-        rebal_amount = self._trade_amount * 3
-        buy_fee = self._fee_manager.get_taker_fee(buy_ex) if self._fee_manager else 0.001
-        sell_fee = self._fee_manager.get_taker_fee(sell_ex) if self._fee_manager else 0.001
-        est_cost = rebal_amount * (buy_fee + sell_fee)  # two internal transfers
-        trades_enabled = rebal_amount / max(self._trade_amount, 1)
-        est_profit = trades_enabled * self._balance._estimated_profit_per_trade
-        if est_profit < est_cost * 1.5:
-            return False
+        # ROI gate: profit margin vs amortized rebalance cost
+        # Internal rebalance costs a single taker fee on one exchange;
+        # external transfers have flat fees gated separately in try_rebalance().
+        # Compare as percentages to avoid trade-amount sensitivity.
+        if self._balance._estimated_profit_per_trade > 0 and self._trade_amount > 0:
+            profit_pct = self._balance._estimated_profit_per_trade / self._trade_amount
+            fee_rate = self._fee_manager.get_taker_fee(buy_ex) if self._fee_manager else 0.001
+            # Rebalance enables ~3 trades; cost amortized = fee_rate / 3
+            if profit_pct < fee_rate / 3:
+                return False
 
         return True
 
