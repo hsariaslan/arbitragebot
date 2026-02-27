@@ -260,6 +260,8 @@ export interface ProfitStats {
   session_hourly_rate: number;
   trading_pnl: number;
   transfer_fees: number;
+  credited_cashback: number;
+  pending_cashback: number;
   is_profitable: boolean;
 }
 

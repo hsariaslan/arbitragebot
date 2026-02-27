@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import type { ConfigSnapshot, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, OptimizerState, Portfolio, Simulation, Trade, Transfer } from '../types';
+import type { ConfigSnapshot, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, OptimizerState, Portfolio, ProfitStats, Simulation, Trade, Transfer } from '../types';
 
 const tier1 = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'ADAUSDT'];
 const tier2 = ['AVAXUSDT', 'LINKUSDT', 'POLUSDT', 'DOTUSDT', 'NEARUSDT', 'SUIUSDT', 'APTUSDT', 'TRXUSDT'];
@@ -16,6 +16,7 @@ export function exportXlsx(
   demoDiscrepancies: DemoDiscrepancy[] = [],
   feeConfigs?: Record<string, ExchangeFeeConfig>,
   transferConfigs?: Record<string, ExchangeTransferConfig>,
+  profitStats?: ProfitStats | null,
 ) {
   const wb = XLSX.utils.book_new();
   const now = new Date();
@@ -51,7 +52,9 @@ export function exportXlsx(
     ['Profitability'],
     ['Trading Profit $', portfolio?.trading_pnl ?? ''],
     ['Transfer Fees $', portfolio?.transfer_fees ?? ''],
-    ['Net Trading P&L $', portfolio ? (portfolio.trading_pnl - portfolio.transfer_fees) : ''],
+    ['Credited Cashback $', profitStats?.credited_cashback ?? ''],
+    ['Pending Cashback $', profitStats?.pending_cashback ?? ''],
+    ['Net Trading P&L $', portfolio && profitStats ? (portfolio.trading_pnl - portfolio.transfer_fees + (profitStats.credited_cashback ?? 0)) : (portfolio ? (portfolio.trading_pnl - portfolio.transfer_fees) : '')],
     ['Fee/Profit Ratio', portfolio && portfolio.trading_pnl > 0 ? (portfolio.transfer_fees / portfolio.trading_pnl * 100).toFixed(1) + '%' : ''],
   ];
   const wsSummary = XLSX.utils.aoa_to_sheet(summaryData);

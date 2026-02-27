@@ -216,7 +216,13 @@ class ArbitrageMonitor:
 
         trading_pnl = sum(t.profit_usd for t in self._trades)
         transfer_fees = self._balance.total_transfer_fees if self._balance else 0.0
-        net_profit = trading_pnl - transfer_fees
+        credited_cashback = (
+            self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
+        )
+        pending_cashback = (
+            self._fee_manager._total_pending_cashback if self._fee_manager else 0.0
+        )
+        net_profit = trading_pnl - transfer_fees + credited_cashback
 
         # Rolling 1-hour window
         one_hour_ago = now - 3600
@@ -235,6 +241,8 @@ class ArbitrageMonitor:
             "session_hourly_rate": round(session_hourly_rate, 4),
             "trading_pnl": round(trading_pnl, 4),
             "transfer_fees": round(transfer_fees, 4),
+            "credited_cashback": round(credited_cashback, 4),
+            "pending_cashback": round(pending_cashback, 4),
             "is_profitable": net_profit > 0,
         }
 
@@ -246,7 +254,10 @@ class ArbitrageMonitor:
         # Block when net P&L is negative (after warm-up period)
         if len(self._trades) >= 10:
             trading_pnl = sum(t.profit_usd for t in self._trades)
-            if trading_pnl < self._balance.total_transfer_fees:
+            credited_cb = (
+                self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
+            )
+            if trading_pnl + credited_cb < self._balance.total_transfer_fees:
                 return False
 
         # ROI gate: estimated rebalance cost vs expected profit from enabled trades

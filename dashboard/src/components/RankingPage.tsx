@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ConfigSnapshot, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, OptimizerState, WatchlistEntry, Portfolio, Simulation, Trade, Transfer } from '../types';
+import type { ConfigSnapshot, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, OptimizerState, ProfitStats, WatchlistEntry, Portfolio, Simulation, Trade, Transfer } from '../types';
 import { exportXlsx } from '../utils/exportXlsx';
 
 interface RankingPageProps {
@@ -13,6 +13,7 @@ interface RankingPageProps {
   demoDiscrepancies?: DemoDiscrepancy[];
   feeConfigs?: Record<string, ExchangeFeeConfig>;
   transferConfigs?: Record<string, ExchangeTransferConfig>;
+  profitStats?: ProfitStats | null;
 }
 
 function ProfitBar({ value, maxValue }: { value: number; maxValue: number }) {
@@ -822,7 +823,7 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
 // Main Component
 // ══════════════════════════════════════════════════════════════════════════════
 
-export default function RankingPage({ optimizer, tickCount, portfolio, simulation, allTrades, allTransfers, allConfigHistory, demoDiscrepancies, feeConfigs, transferConfigs }: RankingPageProps) {
+export default function RankingPage({ optimizer, tickCount, portfolio, simulation, allTrades, allTransfers, allConfigHistory, demoDiscrepancies, feeConfigs, transferConfigs, profitStats }: RankingPageProps) {
   const [view, setView] = useState<'rolling' | 'historical'>('rolling');
   const windowMinutes = Math.round(optimizer.scoring_window / 60);
 
@@ -848,7 +849,7 @@ export default function RankingPage({ optimizer, tickCount, portfolio, simulatio
         </div>
         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
           <button
-            onClick={() => exportXlsx(optimizer, portfolio ?? null, simulation ?? null, allTrades ?? [], allTransfers ?? [], allConfigHistory ?? [], demoDiscrepancies ?? [], feeConfigs, transferConfigs)}
+            onClick={() => exportXlsx(optimizer, portfolio ?? null, simulation ?? null, allTrades ?? [], allTransfers ?? [], allConfigHistory ?? [], demoDiscrepancies ?? [], feeConfigs, transferConfigs, profitStats)}
             className="px-4 py-1.5 rounded-lg text-sm font-medium bg-slate-700 text-slate-300 hover:bg-slate-600 transition-colors"
           >
             Export XLSX

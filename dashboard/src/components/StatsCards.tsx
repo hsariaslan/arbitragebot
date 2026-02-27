@@ -95,18 +95,18 @@ export default function StatsCards({ portfolio, simulation, profitStats, demoCom
       sub: <span className="text-amber-400">-${Math.abs(portfolio.transfer_fees).toFixed(2)} fees</span>,
       subLabel: 'Net',
       accent: 'border-cyan-500',
-      extra: hasDemo ? (
+      extra: (profitStats.credited_cashback > 0 || profitStats.pending_cashback > 0) ? (
         <div className="mt-2 pt-2 border-t border-slate-700/50">
           <div className="text-xs">
-            <span className="text-slate-500 mr-1">Demo P&L:</span>
-            <PnlValue value={demoPnl} />
+            <span className="text-slate-500 mr-1">Cashback:</span>
+            <span className="text-emerald-400">+${profitStats.credited_cashback.toFixed(4)}</span>
           </div>
-          <div className="text-xs mt-0.5">
-            <span className="text-slate-500 mr-1">Discrepancies:</span>
-            <span className={demoComparison!.total_discrepancies > 0 ? 'text-yellow-400' : 'text-slate-300'}>
-              {demoComparison!.total_discrepancies}
-            </span>
-          </div>
+          {profitStats.pending_cashback > 0 && (
+            <div className="text-xs mt-0.5">
+              <span className="text-slate-500 mr-1">Pending:</span>
+              <span className="text-amber-400">${profitStats.pending_cashback.toFixed(4)}</span>
+            </div>
+          )}
         </div>
       ) : null,
     },

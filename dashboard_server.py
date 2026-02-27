@@ -1283,7 +1283,10 @@ class DashboardServer:
         transfer_fees = self._balance.total_transfer_fees
 
         # Net profit awareness: update optimizer to gate rotations when in deficit
-        net_profit = trading_pnl - transfer_fees
+        credited_cashback = (
+            self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
+        )
+        net_profit = trading_pnl - transfer_fees + credited_cashback
         elapsed_hours = max((now - self._start_time) / 3600, 1 / 3600)
         session_hourly_rate = net_profit / elapsed_hours
         if self._optimizer:
