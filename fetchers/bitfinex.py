@@ -248,6 +248,7 @@ class _BitfinexSubFetcher:
         kwargs = self._parent._ws_connect_kwargs()
 
         async with websockets.connect(url, **kwargs) as ws:
+            self._parent._ws_connected = True
             logger.info(
                 f"[{self._parent.exchange_name}] Sub-connection for "
                 f"{len(self._symbols)} symbols connected"

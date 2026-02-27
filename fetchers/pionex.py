@@ -20,6 +20,7 @@ Connection notes:
     - Symbol format: BTC_USDT (underscore-separated, uppercase)
     - Server sends {"op": "PING"} every 15s, client must reply {"op": "PONG"}
     - Max 10 WebSocket connections per IP
+    - Undocumented topic limit per connection — use multiple connections
     - Public endpoint: wss://ws.pionex.com/wsPub
 """
 
@@ -29,14 +30,30 @@ import logging
 import time
 from typing import Any
 
-from config import PIONEX_EXCHANGE_NAME, PIONEX_WS_URL
+import websockets
+
+from config import (
+    PIONEX_EXCHANGE_NAME,
+    PIONEX_WS_URL,
+    RECONNECT_BACKOFF_FACTOR,
+    RECONNECT_INITIAL_DELAY,
+    RECONNECT_MAX_DELAY,
+)
 from fetchers.base import BaseFetcher, PriceState
 
 logger = logging.getLogger(__name__)
 
+# Max subscriptions per connection (DEPTH + TRADE = 2 topics per symbol)
+# Pionex has an undocumented limit; 20 symbols × 2 topics = 40 is safe
+_MAX_SYMBOLS_PER_CONN = 20
+
 
 class PionexFetcher(BaseFetcher):
-    """Pionex Spot WebSocket fetcher using DEPTH + TRADE topics."""
+    """Pionex Spot WebSocket fetcher using DEPTH + TRADE topics.
+
+    Splits symbols across multiple connections to stay within
+    Pionex's undocumented per-connection topic limit.
+    """
 
     def __init__(self, symbols: list[str] | None = None) -> None:
         super().__init__(symbols)
@@ -63,22 +80,7 @@ class PionexFetcher(BaseFetcher):
         return pionex_symbol.replace("_", "")
 
     async def _on_connect(self, ws: Any) -> None:
-        """Subscribe to DEPTH and TRADE for all symbols."""
-        for s in self.symbols:
-            pionex_sym = self._to_pionex_symbol(s)
-            # Subscribe to DEPTH for bid/ask
-            await ws.send(json.dumps({
-                "op": "SUBSCRIBE",
-                "topic": "DEPTH",
-                "symbol": pionex_sym,
-            }))
-            # Subscribe to TRADE for last_price
-            await ws.send(json.dumps({
-                "op": "SUBSCRIBE",
-                "topic": "TRADE",
-                "symbol": pionex_sym,
-            }))
-        logger.info(f"[{self.exchange_name}] Subscribed to {len(self.symbols)} symbols (DEPTH+TRADE)")
+        """Not used — multi-connection run() handles subscription."""
 
     def _ws_connect_kwargs(self) -> dict[str, Any]:
         """Disable library-level ping; Pionex uses application-level JSON ping."""
@@ -88,18 +90,6 @@ class PionexFetcher(BaseFetcher):
             "close_timeout": 10,
             "max_size": 2**20,
         }
-
-    async def _keep_alive(self, ws: Any) -> None:
-        """Reply to server PINGs. Also send periodic PONGs as fallback."""
-        while self._running and self._ws_connected:
-            try:
-                await ws.send(json.dumps({
-                    "op": "PONG",
-                    "timestamp": int(time.time() * 1000),
-                }))
-            except Exception:
-                break
-            await asyncio.sleep(14)
 
     def _parse_message(self, raw_message: dict[str, Any]) -> tuple[str, PriceState] | None:
         """
@@ -117,12 +107,15 @@ class PionexFetcher(BaseFetcher):
         # Handle server PING
         op = raw_message.get("op", "")
         if op == "PING":
-            # Will be handled by _keep_alive, but also track as activity
             return None
 
         # Ignore subscription confirmations and errors
         msg_type = raw_message.get("type", "")
         if msg_type in ("SUBSCRIBED", "UNSUBSCRIBED", "ERROR"):
+            if msg_type == "ERROR":
+                logger.warning(
+                    f"[{self.exchange_name}] Server error: {raw_message}"
+                )
             return None
 
         topic = raw_message.get("topic", "")
@@ -139,12 +132,9 @@ class PionexFetcher(BaseFetcher):
             updated_at = 0.0
 
         if topic == "TRADE":
-            # Extract last trade price; store for DEPTH messages
             data_list = raw_message.get("data")
             if data_list and isinstance(data_list, list) and len(data_list) > 0:
-                # data is sorted by timestamp descending; first entry is most recent
                 self._last_prices[symbol] = str(data_list[0].get("price", ""))
-            # Don't emit a PriceState for TRADE — wait for DEPTH with bid/ask
             return None
 
         if topic == "DEPTH":
@@ -173,9 +163,153 @@ class PionexFetcher(BaseFetcher):
                 bid_qty=bid_qty,
                 ask_qty=ask_qty,
                 last_price=self._last_prices.get(symbol, ""),
-                volume="",  # DEPTH doesn't include 24h volume
+                volume="",
                 updated_at=updated_at,
             )
             return symbol, price_state
 
         return None
+
+    async def run(self) -> None:
+        """Split symbols across multiple connections to avoid topic limit."""
+        self._running = True
+        self._ensure_output_dir()
+        logger.info(
+            f"[{self.exchange_name}] Starting fetcher for {len(self.symbols)} symbols"
+        )
+
+        # Split symbols into batches
+        batches: list[list[str]] = []
+        for i in range(0, len(self.symbols), _MAX_SYMBOLS_PER_CONN):
+            batches.append(self.symbols[i : i + _MAX_SYMBOLS_PER_CONN])
+
+        num_conns = len(batches)
+        if num_conns > 1:
+            logger.info(
+                f"[{self.exchange_name}] Splitting {len(self.symbols)} symbols "
+                f"across {num_conns} connections "
+                f"({', '.join(str(len(b)) for b in batches)})"
+            )
+
+        subs = [_PionexSubConnection(self, batch) for batch in batches]
+
+        try:
+            await asyncio.gather(
+                *(sub.run() for sub in subs),
+                self._snapshot_loop(),
+            )
+        except Exception as e:
+            if self._running:
+                logger.error(f"[{self.exchange_name}] Error in multi-connection run: {e}")
+
+    def stop(self) -> None:
+        self._running = False
+        logger.info(f"[{self.exchange_name}] Stop requested")
+
+
+class _PionexSubConnection:
+    """Manages a single Pionex WS connection for a subset of symbols."""
+
+    def __init__(self, parent: PionexFetcher, symbols: list[str]) -> None:
+        self._parent = parent
+        self._symbols = symbols
+
+    async def run(self) -> None:
+        delay = RECONNECT_INITIAL_DELAY
+        while self._parent._running:
+            try:
+                await self._connect_and_listen()
+                delay = RECONNECT_INITIAL_DELAY
+            except Exception as e:
+                if not self._parent._running:
+                    break
+                logger.error(f"[{self._parent.exchange_name}] Sub-connection error: {e}")
+                await asyncio.sleep(delay)
+                delay = min(delay * RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY)
+
+    async def _connect_and_listen(self) -> None:
+        url = self._parent._build_ws_url()
+        kwargs = self._parent._ws_connect_kwargs()
+
+        async with websockets.connect(url, **kwargs) as ws:
+            self._parent._ws_connected = True
+            logger.info(
+                f"[{self._parent.exchange_name}] Sub-connection for "
+                f"{len(self._symbols)} symbols connected"
+            )
+
+            # Subscribe with throttling to avoid rate limiting
+            for s in self._symbols:
+                pionex_sym = PionexFetcher._to_pionex_symbol(s)
+                await ws.send(json.dumps({
+                    "op": "SUBSCRIBE",
+                    "topic": "DEPTH",
+                    "symbol": pionex_sym,
+                    "limit": 1,
+                }))
+                await ws.send(json.dumps({
+                    "op": "SUBSCRIBE",
+                    "topic": "TRADE",
+                    "symbol": pionex_sym,
+                }))
+                await asyncio.sleep(0.05)  # Throttle: 50ms between symbols
+
+            logger.info(
+                f"[{self._parent.exchange_name}] Subscribed to "
+                f"{len(self._symbols)} symbols (DEPTH+TRADE)"
+            )
+
+            listener = asyncio.create_task(self._listen(ws))
+            keepalive = asyncio.create_task(self._keep_alive(ws))
+
+            done, pending = await asyncio.wait(
+                [listener, keepalive],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+
+    async def _listen(self, ws: Any) -> None:
+        async for raw in ws:
+            if not self._parent._running:
+                break
+            try:
+                message = json.loads(raw)
+
+                # Handle server PING inline — must respond immediately
+                op = message.get("op", "")
+                if op == "PING":
+                    await ws.send(json.dumps({
+                        "op": "PONG",
+                        "timestamp": int(time.time() * 1000),
+                    }))
+                    continue
+
+                result = self._parent._parse_message(message)
+                if result is not None:
+                    symbol, price_data = result
+                    if symbol in self._parent._state:
+                        now = time.time()
+                        price_data.received_at = now
+                        self._parent._state[symbol] = price_data
+                        self._parent._last_data_received = now
+                        self._parent._message_count += 1
+
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                logger.debug(f"[{self._parent.exchange_name}] Parse error: {e}")
+
+    async def _keep_alive(self, ws: Any) -> None:
+        """Send periodic PONG as fallback (server PING handled in _listen)."""
+        while self._parent._running:
+            try:
+                await ws.send(json.dumps({
+                    "op": "PONG",
+                    "timestamp": int(time.time() * 1000),
+                }))
+            except Exception:
+                break
+            await asyncio.sleep(14)
