@@ -35,8 +35,8 @@ All 9 exchanges have working WebSocket fetchers implemented.
 | 5 | **MEXC** | 0.05% | None needed (already lowest) | Post-connect JSON | 60/60 |
 | 6 | **Bitget** | 0.08% | BGB (20% off) | Post-connect JSON | 60/60 |
 | 7 | **KuCoin** | 0.08% | KCS (20% off) | REST token + WS | 60/60 |
-| 8 | **Gate.io** | 0.10% | GT (~10% off, minimal) | Post-connect JSON | 60/60 |
-| 9 | **Pionex** | 0.05% | None (flat rate, no VIP tiers) | Post-connect JSON | 60/60 |
+| 8 | **Gate.io** | 0.09% | GT (10% off, enabled) | Post-connect JSON | 60/60 |
+| 9 | **Pionex** | 0.05% | None (VIP tiers only, volume-gated) | Post-connect JSON | 60/60 |
 
 **MEXC note:** Currently geo-blocked from user's location. Will use with future VPS deployment.
 **Pionex note:** Aggregates ~50-60% of order book from Binance (per CTO statement) — Pionex↔Binance arbitrage will be near-zero. Value is in Pionex vs OKX/KuCoin/Gate.io/Bybit/Bitget pairs.
@@ -68,7 +68,7 @@ For arbitrage, fees are critical. A typical opportunity is 0.1-0.3%. Fee math:
 | **Bitget** | Buy BGB, enable "Pay fees with BGB" | 20% off (0.10% → 0.08%) |
 | **KuCoin** | Buy KCS, enable "Pay fees with KCS" | 20% off (0.10% → 0.08%) |
 | **OKX** | Hold 500+ OKB (~$25k investment) | Tiered discount (not practical at start) |
-| **Gate.io** | Hold GT tokens | ~10% off (minimal, not worth prioritizing) |
+| **Gate.io** | Buy GT, enable "Pay fees with GT" | 10% off at VIP 0 (0.10% → 0.09%) |
 
 ### Binance FDUSD 0% Maker Fees
 
@@ -330,7 +330,7 @@ In `try_rebalance()`, crypto rebalance runs BEFORE USDT rebalance. This ensures 
 
 ### Net Profit Awareness
 
-The optimizer tracks whether net profit (trading P&L minus transfer fees) is positive. When in deficit:
+The optimizer tracks whether net profit (trading P&L - transfer fees + credited cashback) is positive. When in deficit:
 - Rotations, expansions, AND rebalancing are blocked
 - Demotions still run to remove dead symbols
 - Updated by dashboard server every state broadcast via `update_profit_state()`
@@ -510,7 +510,7 @@ Comprehensive sim-vs-demo validation system. See `DISCREPANCIES.md` for the full
 
 ### Dashboard Integration
 
-- **Stats cards**: Cards 2-4 show demo exchange status, demo P&L, discrepancy count, demo $/hr, sim accuracy %
+- **Stats cards**: Card 1 shows sim + demo portfolio P&L with delta. Card 2 shows trade count + demo exchange status. Card 3 shows trade profit + cashback (credited/pending). Card 4 shows net $/hr + demo $/hr + sim accuracy %.
 - **Demo Portfolio Comparison section**: Per-exchange cards (sim vs demo columns for USDT, crypto, total) with color-coded diffs
 - **Discrepancy log**: Scrollable table of recent mismatches with time, exchange, type, values, root cause
 - **XLSX export**: 16th sheet "Discrepancies" with timestamp, exchange, type, symbol, sim/demo values, diff, root cause
@@ -626,28 +626,29 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 
 ### Fee Structure Per Exchange
 
-| Exchange | Base Rate | Token Discount | Effective Rate | Mechanism | Fee Model |
-|----------|-----------|---------------|---------------|-----------|-----------|
-| Binance | 0.10% | BNB 25% (enabled) | 0.075% | instant | token |
-| OKX | 0.10% | OKB (disabled) | 0.10% | tier | received |
-| Bybit | 0.10% | MNT/BIT (disabled) | 0.10% | tier | received |
-| MEXC | 0.05% | MX (disabled) | 0.05% | instant | received |
-| Bitget | 0.10% | BGB 20% (enabled) | 0.08% | instant | token |
-| KuCoin | 0.10% | KCS 20% (enabled) | 0.08% | rebate | token |
-| Gate.io | 0.10% | GT (disabled) | 0.10% | instant | received |
-| Pionex | 0.05% | None (flat) | 0.05% | instant | received |
-| Bitfinex | 0.00% | None (permanent 0%) | 0.00% | instant | received |
+| Exchange | Base Rate | Token Discount | Effective Rate | Referral Cashback | Settlement | Mechanism | Fee Model |
+|----------|-----------|---------------|---------------|-------------------|------------|-----------|-----------|
+| Binance | 0.10% | BNB 25% (enabled) | 0.075% | 20% | 60 min (hourly) | instant | token |
+| OKX | 0.10% | OKB (disabled) | 0.10% | 20% | 90 min | tier | received |
+| Bybit | 0.10% | MNT/BIT (disabled) | 0.10% | 20% | 1440 min (daily) | tier | received |
+| MEXC | 0.05% | MX (disabled) | 0.05% | 20% | 1440 min (daily) | instant | received |
+| Bitget | 0.10% | BGB 20% (enabled) | 0.08% | 20% | 0 min (instant) | instant | token |
+| KuCoin | 0.10% | KCS 20% (enabled) | 0.08% | 20% | 1440 min (daily) | rebate | token |
+| Gate.io | 0.10% | GT 10% (enabled) | 0.09% | 20% | 1440 min (daily) | instant | token |
+| Pionex | 0.05% | None (VIP tiers only) | 0.05% | 20% | 60 min (hourly) | instant | received |
+| Bitfinex | 0.00% | None (permanent 0%) | 0.00% | Disabled | — | instant | received |
 
 ### Features
 
-- **Token discounts**: Per-exchange toggle with configurable %. Effective rate = base × (1 - discount%).
-- **Referral cashbacks**: Delayed settlement tracked as `PendingCashback`. Each cashback has an expected credit time (exchange-dependent: 0–1080 min). Credited to USDT balance when settlement time passes. NOT subtracted from trade fee (it's delayed income, not instant discount).
+- **Token discounts**: Per-exchange toggle with configurable %. Effective rate = base × (1 - discount%). Gate.io GT gives 10% at VIP 0. Pionex has no discount token (only volume-based VIP tiers).
+- **Referral cashbacks**: Enabled for all exchanges except Bitfinex (0% fees already). Tracked as `PendingCashback` with exchange-specific settlement times: instant (Bitget, 0 min), hourly (Binance/Pionex, 60 min), ~90 min (OKX), or daily (Bybit/MEXC/KuCoin/Gate.io, 1440 min). Credited cashback is added to USDT balance and included in net profit calculations (`net_profit = trading_pnl - transfer_fees + credited_cashback`). Displayed in Trade Profit card (credited + pending).
 - **Zero-fee pairs**: Override list per exchange (e.g., Gate.io BTC/USDT → 0% fee). Checked before all other rate computation.
 - **Fee mechanisms**: `instant` (discount applied immediately), `rebate` (KCS — credited back), `tier` (volume-based, OKX/Bybit).
 - **Fee models**: `received` (fee from received asset), `spent` (added to cost), `token` (from discount token balance).
 - **Sim/Real mode**: Simulation uses configured rates. Real mode overrides with API-queried rates from `DemoPortfolioFetcher`.
 - **Hot-apply**: Fee settings changed in dashboard are applied instantly without restart.
 - **State persistence**: Pending cashbacks survive restarts via `StateManager`.
+- **Profit integration**: Credited cashbacks are added to `net_profit` in `get_net_profit_stats()` and considered in rebalance gates (`_should_rebalance()`). This means cashback income offsets transfer fees in profitability calculations.
 - **[Fee] logging**: Every trade logs fee details and referral cashback amounts. Filterable in Bot Logs.
 
 ### Key Files
@@ -655,7 +656,7 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 | File | Responsibility |
 |------|---------------|
 | `fee_manager.py` | `FeeManager` class, `ExchangeFeeConfig` dataclass, `PendingCashback` tracking, settings serialization, broadcast dict |
-| `config.py` | `DEFAULT_FEE_CONFIGS` — 7 exchanges × 10 fields (base rates, discounts, mechanisms, models, referral, zero-fee) |
+| `config.py` | `DEFAULT_FEE_CONFIGS` — 9 exchanges × 10 fields (base rates, discounts, mechanisms, models, referral, zero-fee) |
 | `dashboard_server.py` | `save_fee_settings` handler with validation schema, hot-apply, broadcast via `to_broadcast_dict()` |
 | `dashboard/src/components/FeeManagementTab.tsx` | Per-exchange fee config UI with computed effective rates |
 

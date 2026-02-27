@@ -1,6 +1,6 @@
 # CoirnaBot
 
-**v0.10.3-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
+**v0.11.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
 
 Monitors real-time prices across 9 crypto exchanges via WebSocket, detects price discrepancies, and executes simultaneous buy/sell orders to profit from the spread. Supports simulation mode and demo/testnet execution with automatic discrepancy detection.
 
@@ -118,7 +118,7 @@ coirnabot/
       types.ts            # TypeScript interfaces
       hooks/useWebSocket.ts  # WebSocket connection and auth flow
       components/         # LoginPage, Header, SymbolRankings, RankingPage, SettingsPage, AuthLogPage, etc.
-      utils/exportXlsx.ts # XLSX export (17 sheets)
+      utils/exportXlsx.ts # XLSX export (18 sheets)
 ```
 
 ## Dashboard Pages
