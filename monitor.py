@@ -833,7 +833,12 @@ class ArbitrageMonitor:
                         # Execute the trade or count the skip
                         if can_trade:
                             miss_key = f"{sym}:{buy_ex}:{sell_ex}"
-                            self._miss_streak[miss_key] = 0
+                            # Only fully reset streak if trade is substantial (≥50% of base amount).
+                            # Tiny residual trades shouldn't prevent rebalance from triggering.
+                            if trade_size >= self._trade_amount * 0.5:
+                                self._miss_streak[miss_key] = 0
+                            else:
+                                self._miss_streak[miss_key] = max(0, self._miss_streak.get(miss_key, 0) - 1)
                             buy_fee_rate = self._fee_manager.get_taker_fee(buy_ex, sym) if self._fee_manager else 0.001
                             sell_fee_rate = self._fee_manager.get_taker_fee(sell_ex, sym) if self._fee_manager else 0.001
                             buy_fee_model = self._fee_manager.get_fee_model(buy_ex) if self._fee_manager else "received"
