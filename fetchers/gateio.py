@@ -21,7 +21,7 @@ Connection notes:
     - Subscription is done post-connect via JSON messages
     - Symbol format: BTC_USDT (underscore-separated)
     - Application-level ping: send {"channel": "spot.ping"}, receive spot.pong
-    - Each symbol needs a separate subscription message
+    - All symbols subscribed in a single batch message (payload array)
     - spot.tickers updates at ~1s intervals
 """
 
@@ -60,18 +60,17 @@ class GateIOFetcher(BaseFetcher):
         return gate_symbol.replace("_", "")
 
     async def _on_connect(self, ws: Any) -> None:
-        """Subscribe to spot.tickers for all symbols (one message per symbol)."""
+        """Subscribe to spot.tickers for all symbols in a single batch message."""
         ts = int(time.time())
-        for i, s in enumerate(self.symbols):
-            gate_sym = self._to_gateio_symbol(s)
-            msg = {
-                "time": ts,
-                "id": i + 1,
-                "channel": "spot.tickers",
-                "event": "subscribe",
-                "payload": [gate_sym],
-            }
-            await ws.send(json.dumps(msg))
+        payload = [self._to_gateio_symbol(s) for s in self.symbols]
+        msg = {
+            "time": ts,
+            "id": 1,
+            "channel": "spot.tickers",
+            "event": "subscribe",
+            "payload": payload,
+        }
+        await ws.send(json.dumps(msg))
         logger.info(f"[{self.exchange_name}] Subscribed to {len(self.symbols)} tickers")
 
     def _ws_connect_kwargs(self) -> dict[str, Any]:
