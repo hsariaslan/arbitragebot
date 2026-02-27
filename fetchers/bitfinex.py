@@ -61,17 +61,34 @@ class BitfinexFetcher(BaseFetcher):
 
     @staticmethod
     def _to_bitfinex_symbol(symbol: str) -> str:
-        """Convert BTCUSDT -> tBTCUST (Bitfinex uses UST for USDT)."""
+        """Convert BTCUSDT -> tBTCUST or tLINK:UST.
+
+        Bitfinex uses UST for USDT. Legacy pairs with 3-char base use
+        concatenated format (tBTCUST, 6 chars). Longer bases require
+        a colon separator (tLINK:UST, tDOGE:UST).
+        """
         if symbol.endswith("USDT"):
             base = symbol[:-4]
-            return f"t{base}UST"
+            if len(base) <= 3:
+                return f"t{base}UST"
+            return f"t{base}:UST"
         return f"t{symbol}"
 
     @staticmethod
     def _from_bitfinex_symbol(bfx_symbol: str) -> str:
-        """Convert tBTCUST -> BTCUSDT."""
-        if bfx_symbol.startswith("t") and bfx_symbol.endswith("UST"):
-            base = bfx_symbol[1:-3]
+        """Convert tBTCUST or tLINK:UST -> BTCUSDT."""
+        if not bfx_symbol.startswith("t"):
+            return bfx_symbol
+        inner = bfx_symbol[1:]
+        # Colon-separated: tLINK:UST -> LINKUSDT
+        if ":" in inner:
+            base, quote = inner.split(":", 1)
+            if quote == "UST":
+                return f"{base}USDT"
+            return f"{base}{quote}"
+        # Legacy: tBTCUST -> BTCUSDT (last 3 chars = UST)
+        if inner.endswith("UST") and len(inner) >= 6:
+            base = inner[:-3]
             return f"{base}USDT"
         return bfx_symbol
 
@@ -200,12 +217,15 @@ class BitfinexFetcher(BaseFetcher):
 
         self._running = True
         self._ensure_output_dir()
+        self._connect_time = time.time()
+        self._first_data_time = 0.0
 
         try:
             await asyncio.gather(
                 fetcher1.run(),
                 fetcher2.run(),
                 self._snapshot_loop(),
+                self._latency_log_loop(),
             )
         except Exception as e:
             if self._running:
@@ -283,6 +303,7 @@ class _BitfinexSubFetcher:
             if not self._parent._running:
                 break
             try:
+                t0 = time.time()
                 message = json.loads(raw)
                 # Handle event messages (subscribed, info, pong)
                 if isinstance(message, dict):
@@ -326,6 +347,16 @@ class _BitfinexSubFetcher:
                 self._parent._state[symbol] = price_state
                 self._parent._last_data_received = now
                 self._parent._message_count += 1
+                proc_ms = (now - t0) * 1000
+                self._parent._latency_samples.append(proc_ms)
+                if self._parent._first_data_time == 0.0:
+                    self._parent._first_data_time = now
+                    conn_ms = (now - self._parent._connect_time) * 1000
+                    logger.info(
+                        f"[Latency] [{self._parent.exchange_name}] "
+                        f"First data received in {conn_ms:.0f}ms "
+                        f"after connect"
+                    )
 
             except (json.JSONDecodeError, KeyError, ValueError) as e:
                 logger.debug(f"[{self._parent.exchange_name}] Parse error: {e}")

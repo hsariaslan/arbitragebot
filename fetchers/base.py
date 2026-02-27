@@ -80,6 +80,12 @@ class BaseFetcher(abc.ABC):
         self._message_count: int = 0
         self._last_snapshot_time: float = 0.0
         self._last_data_received: float = 0.0  # for staleness detection
+        # Latency tracking
+        self._connect_time: float = 0.0  # when WS connection was established
+        self._first_data_time: float = 0.0  # when first price data arrived
+        self._latency_samples: list[float] = []  # recent message processing times (ms)
+        self._last_latency_log: float = 0.0  # last time latency was logged
+        self._latency_log_interval: float = 60.0  # log latency stats every 60s
 
     @property
     @abc.abstractmethod
@@ -168,7 +174,9 @@ class BaseFetcher(abc.ABC):
         async with websockets.connect(url, **self._ws_connect_kwargs()) as ws:
             self._ws_connected = True
             self._reconnect_delay = RECONNECT_INITIAL_DELAY
-            self._last_data_received = time.time()
+            self._connect_time = time.time()
+            self._first_data_time = 0.0
+            self._last_data_received = self._connect_time
             logger.info(f"[{self.exchange_name}] Connected successfully")
 
             await self._on_connect(ws)
@@ -177,10 +185,11 @@ class BaseFetcher(abc.ABC):
             snapshot_task = asyncio.create_task(self._snapshot_loop())
             keepalive_task = asyncio.create_task(self._keep_alive(ws))
             staleness_task = asyncio.create_task(self._staleness_watchdog(ws))
+            latency_task = asyncio.create_task(self._latency_log_loop())
 
             try:
                 done, pending = await asyncio.wait(
-                    [listener_task, snapshot_task, keepalive_task, staleness_task],
+                    [listener_task, snapshot_task, keepalive_task, staleness_task, latency_task],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 for task in pending:
@@ -201,6 +210,7 @@ class BaseFetcher(abc.ABC):
                 break
 
             try:
+                t0 = time.time()
                 message = json.loads(raw)
                 result = self._parse_message(message)
                 if result is not None:
@@ -211,6 +221,18 @@ class BaseFetcher(abc.ABC):
                         self._last_data_received = now
                         self._state[symbol] = price_data
                         self._message_count += 1
+                        # Track message processing latency
+                        proc_ms = (now - t0) * 1000
+                        self._latency_samples.append(proc_ms)
+                        # Log first data received after connect
+                        if self._first_data_time == 0.0:
+                            self._first_data_time = now
+                            conn_to_data_ms = (now - self._connect_time) * 1000
+                            logger.info(
+                                f"[Latency] [{self.exchange_name}] "
+                                f"First data received in {conn_to_data_ms:.0f}ms "
+                                f"after connect"
+                            )
             except (json.JSONDecodeError, KeyError, ValueError) as e:
                 logger.debug(f"[{self.exchange_name}] Parse error: {e}")
 
@@ -285,3 +307,38 @@ class BaseFetcher(abc.ABC):
                     )
                     await ws.close()
                     return
+
+    async def _latency_log_loop(self) -> None:
+        """Periodically log latency statistics."""
+        # Wait for initial data to accumulate
+        await asyncio.sleep(self._latency_log_interval)
+
+        while self._running and self._ws_connected:
+            samples = self._latency_samples
+            if samples:
+                count = len(samples)
+                avg_ms = sum(samples) / count
+                min_ms = min(samples)
+                max_ms = max(samples)
+                # Keep only last 1000 samples
+                self._latency_samples = samples[-1000:] if count > 1000 else []
+
+                # Compute data freshness: avg age of state entries
+                now = time.time()
+                ages = [
+                    (now - s.received_at) * 1000
+                    for s in self._state.values()
+                    if s.received_at > 0
+                ]
+                symbols_with_data = len(ages)
+                avg_age_ms = sum(ages) / len(ages) if ages else 0.0
+                max_age_ms = max(ages) if ages else 0.0
+
+                logger.info(
+                    f"[Latency] [{self.exchange_name}] "
+                    f"proc: avg={avg_ms:.2f}ms min={min_ms:.2f}ms max={max_ms:.2f}ms "
+                    f"({count} msgs) | "
+                    f"freshness: avg={avg_age_ms:.0f}ms max={max_age_ms:.0f}ms "
+                    f"({symbols_with_data}/{len(self.symbols)} symbols)"
+                )
+            await asyncio.sleep(self._latency_log_interval)

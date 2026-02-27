@@ -174,6 +174,8 @@ class PionexFetcher(BaseFetcher):
         """Split symbols across multiple connections to avoid topic limit."""
         self._running = True
         self._ensure_output_dir()
+        self._connect_time = time.time()
+        self._first_data_time = 0.0
         logger.info(
             f"[{self.exchange_name}] Starting fetcher for {len(self.symbols)} symbols"
         )
@@ -191,12 +193,16 @@ class PionexFetcher(BaseFetcher):
                 f"({', '.join(str(len(b)) for b in batches)})"
             )
 
-        subs = [_PionexSubConnection(self, batch) for batch in batches]
+        subs = [
+            _PionexSubConnection(self, batch, index=i)
+            for i, batch in enumerate(batches)
+        ]
 
         try:
             await asyncio.gather(
                 *(sub.run() for sub in subs),
                 self._snapshot_loop(),
+                self._latency_log_loop(),
             )
         except Exception as e:
             if self._running:
@@ -210,11 +216,16 @@ class PionexFetcher(BaseFetcher):
 class _PionexSubConnection:
     """Manages a single Pionex WS connection for a subset of symbols."""
 
-    def __init__(self, parent: PionexFetcher, symbols: list[str]) -> None:
+    def __init__(self, parent: PionexFetcher, symbols: list[str], index: int = 0) -> None:
         self._parent = parent
         self._symbols = symbols
+        self._index = index
 
     async def run(self) -> None:
+        # Stagger connections: 2s delay per connection to avoid IP rate limit
+        if self._index > 0:
+            await asyncio.sleep(self._index * 2.0)
+
         delay = RECONNECT_INITIAL_DELAY
         while self._parent._running:
             try:
@@ -252,7 +263,7 @@ class _PionexSubConnection:
                     "topic": "TRADE",
                     "symbol": pionex_sym,
                 }))
-                await asyncio.sleep(0.05)  # Throttle: 50ms between symbols
+                await asyncio.sleep(0.15)  # Throttle: 150ms between symbols (rate limit: 10 req/s)
 
             logger.info(
                 f"[{self._parent.exchange_name}] Subscribed to "
@@ -289,6 +300,7 @@ class _PionexSubConnection:
                     }))
                     continue
 
+                t0 = time.time()
                 result = self._parent._parse_message(message)
                 if result is not None:
                     symbol, price_data = result
@@ -298,6 +310,16 @@ class _PionexSubConnection:
                         self._parent._state[symbol] = price_data
                         self._parent._last_data_received = now
                         self._parent._message_count += 1
+                        proc_ms = (now - t0) * 1000
+                        self._parent._latency_samples.append(proc_ms)
+                        if self._parent._first_data_time == 0.0:
+                            self._parent._first_data_time = now
+                            conn_ms = (now - self._parent._connect_time) * 1000
+                            logger.info(
+                                f"[Latency] [{self._parent.exchange_name}] "
+                                f"First data received in {conn_ms:.0f}ms "
+                                f"after connect"
+                            )
 
             except (json.JSONDecodeError, KeyError, ValueError) as e:
                 logger.debug(f"[{self._parent.exchange_name}] Parse error: {e}")
