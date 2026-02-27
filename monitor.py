@@ -47,13 +47,13 @@ class ConfigSnapshot:
     adaptive_mode: bool
     min_net_profit_pct: float
     rebalance_cooldown: float
-    min_misses_before_rebalance: int = 5
     rebalance_roi_horizon: int
     total_capital: float
     num_active_symbols: int
     max_active_symbols: int
     avg_trade_size: float
     estimated_profit_per_trade: float
+    min_misses_before_rebalance: int = 5
 
 
 @dataclass
