@@ -244,6 +244,8 @@ class _BitfinexSubFetcher:
         self._parent = parent
         self._symbols = symbols
         self._channel_map: dict[int, str] = {}
+        self._confirmed: set[str] = set()
+        self._last_data_time: float = 0.0
 
     async def run(self) -> None:
         """Connect and listen loop with reconnection."""
@@ -283,12 +285,13 @@ class _BitfinexSubFetcher:
                     "symbol": bfx_sym,
                 }))
 
-            # Listen + keepalive
+            # Listen + keepalive + staleness watchdog
             listener = asyncio.create_task(self._listen(ws))
             keepalive = asyncio.create_task(self._keep_alive(ws))
+            staleness = asyncio.create_task(self._staleness_watchdog(ws))
 
             done, pending = await asyncio.wait(
-                [listener, keepalive],
+                [listener, keepalive, staleness],
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for t in pending:
@@ -314,6 +317,24 @@ class _BitfinexSubFetcher:
                         if chan_id is not None and bfx_symbol:
                             symbol = BitfinexFetcher._from_bitfinex_symbol(bfx_symbol)
                             self._channel_map[chan_id] = symbol
+                            self._confirmed.add(symbol)
+                            logger.debug(
+                                f"[{self._parent.exchange_name}] "
+                                f"Subscribed: {symbol} (chan={chan_id})"
+                            )
+                            if len(self._confirmed) == len(self._symbols):
+                                logger.info(
+                                    f"[{self._parent.exchange_name}] "
+                                    f"Subscribed to {len(self._confirmed)} tickers"
+                                )
+                    elif event == "error":
+                        err_sym = message.get("symbol", "?")
+                        err_msg = message.get("msg", "unknown")
+                        symbol = BitfinexFetcher._from_bitfinex_symbol(err_sym) if err_sym != "?" else "?"
+                        logger.warning(
+                            f"[{self._parent.exchange_name}] "
+                            f"Subscribe failed: {symbol} — {err_msg}"
+                        )
                     continue
 
                 # Data messages (arrays)
@@ -346,6 +367,7 @@ class _BitfinexSubFetcher:
                 )
                 self._parent._state[symbol] = price_state
                 self._parent._last_data_received = now
+                self._last_data_time = now
                 self._parent._message_count += 1
                 proc_ms = (now - t0) * 1000
                 self._parent._latency_samples.append(proc_ms)
@@ -370,3 +392,21 @@ class _BitfinexSubFetcher:
             except Exception:
                 break
             await asyncio.sleep(15)
+
+    async def _staleness_watchdog(self, ws: Any) -> None:
+        """Force reconnect if no data received for 30 seconds on this sub-connection."""
+        while self._parent._running:
+            await asyncio.sleep(5.0)
+            if self._last_data_time > 0:
+                stale = time.time() - self._last_data_time
+                if stale >= self._parent.STALENESS_RECONNECT_SECONDS:
+                    logger.warning(
+                        f"[{self._parent.exchange_name}] Sub-connection stale "
+                        f"({stale:.0f}s, {len(self._confirmed)} symbols), "
+                        f"reconnecting"
+                    )
+                    self._channel_map.clear()
+                    self._confirmed.clear()
+                    self._last_data_time = 0.0
+                    await ws.close()
+                    return
