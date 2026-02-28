@@ -605,15 +605,23 @@ class ExchangeInfoManager:
                 elif ft in ("NOTIONAL", "MIN_NOTIONAL"):
                     min_notional = Decimal(f.get("minNotional", "5"))
 
-            # MEXC may use baseSizePrecision/quoteSizePrecision instead of filters
+            # MEXC may return precision as decimal strings ("0.01") or integers (8)
             if lot_step == Decimal("1"):
                 base_prec = sym_info.get("baseSizePrecision") or sym_info.get("baseAssetPrecision")
                 if base_prec is not None:
-                    lot_step = Decimal(10) ** Decimal(-int(base_prec))
+                    try:
+                        val = Decimal(str(base_prec))
+                        lot_step = val if val < 1 else Decimal(10) ** Decimal(-int(val))
+                    except InvalidOperation:
+                        pass
             if tick_size == Decimal("1"):
                 quote_prec = sym_info.get("quotePrecision") or sym_info.get("quoteAssetPrecision")
                 if quote_prec is not None:
-                    tick_size = Decimal(10) ** Decimal(-int(quote_prec))
+                    try:
+                        val = Decimal(str(quote_prec))
+                        tick_size = val if val < 1 else Decimal(10) ** Decimal(-int(val))
+                    except InvalidOperation:
+                        pass
 
             rules = SymbolRules(
                 symbol=symbol,
@@ -802,9 +810,6 @@ class ExchangeInfoManager:
             if OKX_EXCHANGE_NAME in self._exchanges:
                 tasks.append(self._fetch_okx_withdrawal_fee(session))
                 exchange_names.append(OKX_EXCHANGE_NAME)
-            if MEXC_EXCHANGE_NAME in self._exchanges:
-                tasks.append(self._fetch_mexc_withdrawal_fee(session))
-                exchange_names.append(MEXC_EXCHANGE_NAME)
             if BITGET_EXCHANGE_NAME in self._exchanges:
                 tasks.append(self._fetch_bitget_withdrawal_fee(session))
                 exchange_names.append(BITGET_EXCHANGE_NAME)
@@ -838,8 +843,8 @@ class ExchangeInfoManager:
 
         # Log exchanges we can't validate via public API
         skip = []
-        for ex in (BINANCE_EXCHANGE_NAME, BYBIT_EXCHANGE_NAME, GATEIO_EXCHANGE_NAME,
-                    PIONEX_EXCHANGE_NAME, BITFINEX_EXCHANGE_NAME):
+        for ex in (BINANCE_EXCHANGE_NAME, BYBIT_EXCHANGE_NAME, MEXC_EXCHANGE_NAME,
+                    GATEIO_EXCHANGE_NAME, PIONEX_EXCHANGE_NAME, BITFINEX_EXCHANGE_NAME):
             if ex in self._exchanges:
                 skip.append(ex)
         if skip:
@@ -848,43 +853,6 @@ class ExchangeInfoManager:
                 "validated via demo_fetcher if keys available)",
                 ", ".join(skip),
             )
-
-    async def _fetch_mexc_withdrawal_fee(
-        self, session: aiohttp.ClientSession
-    ) -> float | None:
-        """MEXC: GET /api/v3/capital/config/getall — public endpoint for coin info."""
-        try:
-            url = "https://api.mexc.com/api/v3/capital/config/getall"
-            async with session.get(url) as resp:
-                data = await resp.json()
-
-            if not isinstance(data, list):
-                logger.warning("[WithdrawalFees] MEXC: unexpected response: %s", type(data))
-                return None
-
-            best_fee = float("inf")
-            best_chain = ""
-            for coin_info in data:
-                if coin_info.get("coin") != "USDT":
-                    continue
-                for network in coin_info.get("networkList", []):
-                    if not network.get("withdrawEnable", False):
-                        continue
-                    fee_str = network.get("withdrawFee", "")
-                    if fee_str:
-                        fee = float(fee_str)
-                        chain_name = network.get("network", "unknown")
-                        if fee < best_fee:
-                            best_fee = fee
-                            best_chain = chain_name
-
-            if best_fee < float("inf"):
-                logger.info("[WithdrawalFees] MEXC cheapest: $%.4f (%s)", best_fee, best_chain)
-                return best_fee
-            return None
-        except Exception as e:
-            logger.warning("[WithdrawalFees] MEXC query error: %s", e)
-            return None
 
     async def _fetch_okx_withdrawal_fee(
         self, session: aiohttp.ClientSession

@@ -1,14 +1,14 @@
 """
 MEXC Spot WebSocket fetcher.
 
-Connects to MEXC WebSocket API and streams real-time book ticker data
-for all configured symbols.
+Connects to MEXC WebSocket API and streams real-time aggregated book
+ticker data for all configured symbols.
 
-MEXC bookTicker fields:
-    bidPrice / B    = best bid price
-    bidQuantity / b = best bid quantity
-    askPrice / A    = best ask price
-    askQuantity / a = best ask quantity
+MEXC aggre bookTicker response (V3, August 2025+):
+    channel        = "spot@public.aggre.bookTicker.v3.api.pb@100ms@BTCUSDT"
+    publicbookticker = {bidprice, askprice, bidquantity, askquantity}
+    symbol         = "BTCUSDT"
+    sendtime       = 1736412092433 (unix ms)
 
     NOTE: bookTicker does NOT provide last_price or volume.
     These fields remain empty. For arbitrage, bid/ask is sufficient.
@@ -17,7 +17,7 @@ Connection notes:
     - Subscription is done post-connect via JSON message
     - Symbol format: BTCUSDT uppercase (matches our config)
     - Application-level ping: send {"method": "PING"}, every 10-20s
-    - Max 30 subscriptions per connection (we use 20)
+    - Max 30 subscriptions per connection
 """
 
 import asyncio
@@ -42,8 +42,11 @@ class MEXCFetcher(BaseFetcher):
         return MEXC_WS_URL
 
     async def _on_connect(self, ws: Any) -> None:
-        """Subscribe to bookTicker for all symbols (batched, max 30 per message)."""
-        params = [f"spot@public.bookTicker.v3.api@{s}" for s in self.symbols]
+        """Subscribe to aggre bookTicker for all symbols (batched, max 30 per message)."""
+        params = [
+            f"spot@public.aggre.bookTicker.v3.api.pb@100ms@{s}"
+            for s in self.symbols
+        ]
         batch_size = 30
         for i in range(0, len(params), batch_size):
             batch = params[i : i + batch_size]
@@ -70,34 +73,42 @@ class MEXCFetcher(BaseFetcher):
 
     def _parse_message(self, raw_message: dict[str, Any]) -> tuple[str, PriceState] | None:
         """
-        Parse a MEXC bookTicker push message.
+        Parse a MEXC aggre bookTicker push message.
 
-        Handles both verbose and compact MEXC field names:
-        Verbose: {"channel": "...", "symbol": "BTCUSDT",
-                  "data": {"bidPrice": ..., "askPrice": ...}}
-        Compact: {"c": "...", "s": "BTCUSDT",
-                  "d": {"B": ..., "A": ...}}
+        New V3 format (August 2025+):
+        {"channel": "spot@public.aggre.bookTicker.v3.api.pb@100ms@BTCUSDT",
+         "publicbookticker": {"bidprice": "93387.28", "bidquantity": "3.73",
+                              "askprice": "93387.29", "askquantity": "7.66"},
+         "symbol": "BTCUSDT", "sendtime": 1736412092433}
         """
         channel = raw_message.get("channel") or raw_message.get("c", "")
         if "bookTicker" not in channel:
             return None
 
-        data = raw_message.get("data") or raw_message.get("d")
+        # New format uses "publicbookticker", old used "data"/"d"
+        data = (
+            raw_message.get("publicbookticker")
+            or raw_message.get("data")
+            or raw_message.get("d")
+        )
         if data is None:
             return None
 
         symbol = raw_message.get("symbol") or raw_message.get("s", "")
 
-        ts_raw = raw_message.get("t", 0)
+        # New format uses "sendtime", old used "t"
+        ts_raw = raw_message.get("sendtime") or raw_message.get("t", 0)
         try:
             updated_at = int(ts_raw) / 1000.0
         except (ValueError, TypeError):
             updated_at = 0.0
 
-        bid = data.get("bidPrice") or data.get("B", "")
-        ask = data.get("askPrice") or data.get("A", "")
-        bid_qty = data.get("bidQuantity") or data.get("b", "")
-        ask_qty = data.get("askQuantity") or data.get("a", "")
+        # New format: lowercase keys (bidprice, askprice, bidquantity, askquantity)
+        # Old format: camelCase or single-letter keys
+        bid = data.get("bidprice") or data.get("bidPrice") or data.get("B", "")
+        ask = data.get("askprice") or data.get("askPrice") or data.get("A", "")
+        bid_qty = data.get("bidquantity") or data.get("bidQuantity") or data.get("b", "")
+        ask_qty = data.get("askquantity") or data.get("askQuantity") or data.get("a", "")
 
         price_state = PriceState(
             bid=bid,
