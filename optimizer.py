@@ -1792,6 +1792,7 @@ class SymbolOptimizer:
                 "focus_tier": s.focus_tier,
                 "dominant_buyers": [ex for ex, _ in self._dominant_pairs[s.symbol]["buyers"]] if s.symbol in self._dominant_pairs else [],
                 "dominant_sellers": [ex for ex, _ in self._dominant_pairs[s.symbol]["sellers"]] if s.symbol in self._dominant_pairs else [],
+                "current_net_pct": round(self._ticks[s.symbol][-1].best_net_pct, 4) if s.symbol in self._ticks and self._ticks[s.symbol] else 0.0,
             }
             for i, s in enumerate(ranked)
         ]

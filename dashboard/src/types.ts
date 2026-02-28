@@ -149,6 +149,7 @@ export interface SymbolRanking {
   focus_tier: string;
   dominant_buyers: string[];
   dominant_sellers: string[];
+  current_net_pct: number;
 }
 
 export interface RotationEvent {

@@ -46,6 +46,7 @@ export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, 
               <th className="text-right px-2 py-1.5 font-medium">Score</th>
               <th className="text-right px-2 py-1.5 font-medium">Freq%</th>
               <th className="text-right px-2 py-1.5 font-medium">Avg Net%</th>
+              <th className="text-right px-2 py-1.5 font-medium">Cur Net%</th>
               <th className="text-right px-2 py-1.5 font-medium">Best%</th>
               <th className="text-right px-2 py-1.5 font-medium">Est $/hr</th>
               <th className="text-right px-2 py-1.5 font-medium">Trade $</th>
@@ -77,6 +78,9 @@ export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, 
                   </td>
                   <td className={`px-2 py-1.5 text-right font-mono ${r.avg_net_pct > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
                     {r.total_ticks > 0 ? r.avg_net_pct.toFixed(4) + '%' : '—'}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right font-mono ${r.current_net_pct > 0 ? 'text-emerald-400' : r.current_net_pct < 0 ? 'text-red-400' : 'text-slate-500'}`}>
+                    {r.total_ticks > 0 ? r.current_net_pct.toFixed(4) + '%' : '—'}
                   </td>
                   <td className={`px-2 py-1.5 text-right font-mono ${r.best_net_pct > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
                     {r.total_ticks > 0 ? r.best_net_pct.toFixed(4) + '%' : '—'}

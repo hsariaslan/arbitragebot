@@ -1,6 +1,9 @@
 import { useState } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
 import type { ConfigSnapshot, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, OptimizerState, ProfitStats, WatchlistEntry, Portfolio, Simulation, Trade, Transfer } from '../types';
 import { exportXlsx } from '../utils/exportXlsx';
+import { exportRankingsMarkdown } from '../utils/exportMarkdown';
+import PerformanceCharts from './PerformanceCharts';
 
 interface RankingPageProps {
   optimizer: OptimizerState;
@@ -14,6 +17,7 @@ interface RankingPageProps {
   feeConfigs?: Record<string, ExchangeFeeConfig>;
   transferConfigs?: Record<string, ExchangeTransferConfig>;
   profitStats?: ProfitStats | null;
+  defaultView?: 'rolling' | 'historical';
 }
 
 function ProfitBar({ value, maxValue }: { value: number; maxValue: number }) {
@@ -823,9 +827,11 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
 // Main Component
 // ══════════════════════════════════════════════════════════════════════════════
 
-export default function RankingPage({ optimizer, tickCount, portfolio, simulation, allTrades, allTransfers, allConfigHistory, demoDiscrepancies, feeConfigs, transferConfigs, profitStats }: RankingPageProps) {
-  const [view, setView] = useState<'rolling' | 'historical'>('rolling');
+export default function RankingPage({ optimizer, tickCount, portfolio, simulation, allTrades, allTransfers, allConfigHistory, demoDiscrepancies, feeConfigs, transferConfigs, profitStats, defaultView }: RankingPageProps) {
+  const location = useLocation();
+  const view: 'rolling' | 'historical' = defaultView || (location.pathname.endsWith('/historical') ? 'historical' : 'rolling');
   const windowMinutes = Math.round(optimizer.scoring_window / 60);
+  const [mdCopied, setMdCopied] = useState(false);
 
   const activeCount = optimizer.active_symbols?.length ?? 0;
   const minActive = optimizer.min_active_symbols ?? activeCount;
@@ -854,26 +860,41 @@ export default function RankingPage({ optimizer, tickCount, portfolio, simulatio
           >
             Export XLSX
           </button>
+          <button
+            onClick={() => {
+              const md = exportRankingsMarkdown({ optimizer, portfolio, simulation, profitStats, allTrades, allTransfers, allConfigHistory });
+              navigator.clipboard.writeText(md).then(() => {
+                setMdCopied(true);
+                setTimeout(() => setMdCopied(false), 2000);
+              });
+            }}
+            className="px-4 py-1.5 rounded-lg text-sm font-medium border border-slate-600 text-slate-400 hover:text-slate-200 hover:border-slate-500 transition-colors"
+          >
+            {mdCopied ? 'Copied!' : 'Copy MD'}
+          </button>
           <div className="flex items-center gap-1 bg-slate-800 rounded-lg p-1">
-            <button
-              onClick={() => setView('rolling')}
-              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                view === 'rolling' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
+            <NavLink to="/rankings" end
+              className={({ isActive }) => `px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                isActive ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
               }`}
             >
               Rolling
-            </button>
-            <button
-              onClick={() => setView('historical')}
-              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                view === 'historical' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
+            </NavLink>
+            <NavLink to="/rankings/historical"
+              className={({ isActive }) => `px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                isActive ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
               }`}
             >
               Historical
-            </button>
+            </NavLink>
           </div>
         </div>
       </div>
+
+      {/* Performance Charts */}
+      {(allTrades?.length ?? 0) > 0 && (
+        <PerformanceCharts trades={allTrades ?? []} transfers={allTransfers ?? []} />
+      )}
 
       {view === 'rolling' ? (
         <RollingView optimizer={optimizer} />
