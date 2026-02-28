@@ -23,6 +23,7 @@ Connection notes:
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from config import MEXC_EXCHANGE_NAME, MEXC_WS_URL
@@ -34,12 +35,62 @@ logger = logging.getLogger(__name__)
 class MEXCFetcher(BaseFetcher):
     """MEXC Spot WebSocket fetcher using the bookTicker channel."""
 
+    def __init__(self, symbols: list[str] | None = None) -> None:
+        super().__init__(symbols)
+        self._debug_logged: int = 0  # count of diagnostic messages logged
+
     @property
     def exchange_name(self) -> str:
         return MEXC_EXCHANGE_NAME
 
     def _build_ws_url(self) -> str:
         return MEXC_WS_URL
+
+    async def _listen(self, ws: Any) -> None:
+        """Listen with diagnostic logging to debug zero-data issue."""
+        async for raw in ws:
+            if not self._running:
+                break
+
+            # Log first few messages to diagnose format issues
+            if self._debug_logged < 5:
+                self._debug_logged += 1
+                if isinstance(raw, bytes):
+                    logger.warning(
+                        f"[{self.exchange_name}] MSG #{self._debug_logged}: "
+                        f"BINARY {len(raw)} bytes, hex={raw[:80].hex()}"
+                    )
+                else:
+                    logger.warning(
+                        f"[{self.exchange_name}] MSG #{self._debug_logged}: "
+                        f"{raw[:300]}"
+                    )
+
+            try:
+                t0 = time.time()
+                message = json.loads(raw)
+                result = self._parse_message(message)
+                if result is not None:
+                    symbol, price_data = result
+                    if symbol in self._state:
+                        now = time.time()
+                        price_data.received_at = now
+                        self._last_data_received = now
+                        self._state[symbol] = price_data
+                        self._message_count += 1
+                        proc_ms = (now - t0) * 1000
+                        self._latency_samples.append(proc_ms)
+                        if self._first_data_time == 0.0:
+                            self._first_data_time = now
+                            conn_to_data_ms = (now - self._connect_time) * 1000
+                            logger.info(
+                                f"[Latency] [{self.exchange_name}] "
+                                f"First data received in {conn_to_data_ms:.0f}ms "
+                                f"after connect"
+                            )
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                if self._debug_logged <= 5:
+                    logger.warning(f"[{self.exchange_name}] Parse error: {e}")
 
     async def _on_connect(self, ws: Any) -> None:
         """Subscribe to aggre bookTicker for all symbols (batched, max 30 per message)."""
