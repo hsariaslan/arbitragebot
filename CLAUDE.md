@@ -229,7 +229,8 @@ The bot only trades and transfers for **strong** (score ≥ 0.1) and **very stro
 - **Rebalancing**: `should_allow_rebalance()` requires score ≥ 0.01 (`TRADING_SCORE_THRESHOLD`). ROI gate, net P&L gate, and transfer worthiness checks protect against unprofitable transfers.
 - **Expansion/Rotation**: Only strong/very_strong candidates can be activated or replace existing symbols.
 - **Faster activation**: Watchlist confirmation period is score-dependent: very strong (≥0.3) confirmed in `confirmation_period × 0.1` (30s default), strong (≥0.1) in `× 0.4` (120s), normal in full period (300s). Strong candidates shouldn't sit idle.
-- **Demotion**: Symbols dropping below 0.1 are demoted on a tiered schedule (faster for weaker scores). No minimum active count protection — better idle than bleeding money on transfers.
+- **Demotion**: Symbols dropping below 0.1 are demoted on a tiered schedule (faster for weaker scores). Cooldown = `demotion_period × demotion_cooldown_multiplier` (default 5.0 = 3000s/50 min). No minimum active count protection — better idle than bleeding money on transfers.
+- **Elevated re-activation**: `_get_activation_threshold(symbol)` raises the required score for frequently-demoted symbols. Each demotion adds 50% of base threshold, capped at `strong_threshold`. A symbol demoted 3 times needs score ≥ 0.025 instead of 0.01.
 
 ### Focus Tiers & Trade Multipliers
 
@@ -270,7 +271,7 @@ After discovery, capital is allocated per-symbol to dominant exchanges:
 
 ### Dynamic Re-evaluation
 
-`_reevaluate_dominant_pairs()` runs every evaluation cycle for active symbols. If dominant exchanges shift (buyer or seller changed), capital is reallocated via `_reallocate_symbol()`. Gated by rotation budget and cooldown (2× evaluation_interval).
+`_reevaluate_dominant_pairs()` runs every evaluation cycle for active symbols. If dominant exchanges shift (buyer or seller changed), capital is reallocated via `_reallocate_symbol()`. Gated by rotation budget and cooldown (3× evaluation_interval). `_reallocate_symbol()` has a **cost estimation gate**: estimates sell+buy taker fees and compares against `est_hourly_profit × reallocation_cost_horizon` (default 2h). Skips if cost exceeds benefit.
 
 ### Dashboard Display
 
@@ -324,7 +325,8 @@ Multiple gates prevent unprofitable rebalancing:
 3. **Net P&L gate**: After `net_pnl_gate_warmup_trades` (default 10) trades AND `net_pnl_gate_grace_seconds` (default 1800s) elapsed, if `trading_pnl + cashback < external_transfer_fees` (net negative using external-only fees), all rebalancing is blocked. All three params configurable via Settings.
 4. **Dynamic miss-streak threshold**: `_get_miss_threshold(buy_ex, sell_ex)` returns lower threshold for cheap exchanges. Free transfers (both ≤ $0.01): `base // 3` (min 3). Cheap (either < $0.20): `base // 2` (min 5). Otherwise: full `min_misses_before_rebalance`.
 5. **Transfer worthiness**: External transfers blocked if `withdrawal_fee / estimated_profit > 50`.
-6. **Cooldown**: 60s between rebalances per exchange/direction.
+6. **Hourly external transfer budget**: Rolling 1-hour window caps total external withdrawal fees at `hourly_external_transfer_cap` (default $2.00/hr). Internal rebalances (sell/buy on same exchange) are not limited. Persisted across restarts. 0 = disabled.
+7. **Cooldown**: 60s between rebalances per exchange/direction.
 
 ### Rebalance Order
 
@@ -356,7 +358,7 @@ All snapshots are exported in the XLSX "Configurations" sheet.
 | `config.py` | `DEFAULT_FEE_CONFIGS`, `DEFAULT_TRANSFER_CONFIGS`, `ADAPTIVE_MODE` |
 | `fee_manager.py` | `FeeManager` — centralized fee computation, token discounts, referral cashbacks, zero-fee pairs, real mode |
 | `transfer_fee_manager.py` | `TransferFeeManager` — per-exchange per-network withdrawal fees (flat/percentage/conditional), preferred network selection |
-| `settings.json` | Runtime settings including `adaptive_mode`, `min_net_profit_pct`, `trade_amount_usd`, `total_capital`, `fee_configs`, `transfer_configs` |
+| `settings.json` | Runtime settings including `adaptive_mode`, `min_net_profit_pct`, `trade_amount_usd`, `total_capital`, `fee_configs`, `transfer_configs`, `reallocation_cost_horizon`, `demotion_cooldown_multiplier`, `hourly_external_transfer_cap` |
 
 ## Dashboard
 
