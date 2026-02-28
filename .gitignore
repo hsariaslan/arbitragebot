@@ -8,6 +8,7 @@ __pycache__/
 logs/
 data/
 xlsx/
+export/
 screenshots/
 state/
 settings.json
