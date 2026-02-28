@@ -139,6 +139,11 @@ class ArbitrageMonitor:
         self._start_time: float = 0.0
         self._tick_count: int = 0
 
+        # Net P&L gate configurable params
+        self._net_pnl_gate_warmup_trades: int = 10
+        self._net_pnl_gate_grace_seconds: int = 1800
+        self._rebalance_roi_divisor: int = 3
+
         # Configuration history tracking
         self._config_history: list[ConfigSnapshot] = []
 
@@ -260,17 +265,20 @@ class ArbitrageMonitor:
         if not self._balance or not self._adaptive_mode:
             return True, ""
 
-        # Block when net P&L is negative (after warm-up period)
-        if len(self._trades) >= 10:
+        # Block when net P&L is negative (after warm-up: trades + grace period)
+        warmup_trades = getattr(self, "_net_pnl_gate_warmup_trades", 10)
+        grace_seconds = getattr(self, "_net_pnl_gate_grace_seconds", 1800)
+        elapsed = time.time() - self._start_time if self._start_time else 0
+        if len(self._trades) >= warmup_trades and elapsed >= grace_seconds:
             trading_pnl = sum(t.profit_usd for t in self._trades)
             credited_cb = (
                 self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
             )
-            total_fees = self._balance.total_transfer_fees
+            total_fees = self._balance.total_external_transfer_fees
             if trading_pnl + credited_cb < total_fees:
                 return False, (
                     f"net_pnl_gate (pnl=${trading_pnl:.2f} + cb=${credited_cb:.2f} "
-                    f"< fees=${total_fees:.2f})"
+                    f"< ext_fees=${total_fees:.2f})"
                 )
 
         # ROI gate: profit margin vs amortized rebalance cost
@@ -280,7 +288,7 @@ class ArbitrageMonitor:
         if self._balance._estimated_profit_per_trade > 0 and self._trade_amount > 0:
             profit_pct = self._balance._estimated_profit_per_trade / self._trade_amount
             fee_rate = self._fee_manager.get_taker_fee(buy_ex) if self._fee_manager else 0.001
-            threshold = fee_rate / 3
+            threshold = fee_rate / self._rebalance_roi_divisor
             # Rebalance enables ~3 trades; cost amortized = fee_rate / 3
             if profit_pct < threshold:
                 return False, (
@@ -289,6 +297,22 @@ class ArbitrageMonitor:
                 )
 
         return True, ""
+
+    def _get_miss_threshold(self, buy_ex: str, sell_ex: str) -> int:
+        """Lower miss threshold for exchanges with free/cheap transfers."""
+        base = self._min_misses_before_rebalance
+        if not self._balance or not self._balance._transfer_fee_mgr:
+            return base
+        tfm = self._balance._transfer_fee_mgr
+        buy_fee = tfm.get_withdrawal_fee(buy_ex)
+        sell_fee = tfm.get_withdrawal_fee(sell_ex)
+        # Free transfers: trigger after base // 3 (min 3)
+        if buy_fee <= 0.01 and sell_fee <= 0.01:
+            return max(3, base // 3)
+        # Cheap transfers (< $0.20): after base // 2 (min 5)
+        if buy_fee < 0.20 or sell_fee < 0.20:
+            return max(5, base // 2)
+        return base
 
     def _compute_trade_size(
         self, buy_ex: str, sell_ex: str, symbol: str,
@@ -305,14 +329,19 @@ class ArbitrageMonitor:
             if sym_score:
                 symbol_mult = sym_score.trade_multiplier
 
-        # Max by available USDT on buy exchange (keep 20% buffer)
-        usdt_available = self._balance.usdt.get(buy_ex, 0.0)
-        max_by_usdt = usdt_available * 0.80
+        # Capital-proportional floor (computed first for dynamic buffer)
+        min_trade = max(5.0, self._total_capital * 0.003)
 
-        # Max by available crypto value on sell exchange (keep 20% buffer)
+        # Max by available USDT on buy exchange (dynamic buffer)
+        usdt_available = self._balance.usdt.get(buy_ex, 0.0)
+        usdt_buffer = 0.95 if usdt_available < min_trade * 2 else 0.80
+        max_by_usdt = usdt_available * usdt_buffer
+
+        # Max by available crypto value on sell exchange (dynamic buffer)
         crypto_qty = self._balance.crypto.get(sell_ex, {}).get(symbol, 0.0)
         crypto_value = crypto_qty * sell_price
-        max_by_crypto = crypto_value * 0.80
+        crypto_buffer = 0.95 if crypto_value < min_trade * 2 else 0.80
+        max_by_crypto = crypto_value * crypto_buffer
 
         # Tick quality factor (narrow range — symbol_mult does the heavy lifting)
         if net_pct >= 0.10:
@@ -321,9 +350,6 @@ class ArbitrageMonitor:
             tick_factor = 0.90
         else:
             tick_factor = 0.85
-
-        # Capital-proportional floor
-        min_trade = max(5.0, self._total_capital * 0.003)
 
         base = self._trade_amount * symbol_mult * tick_factor
         trade_size = min(max_by_usdt, max_by_crypto, base)
@@ -834,7 +860,7 @@ class ArbitrageMonitor:
 
                         # Try rebalancing when miss-streak is high enough
                         miss_key = f"{sym}:{buy_ex}:{sell_ex}"
-                        if not can_trade and self._miss_streak.get(miss_key, 0) >= self._min_misses_before_rebalance:
+                        if not can_trade and self._miss_streak.get(miss_key, 0) >= self._get_miss_threshold(buy_ex, sell_ex):
                             # Gates: optimizer score + ROI + net P&L
                             score_ok = self._optimizer and self._optimizer.should_allow_rebalance(sym)
                             if score_ok:
@@ -979,7 +1005,7 @@ class ArbitrageMonitor:
                         miss_key = f"{sym}:{buy_ex}:{sell_ex}"
                         self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
 
-                        if self._miss_streak.get(miss_key, 0) >= self._min_misses_before_rebalance:
+                        if self._miss_streak.get(miss_key, 0) >= self._get_miss_threshold(buy_ex, sell_ex):
                             score_ok = self._optimizer and self._optimizer.should_allow_rebalance(sym)
                             if score_ok:
                                 rebal_ok, rebal_reason = self._should_rebalance(buy_ex, sell_ex)
@@ -1061,7 +1087,12 @@ class ArbitrageMonitor:
                 ex_total = ex_usdt + ex_crypto
                 total += ex_total
                 parts.append(f"{ex}=${ex_total:.0f}")
-            logger.info(f"[Balance] Snapshot: {' '.join(parts)} | total=${total:.0f}")
+            ext_fees_snap = self._balance.total_external_transfer_fees
+            total_fees_snap = self._balance.total_transfer_fees
+            logger.info(
+                f"[Balance] Snapshot: {' '.join(parts)} | total=${total:.0f} "
+                f"| fees: ${total_fees_snap:.2f} (ext=${ext_fees_snap:.2f})"
+            )
 
             # Session P&L summary
             elapsed = time.time() - self._start_time if self._start_time else 0
@@ -1071,6 +1102,7 @@ class ArbitrageMonitor:
             trade_count = len(self._trades)
             trading_pnl = sum(t.profit_usd for t in self._trades)
             xfer_fees = self._balance.total_transfer_fees
+            ext_fees = self._balance.total_external_transfer_fees
             credited_cb = (
                 self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
             )
@@ -1079,12 +1111,15 @@ class ArbitrageMonitor:
             )
             net = trading_pnl - xfer_fees + credited_cb
             hourly = net / hours if hours > 0 else 0.0
+            size_zero_total = sum(self._size_zero_log_count.values())
+            rebal_blocked_total = sum(self._rebalance_block_log_count.values())
             logger.info(
                 f"[Session] {h}h{m:02d}m: {trade_count} trades, "
                 f"pnl=${trading_pnl:.2f}, xfer_fees=${xfer_fees:.2f}, "
                 f"cashback=${credited_cb + pending_cb:.2f} "
                 f"(credited=${credited_cb:.2f} pending=${pending_cb:.2f}), "
-                f"net=${net:.2f}, $/hr=${hourly:.2f}"
+                f"net=${net:.2f}, $/hr=${hourly:.2f}, "
+                f"sz0={size_zero_total}, rebal_blocked={rebal_blocked_total}"
             )
 
         # Compute average age per exchange for display

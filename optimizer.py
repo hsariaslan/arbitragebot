@@ -36,9 +36,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Score thresholds for tiered behavior
-STRONG_SCORE_THRESHOLD = 0.1       # strong tier (higher multiplier, more exchanges)
+# Score thresholds for tiered behavior (module-level defaults)
 TRADING_SCORE_THRESHOLD = 0.01     # trading + rebalance gate (minimum to trade/transfer)
+STRONG_SCORE_THRESHOLD = 0.1       # strong tier (higher multiplier, more exchanges)
+VERY_STRONG_SCORE_THRESHOLD = 0.3  # very strong tier (highest multiplier, most exchanges)
 
 
 @dataclass
@@ -236,6 +237,11 @@ class SymbolOptimizer:
         self._recently_demoted: dict[str, float] = {}  # symbol -> demotion timestamp
         self._demotion_cooldown = demotion_period * 3  # 3x demotion period (default 1800s)
 
+        # Configurable score thresholds (settable from dashboard)
+        self._trading_threshold: float = TRADING_SCORE_THRESHOLD
+        self._strong_threshold: float = STRONG_SCORE_THRESHOLD
+        self._very_strong_threshold: float = VERY_STRONG_SCORE_THRESHOLD
+
         # Net profit awareness: block rotations when in deficit
         self._rotation_budget_ok: bool = True
         self._session_hourly_rate: float = 0.0
@@ -296,10 +302,24 @@ class SymbolOptimizer:
         """Store dashboard reference for post-discovery updates."""
         self._dashboard = dashboard
 
-    def update_profit_state(self, net_profit: float, session_hourly_rate: float) -> None:
+    def update_profit_state(self, net_profit: float, session_hourly_rate: float, grace_active: bool = False) -> None:
         """Called by dashboard to update net profit awareness for rotation gating."""
-        self._rotation_budget_ok = net_profit >= 0
+        was_ok = self._rotation_budget_ok
+        if grace_active:
+            self._rotation_budget_ok = True
+        else:
+            self._rotation_budget_ok = net_profit >= 0
         self._session_hourly_rate = session_hourly_rate
+        # Log transitions
+        if was_ok and not self._rotation_budget_ok:
+            logger.info(
+                f"[Optimizer] Rotation gate CLOSED: net_profit=${net_profit:.2f} "
+                f"(using ext-only fees)"
+            )
+        elif not was_ok and self._rotation_budget_ok and not grace_active:
+            logger.info(
+                f"[Optimizer] Rotation gate OPENED: net_profit=${net_profit:.2f}"
+            )
 
     async def run(self) -> None:
         """Score all symbols every second, evaluate rotation periodically."""
@@ -341,7 +361,7 @@ class SymbolOptimizer:
                     tradeable_found = sorted(
                         [
                             s for s in self._scores.values()
-                            if s.score >= TRADING_SCORE_THRESHOLD and s.total_ticks > 0
+                            if s.score >= self._trading_threshold and s.total_ticks > 0
                         ],
                         key=lambda s: s.score,
                         reverse=True,
@@ -552,7 +572,7 @@ class SymbolOptimizer:
                 # Top 10 with full breakdown
                 logger.debug(
                     f"[Discovery] Score ranking at {elapsed:.0f}s "
-                    f"(threshold={TRADING_SCORE_THRESHOLD}):"
+                    f"(threshold={self._trading_threshold}):"
                 )
                 for s in ranked[:10]:
                     logger.debug(
@@ -562,12 +582,12 @@ class SymbolOptimizer:
                         f"ticks={s.profitable_ticks}/{s.total_ticks} "
                         f"best_net={s.best_net_pct:+.4f}%"
                     )
-                above = sum(1 for s in ranked if s.score >= TRADING_SCORE_THRESHOLD)
+                above = sum(1 for s in ranked if s.score >= self._trading_threshold)
                 logger.debug(
                     f"[Discovery]   {above} symbols above threshold "
-                    f"({TRADING_SCORE_THRESHOLD}), "
-                    f"{sum(1 for s in ranked if s.score >= STRONG_SCORE_THRESHOLD)} strong "
-                    f"({STRONG_SCORE_THRESHOLD})"
+                    f"({self._trading_threshold}), "
+                    f"{sum(1 for s in ranked if s.score >= self._strong_threshold)} strong "
+                    f"({self._strong_threshold})"
                 )
 
                 # Fee floor analysis: show min combined fee for each exchange pair
@@ -648,7 +668,7 @@ class SymbolOptimizer:
 
         # Compute per-symbol trade multipliers with focus tiers for active symbols
         # Tiered system: very_strong (>=0.3), strong (>=0.1), normal (>=0.01), weak (<0.01)
-        # Symbols >= TRADING_SCORE_THRESHOLD (0.01) can trade; below that get multiplier=0
+        # Symbols >= self._trading_threshold (0.01) can trade; below that get multiplier=0
         active_set = set(self._active_symbols)
         active_with_score = [s for s in all_scores if s.symbol in active_set and s.score > 0]
         if active_with_score:
@@ -656,13 +676,13 @@ class SymbolOptimizer:
             if mean_score > 0:
                 for s in active_with_score:
                     raw = s.score / mean_score
-                    if s.score >= 0.3:
+                    if s.score >= self._very_strong_threshold:
                         s.trade_multiplier = max(3.0, min(4.0, raw * 2.0))
                         s.focus_tier = "very_strong"
-                    elif s.score >= STRONG_SCORE_THRESHOLD:
+                    elif s.score >= self._strong_threshold:
                         s.trade_multiplier = max(2.0, min(3.0, raw * 1.5))
                         s.focus_tier = "strong"
-                    elif s.score >= TRADING_SCORE_THRESHOLD:
+                    elif s.score >= self._trading_threshold:
                         s.trade_multiplier = max(0.5, min(1.5, raw))
                         s.focus_tier = "normal"
                     else:
@@ -740,10 +760,10 @@ class SymbolOptimizer:
             s.symbol for s in self._scores.values() if s.score > 0
         }
         current_strong = {
-            s.symbol for s in self._scores.values() if s.score >= 0.1
+            s.symbol for s in self._scores.values() if s.score >= self._strong_threshold
         }
         current_very_strong = {
-            s.symbol for s in self._scores.values() if s.score >= 0.3
+            s.symbol for s in self._scores.values() if s.score >= self._very_strong_threshold
         }
 
         # Newly became candidate
@@ -799,17 +819,17 @@ class SymbolOptimizer:
         )
         tradeable_symbols = [
             s.symbol for s in ranked_symbols
-            if s.score >= TRADING_SCORE_THRESHOLD
+            if s.score >= self._trading_threshold
         ]
 
         if tradeable_symbols:
             # Activate tradeable symbols (cap at max_active)
             best_symbols = tradeable_symbols[: self._max_active_symbols]
             strong_count = sum(1 for s in ranked_symbols
-                             if s.symbol in best_symbols and s.score >= STRONG_SCORE_THRESHOLD)
+                             if s.symbol in best_symbols and s.score >= self._strong_threshold)
             logger.info(
                 f"[Optimizer] Discovery: {len(tradeable_symbols)} tradeable symbols found "
-                f"(score >= {TRADING_SCORE_THRESHOLD}), {strong_count} strong (>= {STRONG_SCORE_THRESHOLD}), "
+                f"(score >= {self._trading_threshold}), {strong_count} strong (>= {self._strong_threshold}), "
                 f"activating {len(best_symbols)}"
             )
         else:
@@ -825,7 +845,7 @@ class SymbolOptimizer:
                 for s in ranked_symbols[:10]
             ) if ranked_symbols else "no data"
             logger.warning(
-                f"[Optimizer] Discovery: NO tradeable symbols (>= {TRADING_SCORE_THRESHOLD}). "
+                f"[Optimizer] Discovery: NO tradeable symbols (>= {self._trading_threshold}). "
                 f"Extending to {self._discovery_duration}s. Top 10: {top_10}"
             )
             return  # Stay in discovery mode, don't proceed
@@ -862,9 +882,9 @@ class SymbolOptimizer:
         for sym in best_symbols:
             sym_score = self._scores.get(sym)
             score_val = sym_score.score if sym_score else 0.0
-            if score_val >= 0.3:
+            if score_val >= self._very_strong_threshold:
                 max_dir = 3
-            elif score_val >= STRONG_SCORE_THRESHOLD:
+            elif score_val >= self._strong_threshold:
                 max_dir = 2
             else:
                 max_dir = 2  # min 2 to avoid over-concentration on 1 pair
@@ -1019,15 +1039,23 @@ class SymbolOptimizer:
                 entry = self._watchlist[sym]
                 entry.score_samples.append(score_obj.score)
 
-                # Check confirmation
-                if not entry.confirmed and now - entry.entered_at >= self._confirmation_period:
+                # Check confirmation (faster for strong/very_strong candidates)
+                score_val = score_obj.score if score_obj else 0.0
+                if score_val >= self._very_strong_threshold:
+                    confirm_time = self._confirmation_period * 0.1
+                elif score_val >= self._strong_threshold:
+                    confirm_time = self._confirmation_period * 0.4
+                else:
+                    confirm_time = self._confirmation_period
+                if not entry.confirmed and now - entry.entered_at >= confirm_time:
                     entry.confirmed = True
                     stats = self._historical_stats.get(sym)
                     if stats:
                         stats.times_confirmed += 1
                     logger.info(
                         f"[Optimizer] Watchlist CONFIRMED: {sym} "
-                        f"(avg score={sum(entry.score_samples)/len(entry.score_samples):.6f})"
+                        f"(avg score={sum(entry.score_samples)/len(entry.score_samples):.6f}, "
+                        f"confirm={confirm_time:.0f}s)"
                     )
             else:
                 # Score dropped below threshold — remove from watchlist
@@ -1046,21 +1074,21 @@ class SymbolOptimizer:
             multiplier = score_obj.trade_multiplier if score_obj else 0.0
 
             # Instant demotion: if trade_multiplier is 0, symbol is dead weight
-            if multiplier <= 0 and score_val < TRADING_SCORE_THRESHOLD and sym in self._demotion_tracking:
+            if multiplier <= 0 and score_val < self._trading_threshold and sym in self._demotion_tracking:
                 elapsed = now - self._demotion_tracking[sym]
                 if elapsed >= 30:  # 30s grace period to stabilize after discovery
                     to_demote.append(sym)
                     continue
 
             # Demote if below trading threshold (score < 0.01)
-            if score_val < TRADING_SCORE_THRESHOLD:
+            if score_val < self._trading_threshold:
                 if sym not in self._demotion_tracking:
                     self._demotion_tracking[sym] = now
                 else:
                     # Fast-track: symbols at zero or negative demote faster
                     if score_val <= self._demotion_threshold:
                         required_period = self._demotion_period / 4  # very fast
-                    elif score_val < TRADING_SCORE_THRESHOLD / 2:
+                    elif score_val < self._trading_threshold / 2:
                         required_period = self._demotion_period / 2  # fast
                     else:
                         required_period = self._demotion_period  # normal
@@ -1139,9 +1167,9 @@ class SymbolOptimizer:
         )
 
         # Compute dominant pairs (tier-based exchange count)
-        if score.score >= 0.3:
+        if score.score >= self._very_strong_threshold:
             max_dir = 3
-        elif score.score >= STRONG_SCORE_THRESHOLD:
+        elif score.score >= self._strong_threshold:
             max_dir = 2
         else:
             max_dir = 2  # min 2 to avoid over-concentration on 1 pair
@@ -1284,7 +1312,7 @@ class SymbolOptimizer:
 
             best_candidate = confirmed_candidates[0]
             # Gate: candidate must be tradeable (score >= 0.01)
-            if best_candidate.score < TRADING_SCORE_THRESHOLD:
+            if best_candidate.score < self._trading_threshold:
                 break
             # Require candidate score to be at least 3x the worst active score
             if best_candidate.score <= worst.score * 3:
@@ -1328,7 +1356,7 @@ class SymbolOptimizer:
                     s for s in self._scores.values()
                     if s.symbol not in active_set
                     and s.symbol not in cooldown_set_now
-                    and s.score >= TRADING_SCORE_THRESHOLD
+                    and s.score >= self._trading_threshold
                     and s.total_ticks >= 30  # minimum data points
                     and s.est_hourly_profit > expansion_cost * self._safety_multiplier
                 ],
@@ -1398,9 +1426,9 @@ class SymbolOptimizer:
                 )
 
         # 2. Buy new symbol crypto only on dominant seller exchanges
-        if new_score.score >= 0.3:
+        if new_score.score >= self._very_strong_threshold:
             max_dir = 3
-        elif new_score.score >= STRONG_SCORE_THRESHOLD:
+        elif new_score.score >= self._strong_threshold:
             max_dir = 2
         else:
             max_dir = 2  # min 2 to avoid over-concentration on 1 pair
@@ -1532,11 +1560,18 @@ class SymbolOptimizer:
             if total <= 0:
                 equal_w = 1.0 / max(len(scores), 1)
                 return [(ex, equal_w) for ex in list(scores)[:max_n]]
-            weighted = sorted(
-                [(ex, s / total) for ex, s in scores.items()],
-                key=lambda x: x[1],
-                reverse=True,
-            )
+            weighted = [(ex, s / total) for ex, s in scores.items()]
+
+            # Fee-weighted tie-breaking: prefer lower-fee exchanges
+            if self._fee_manager:
+                fees = {ex: self._fee_manager.get_scoring_fee(ex) for ex, _ in weighted}
+                max_fee = max(fees.values(), default=0.001) or 0.001
+                weighted = [
+                    (ex, w * (1 + (max_fee - fees.get(ex, max_fee)) / max_fee))
+                    for ex, w in weighted
+                ]
+
+            weighted.sort(key=lambda x: x[1], reverse=True)
             # Take top N, ignoring < 2% weight exchanges
             selected = []
             for ex, w in weighted:
@@ -1580,9 +1615,9 @@ class SymbolOptimizer:
                 # Determine max exchanges based on score tier
                 score_obj = self._scores.get(sym)
                 score_val = score_obj.score if score_obj else 0.0
-                if score_val >= 0.3:
+                if score_val >= self._very_strong_threshold:
                     max_dir = 3
-                elif score_val >= STRONG_SCORE_THRESHOLD:
+                elif score_val >= self._strong_threshold:
                     max_dir = 2
                 else:
                     max_dir = 2  # min 2 to avoid over-concentration on 1 pair
@@ -1596,9 +1631,9 @@ class SymbolOptimizer:
 
             score_obj = self._scores.get(sym)
             score_val = score_obj.score if score_obj else 0.0
-            if score_val >= 0.3:
+            if score_val >= self._very_strong_threshold:
                 max_dir = 3
-            elif score_val >= STRONG_SCORE_THRESHOLD:
+            elif score_val >= self._strong_threshold:
                 max_dir = 2
             else:
                 max_dir = 2  # min 2 to avoid over-concentration on 1 pair
@@ -1951,7 +1986,7 @@ class SymbolOptimizer:
         score = self._scores.get(symbol)
         if not score:
             return False
-        return score.score >= TRADING_SCORE_THRESHOLD
+        return score.score >= self._trading_threshold
 
     def get_symbol_score(self, symbol: str) -> SymbolScore | None:
         """Return the current rolling score for a symbol."""
