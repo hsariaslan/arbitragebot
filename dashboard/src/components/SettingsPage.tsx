@@ -39,8 +39,11 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [demotionPeriod, setDemotionPeriod] = useState(currentSettings.demotion_period ?? 600);
   const [minNetProfitPct, setMinNetProfitPct] = useState(currentSettings.min_net_profit_pct ?? 0.02);
   const [rebalanceCooldown, setRebalanceCooldown] = useState(currentSettings.rebalance_cooldown ?? 30);
-  const [minMissesBeforeRebalance, setMinMissesBeforeRebalance] = useState(currentSettings.min_misses_before_rebalance ?? 5);
+  const [minMissesBeforeRebalance, setMinMissesBeforeRebalance] = useState(currentSettings.min_misses_before_rebalance ?? 15);
   const [rebalanceRoiHorizon, setRebalanceRoiHorizon] = useState(currentSettings.rebalance_roi_horizon ?? 1800);
+  const [reallocationCostHorizon, setReallocationCostHorizon] = useState(currentSettings.reallocation_cost_horizon ?? 2.0);
+  const [demotionCooldownMultiplier, setDemotionCooldownMultiplier] = useState(currentSettings.demotion_cooldown_multiplier ?? 5.0);
+  const [hourlyExternalTransferCap, setHourlyExternalTransferCap] = useState(currentSettings.hourly_external_transfer_cap ?? 2.0);
   const [tradingScoreThreshold, setTradingScoreThreshold] = useState(currentSettings.trading_score_threshold ?? 0.01);
   const [strongScoreThreshold, setStrongScoreThreshold] = useState(currentSettings.strong_score_threshold ?? 0.1);
   const [veryStrongScoreThreshold, setVeryStrongScoreThreshold] = useState(currentSettings.very_strong_score_threshold ?? 0.3);
@@ -73,8 +76,11 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setDemotionPeriod(currentSettings.demotion_period ?? 600);
       setMinNetProfitPct(currentSettings.min_net_profit_pct ?? 0.02);
       setRebalanceCooldown(currentSettings.rebalance_cooldown ?? 30);
-      setMinMissesBeforeRebalance(currentSettings.min_misses_before_rebalance ?? 5);
+      setMinMissesBeforeRebalance(currentSettings.min_misses_before_rebalance ?? 15);
       setRebalanceRoiHorizon(currentSettings.rebalance_roi_horizon ?? 1800);
+      setReallocationCostHorizon(currentSettings.reallocation_cost_horizon ?? 2.0);
+      setDemotionCooldownMultiplier(currentSettings.demotion_cooldown_multiplier ?? 5.0);
+      setHourlyExternalTransferCap(currentSettings.hourly_external_transfer_cap ?? 2.0);
       setTradingScoreThreshold(currentSettings.trading_score_threshold ?? 0.01);
       setStrongScoreThreshold(currentSettings.strong_score_threshold ?? 0.1);
       setVeryStrongScoreThreshold(currentSettings.very_strong_score_threshold ?? 0.3);
@@ -113,6 +119,9 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     net_pnl_gate_warmup_trades: netPnlGateWarmupTrades,
     net_pnl_gate_grace_seconds: netPnlGateGraceSeconds,
     rebalance_roi_divisor: rebalanceRoiDivisor,
+    reallocation_cost_horizon: reallocationCostHorizon,
+    demotion_cooldown_multiplier: demotionCooldownMultiplier,
+    hourly_external_transfer_cap: hourlyExternalTransferCap,
     adaptive_mode: adaptiveMode,
     execution_mode: executionMode,
   });
@@ -349,7 +358,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               <Tooltip text="Consecutive missed trades (due to insufficient balance) before triggering a rebalance. Dynamic in adaptive mode: adjusts 10-30 based on trade frequency. Default: 15" />
             </label>
             <input type="number" value={minMissesBeforeRebalance} min={1} max={100} step={1}
-              onChange={d(setMinMissesBeforeRebalance, 5)}
+              onChange={d(setMinMissesBeforeRebalance, 15)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
           <div>
@@ -422,6 +431,38 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             </label>
             <input type="number" value={rebalanceRoiDivisor} min={2} max={20} step={1}
               onChange={d(setRebalanceRoiDivisor, 3)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+        </div>
+
+        {/* Profitability Controls */}
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-3">Profitability Controls</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Reallocation Cost Horizon (h)
+              <Tooltip text="Hours of estimated profit a symbol must generate to justify the cost of switching its dominant exchange pair. Higher values prevent expensive re-allocations for marginal improvements. Default: 2.0" />
+            </label>
+            <input type="number" value={reallocationCostHorizon} min={0.5} max={24} step={0.5}
+              onChange={d(setReallocationCostHorizon, 2.0)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Demotion Cooldown Multiplier
+              <Tooltip text="Cooldown after demotion = demotion_period × this multiplier. Higher values prevent symbols from churning in and out. With default 5.0 and 600s period: 50 min cooldown. Default: 5.0" />
+            </label>
+            <input type="number" value={demotionCooldownMultiplier} min={1} max={20} step={0.5}
+              onChange={d(setDemotionCooldownMultiplier, 5.0)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Hourly External Transfer Cap ($)
+              <Tooltip text="Maximum USD spent on external withdrawal fees per rolling hour. Internal rebalances (crypto sell/buy on same exchange) are not limited. Set to 0 to disable. Default: $2.00" />
+            </label>
+            <input type="number" value={hourlyExternalTransferCap} min={0} max={100} step={0.5}
+              onChange={d(setHourlyExternalTransferCap, 2.0)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
         </div>

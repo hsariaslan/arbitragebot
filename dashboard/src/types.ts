@@ -95,6 +95,10 @@ export interface Settings {
   rebalance_roi_horizon?: number;
   adaptive_mode?: boolean;
   execution_mode?: string;
+  // Profitability controls
+  reallocation_cost_horizon?: number;
+  demotion_cooldown_multiplier?: number;
+  hourly_external_transfer_cap?: number;
   // Score thresholds
   trading_score_threshold?: number;
   strong_score_threshold?: number;
