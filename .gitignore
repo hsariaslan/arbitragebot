@@ -23,6 +23,7 @@ dashboard/tsconfig.app.tsbuildinfo
 
 # Root-level npm artifacts (not used)
 package-lock.json
+!dashboard/package-lock.json
 node_modules/
 
 # OS
