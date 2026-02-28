@@ -131,6 +131,10 @@ class DashboardServer:
         self._last_cleanup = 0.0
         self._captcha_threshold = 3  # require CAPTCHA after this many failures
 
+        # Restart grace period — suppress login email after bot restart
+        self._restart_grace = False
+        self._check_restart_marker()
+
         # Auth events (for Auth Log page)
         self._max_auth_events = 500
         self._auth_events: list[dict] = self._load_auth_events()
@@ -508,6 +512,10 @@ class DashboardServer:
         self._running = True
         self._start_time = time.time()
 
+        # Schedule restart grace period end
+        if self._restart_grace:
+            asyncio.get_event_loop().call_later(30.0, self._clear_restart_grace)
+
         serve_kwargs: dict[str, Any] = {
             "ping_interval": 20,
             "ping_timeout": 60,
@@ -695,8 +703,9 @@ class DashboardServer:
                             "login_success", ip, username=username, password=password,
                             browser=browser, os_info=os_info, details=f"remember={remember}",
                         )
-                        # Fire-and-forget email notification
-                        asyncio.create_task(notify_login(ip, browser, os_info))
+                        # Fire-and-forget email notification (skip during restart grace)
+                        if not self._restart_grace:
+                            asyncio.create_task(notify_login(ip, browser, os_info))
                     else:
                         remaining = self._record_failed_attempt(ip)
                         self._auth_logger.warning(f"{ip} - Login failed (user={username}, {remaining} attempts remaining)")
@@ -1072,8 +1081,34 @@ class DashboardServer:
         import os as _os
         import sys as _sys
 
+        # Write restart marker so the next startup suppresses login emails
+        marker = Path("state/restart_marker")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(time.time()))
+
         logger.info("[Dashboard] Restarting process via execv...")
         _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
+
+    def _check_restart_marker(self) -> None:
+        """Check if a restart marker exists from a recent restart. If so, suppress login emails for 30s."""
+        marker = Path("state/restart_marker")
+        if marker.exists():
+            try:
+                age = time.time() - float(marker.read_text().strip())
+                if age < 60:
+                    self._restart_grace = True
+                    logger.info(f"[Dashboard] Restart marker found ({age:.0f}s old), suppressing login emails for 30s")
+            except (ValueError, OSError):
+                pass
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+
+    def _clear_restart_grace(self) -> None:
+        """Called ~30s after startup to re-enable login email notifications."""
+        self._restart_grace = False
+        logger.info("[Dashboard] Restart grace period ended, login emails re-enabled")
 
     # --- Log export from disk ---
 

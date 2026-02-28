@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { NavLink, useParams } from 'react-router-dom';
 import type { BotLogEntry, AuthLogEntry } from '../types';
 import BotLogsTab from './BotLogsTab';
 import AuthLogPage from './AuthLogPage';
@@ -10,33 +10,23 @@ interface LogsPageProps {
   uptimeSeconds: number;
 }
 
+const tabClass = ({ isActive }: { isActive: boolean }) =>
+  `px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+    isActive
+      ? 'border-blue-500 text-white'
+      : 'border-transparent text-slate-400 hover:text-slate-200'
+  }`;
+
 export default function LogsPage({ botLogs, authLogs, sendWithCallback, uptimeSeconds }: LogsPageProps) {
-  const [activeSubTab, setActiveSubTab] = useState<'bot' | 'auth'>('bot');
+  const { subTab } = useParams<{ subTab?: string }>();
+  const activeSubTab = subTab === 'auth' ? 'auth' : 'bot';
 
   return (
     <div className="space-y-4">
       {/* Sub-tab navigation */}
       <div className="flex items-center gap-1 border-b border-slate-700 overflow-x-auto">
-        <button
-          onClick={() => setActiveSubTab('bot')}
-          className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-            activeSubTab === 'bot'
-              ? 'border-blue-500 text-white'
-              : 'border-transparent text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          Bot Logs
-        </button>
-        <button
-          onClick={() => setActiveSubTab('auth')}
-          className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-            activeSubTab === 'auth'
-              ? 'border-blue-500 text-white'
-              : 'border-transparent text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          Auth Logs
-        </button>
+        <NavLink to="/logs" end className={tabClass}>Bot Logs</NavLink>
+        <NavLink to="/logs/auth" className={tabClass}>Auth Logs</NavLink>
       </div>
 
       {/* Sub-tab content */}

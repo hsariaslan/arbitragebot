@@ -1,3 +1,4 @@
+import { NavLink } from 'react-router-dom';
 import type { Portfolio, Simulation, ProfitStats } from '../types';
 
 interface HeaderProps {
@@ -5,8 +6,6 @@ interface HeaderProps {
   uptimeSeconds: number;
   connectedExchanges: number;
   totalExchanges: number;
-  activeTab: 'dashboard' | 'ranking' | 'settings' | 'logs';
-  onTabChange: (tab: 'dashboard' | 'ranking' | 'settings' | 'logs') => void;
   portfolio: Portfolio | null;
   simulation: Simulation | null;
   profitStats: ProfitStats | null;
@@ -28,7 +27,26 @@ function PnlText({ value, prefix = '$' }: { value: number; prefix?: string }) {
   return <span className={`font-mono font-medium ${color}`}>{sign}{prefix}{value.toFixed(2)}</span>;
 }
 
-export default function Header({ connected, uptimeSeconds, connectedExchanges, totalExchanges, activeTab, onTabChange, portfolio, simulation, profitStats, onLogout }: HeaderProps) {
+const navLinkClass = ({ isActive }: { isActive: boolean }) =>
+  `px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+    isActive
+      ? 'bg-slate-700 text-white'
+      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+  }`;
+
+const mobileNavClass = ({ isActive }: { isActive: boolean }) =>
+  `px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+    isActive ? 'bg-slate-700 text-white' : 'text-slate-500'
+  }`;
+
+export default function Header({ connected, uptimeSeconds, connectedExchanges, totalExchanges, portfolio, simulation, profitStats, onLogout }: HeaderProps) {
+  // Connection state: connected, reconnecting (disconnected but was authed), or disconnected
+  const connectionDot = connected
+    ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]'
+    : 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)] animate-pulse';
+  const connectionText = connected ? 'Connected' : 'Reconnecting...';
+  const connectionColor = connected ? 'text-emerald-400' : 'text-amber-400';
+
   return (
     <>
     <header className="bg-slate-900 border-b border-slate-700">
@@ -37,46 +55,10 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
         <div className="flex items-center gap-3 sm:gap-6">
           <h1 className="text-lg sm:text-xl font-bold text-white tracking-tight">CoirnaBot</h1>
           <nav className="hidden md:flex gap-1">
-            <button
-              onClick={() => onTabChange('dashboard')}
-              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                activeTab === 'dashboard'
-                  ? 'bg-slate-700 text-white'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-              }`}
-            >
-              Dashboard
-            </button>
-            <button
-              onClick={() => onTabChange('ranking')}
-              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                activeTab === 'ranking'
-                  ? 'bg-slate-700 text-white'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-              }`}
-            >
-              Rankings
-            </button>
-            <button
-              onClick={() => onTabChange('settings')}
-              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                activeTab === 'settings'
-                  ? 'bg-slate-700 text-white'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-              }`}
-            >
-              Settings
-            </button>
-            <button
-              onClick={() => onTabChange('logs')}
-              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                activeTab === 'logs'
-                  ? 'bg-slate-700 text-white'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-              }`}
-            >
-              Logs
-            </button>
+            <NavLink to="/" end className={navLinkClass}>Dashboard</NavLink>
+            <NavLink to="/rankings" className={({ isActive }) => navLinkClass({ isActive: isActive || window.location.hash.startsWith('#/rankings') })}>Rankings</NavLink>
+            <NavLink to="/settings" className={({ isActive }) => navLinkClass({ isActive: isActive || window.location.hash.startsWith('#/settings') })}>Settings</NavLink>
+            <NavLink to="/logs" className={({ isActive }) => navLinkClass({ isActive: isActive || window.location.hash.startsWith('#/logs') })}>Logs</NavLink>
           </nav>
         </div>
         <div className="flex items-center gap-3 sm:gap-6 text-sm">
@@ -87,9 +69,9 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
             Uptime: <span className="text-white font-medium">{formatUptime(uptimeSeconds)}</span>
           </span>
           <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]' : 'bg-red-400 shadow-[0_0_6px_rgba(248,113,113,0.5)]'}`} />
-            <span className={connected ? 'text-emerald-400' : 'text-red-400'}>
-              {connected ? 'Connected' : 'Disconnected'}
+            <div className={`w-2 h-2 rounded-full ${connectionDot}`} />
+            <span className={connectionColor}>
+              {connectionText}
             </span>
           </div>
           <button
@@ -128,7 +110,7 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
           <div className="h-3 w-px bg-slate-700" />
           <div className="flex items-center gap-1.5">
             <span className="text-slate-500">Net Profit:</span>
-            <PnlText value={portfolio.trading_pnl - Math.abs(portfolio.transfer_fees)} />
+            <PnlText value={profitStats.net_profit} />
           </div>
           <div className="h-3 w-px bg-slate-700" />
           <div className="flex items-center gap-1.5">
@@ -160,19 +142,10 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
 
     {/* Mobile bottom tab bar */}
     <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-slate-900 border-t border-slate-700 z-50 flex justify-around px-2 py-2">
-      {(['dashboard', 'ranking', 'settings', 'logs'] as const).map(tab => (
-        <button
-          key={tab}
-          onClick={() => onTabChange(tab)}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-            activeTab === tab
-              ? 'bg-slate-700 text-white'
-              : 'text-slate-500'
-          }`}
-        >
-          {tab === 'dashboard' ? 'Home' : tab === 'ranking' ? 'Ranks' : tab.charAt(0).toUpperCase() + tab.slice(1)}
-        </button>
-      ))}
+      <NavLink to="/" end className={mobileNavClass}>Home</NavLink>
+      <NavLink to="/rankings" className={({ isActive }) => mobileNavClass({ isActive: isActive || window.location.hash.startsWith('#/rankings') })}>Ranks</NavLink>
+      <NavLink to="/settings" className={({ isActive }) => mobileNavClass({ isActive: isActive || window.location.hash.startsWith('#/settings') })}>Settings</NavLink>
+      <NavLink to="/logs" className={({ isActive }) => mobileNavClass({ isActive: isActive || window.location.hash.startsWith('#/logs') })}>Logs</NavLink>
     </nav>
     </>
   );

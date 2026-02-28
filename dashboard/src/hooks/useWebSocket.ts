@@ -29,10 +29,12 @@ export function useWebSocket() {
   const [captchaRequired, setCaptchaRequired] = useState(false);
   const [captchaSiteKey, setCaptchaSiteKey] = useState<string | null>(null);
   const [ipDenied, setIpDenied] = useState(false);
+  const [wsInitialized, setWsInitialized] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout>>();
   const blockedRef = useRef(false);
+  const restartingRef = useRef(false);
   const pendingCredentials = useRef<{ username: string; password: string; remember: boolean; captchaToken?: string } | null>(null);
   const exportCallbackRef = useRef<((data: any) => void) | null>(null);
 
@@ -48,6 +50,11 @@ export function useWebSocket() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+
+        // Mark initialized on first auth-related message (before any UI renders)
+        if (data.type === 'auth_required' || data.type === 'auth_denied' || data.type === 'auth_blocked') {
+          setWsInitialized(true);
+        }
 
         if (data.type === 'auth_required') {
           if (data.captcha_required) {
@@ -76,6 +83,7 @@ export function useWebSocket() {
           blockedRef.current = false;
           setRetryAfter(0);
           setCaptchaRequired(false);
+          restartingRef.current = false;
           // Store token: respect remember-me preference
           if (data.token) {
             const wasInLocal = localStorage.getItem(TOKEN_KEY);
@@ -142,6 +150,12 @@ export function useWebSocket() {
           return;
         }
 
+        // Restart acknowledgment: preserve auth state during reconnect
+        if (data.type === 'restart_ack') {
+          restartingRef.current = true;
+          return;
+        }
+
         // Export result callbacks
         if (data.type === 'export_bot_logs_result' || data.type === 'export_auth_logs_result') {
           exportCallbackRef.current?.(data);
@@ -161,10 +175,14 @@ export function useWebSocket() {
     ws.onclose = () => {
       setConnected(false);
       wsRef.current = null;
-      // Keep authenticated if we have a token (avoid login flash on reconnect)
-      if (!getStoredToken()) {
+
+      // During restart or if we have a token: keep authenticated and state (show stale data)
+      if (restartingRef.current || getStoredToken()) {
+        // Keep authenticated=true and state intact for yellow "Reconnecting..." indicator
+      } else {
         setAuthenticated(false);
       }
+
       setAuthLoading(false);
       if (!blockedRef.current) {
         reconnectRef.current = setTimeout(connect, RECONNECT_DELAY);
@@ -230,7 +248,7 @@ export function useWebSocket() {
   return {
     state, connected, authenticated, authError,
     attemptsRemaining, blocked, retryAfter, authLoading,
-    captchaRequired, captchaSiteKey, ipDenied,
+    captchaRequired, captchaSiteKey, ipDenied, wsInitialized,
     login, logout, send, sendWithCallback,
   };
 }
