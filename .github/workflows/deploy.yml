@@ -32,9 +32,11 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd /root/coirnabot
-            git stash --quiet 2>/dev/null || true
+            cp settings.json settings.json.bak 2>/dev/null || true
+            git checkout -- settings.json 2>/dev/null || true
             git pull origin master
-            git stash pop --quiet 2>/dev/null || true
+            cp settings.json.bak settings.json 2>/dev/null || true
+            rm -f settings.json.bak
             cp scripts/coirnabot.service /etc/systemd/system/coirnabot.service
             systemctl daemon-reload
             .venv/bin/pip install -r requirements.txt --quiet
