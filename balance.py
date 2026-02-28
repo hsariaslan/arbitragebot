@@ -16,6 +16,7 @@ Rebalancing priority:
 
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 
 from config import (
