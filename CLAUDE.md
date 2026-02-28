@@ -323,10 +323,11 @@ Multiple gates prevent unprofitable rebalancing:
 1. **Tradeable gate**: `should_allow_rebalance()` requires `score >= 0.01` (`TRADING_SCORE_THRESHOLD`). Weak symbols (< 0.01) never trigger rebalances.
 2. **ROI gate**: `_should_rebalance()` in monitor.py estimates rebalance cost. Threshold = `fee_rate / rebalance_roi_divisor` (configurable, default 3, recommended 5-10 for small capital). Blocks when amortized cost exceeds per-trade profit.
 3. **Net P&L gate**: After `net_pnl_gate_warmup_trades` (default 10) trades AND `net_pnl_gate_grace_seconds` (default 1800s) elapsed, if `trading_pnl + cashback < external_transfer_fees` (net negative using external-only fees), all rebalancing is blocked. All three params configurable via Settings.
-4. **Dynamic miss-streak threshold**: `_get_miss_threshold(buy_ex, sell_ex)` returns lower threshold for cheap exchanges. Free transfers (both ≤ $0.01): `base // 3` (min 3). Cheap (either < $0.20): `base // 2` (min 5). Otherwise: full `min_misses_before_rebalance`.
+4. **Dynamic miss-streak threshold**: `_get_miss_threshold(buy_ex, sell_ex)` returns lower threshold for cheap exchanges. Free transfers (both ≤ $0.01): `base // 3` (min 3). Cheap (either < $0.20): `base // 2` (min 5). Otherwise: full `min_misses_before_rebalance`. Streak only resets to 0 when `try_rebalance()` returns actual transfers — failed attempts preserve the streak so it keeps growing.
 5. **Transfer worthiness**: External transfers blocked if `withdrawal_fee / estimated_profit > 50`.
 6. **Hourly external transfer budget**: Rolling 1-hour window caps total external withdrawal fees at `hourly_external_transfer_cap` (default $2.00/hr). Internal rebalances (sell/buy on same exchange) are not limited. Persisted across restarts. 0 = disabled.
 7. **Cooldown**: 60s between rebalances per exchange/direction.
+8. **Dynamic rebalance buffer**: Eligibility threshold for rebalance sources scales with trade amount (`trade_amount × 2`) instead of the fixed $50. For $10 trades, source needs $20 buffer (not $50), making internal sells and external transfers viable for smaller positions. Logged as `[Balance] USDT/Crypto rebalance FAILED` with diagnostics when all options exhausted.
 
 ### Rebalance Order
 
