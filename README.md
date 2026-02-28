@@ -1,6 +1,6 @@
 # CoirnaBot
 
-**v0.14.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
+**v0.15.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
 
 Monitors real-time prices across 9 crypto exchanges via WebSocket, detects price discrepancies, and executes simultaneous buy/sell orders to profit from the spread. Deployed on Bangkok VPS with auto-deploy via GitHub Actions. Supports simulation mode and demo/testnet execution with automatic discrepancy detection.
 
@@ -13,7 +13,7 @@ Monitors real-time prices across 9 crypto exchanges via WebSocket, detects price
 - **Demo order execution**: Places real market orders on Binance/OKX/Bybit testnets in parallel, compares actual fill data with sim expectations
 - **20 discrepancy types**: Automated detection of slippage, partial fills, order rejections, one-legged trades, latency, fee mismatches, and more
 - **Exchange trading rules**: Lot size rounding, min notional validation, tick size correction, fee rate validation, withdrawal fee validation at startup
-- **Real-time dashboard**: React/TypeScript SPA with live portfolio, rankings, trade history, XLSX export, fully responsive mobile UI
+- **Real-time dashboard**: React/TypeScript SPA with URL routing (HashRouter), live portfolio, rankings with P&L charts (recharts), trade history, XLSX + markdown export, settings tooltips, fully responsive mobile UI
 - **Demo/testnet comparison**: Fetches real portfolio from Binance/OKX/Bybit demo APIs, baseline-adjusted comparison with discrepancy detection
 - **Comprehensive fee management**: Per-exchange fee configs with token discounts, referral cashbacks, zero-fee pairs, sim/real mode toggle, hot-apply from dashboard
 - **Transfer fee management**: Per-exchange per-network withdrawal fees (flat/percentage/conditional), preferred network selection, hot-apply from dashboard
@@ -115,20 +115,21 @@ coirnabot/
     bitfinex.py           # Bitfinex WebSocket fetcher (0% fees, dual-connection)
   dashboard/
     src/
-      App.tsx             # Main layout, tab routing
+      App.tsx             # Main layout, HashRouter routing, restart reconnection
       types.ts            # TypeScript interfaces
-      hooks/useWebSocket.ts  # WebSocket connection and auth flow
-      components/         # LoginPage, Header, SymbolRankings, RankingPage, SettingsPage, AuthLogPage, etc.
+      hooks/useWebSocket.ts  # WebSocket connection, auth flow, restart handling
+      components/         # LoginPage, Header, SymbolRankings, RankingPage, PerformanceCharts, SettingsPage, Tooltip, etc.
       utils/exportXlsx.ts # XLSX export (18 sheets)
+      utils/exportMarkdown.ts # Markdown table export for clipboard
 ```
 
 ## Dashboard Pages
 
 | Page | Description |
 |------|-------------|
-| **Dashboard** | Live portfolio P&L (sim + demo), demo exchange status, symbol rankings, balance table, price grid, demo comparison, recent trades/transfers |
-| **Rankings** | Rolling/historical rankings, top-10 charts, lifecycle funnel, exchange analysis, XLSX export |
-| **Settings** | General (trade amount, capital, optimizer parameters, adaptive mode, IP whitelist) + Fee Management (per-exchange fee config) + Transfer Fees (per-network withdrawal fees) |
+| **Dashboard** (`/#/`) | Live portfolio P&L (sim + demo), demo exchange status, symbol rankings with Cur Net%, balance table, price grid, demo comparison, recent trades/transfers |
+| **Rankings** (`/#/rankings`) | Rolling/historical rankings, performance charts (P&L, exchange profit), top-10 charts, exchange analysis, XLSX + markdown export |
+| **Settings** (`/#/settings`) | General (trade amount, capital, optimizer parameters, adaptive mode, IP whitelist) + Fee Management + Transfer Fees. All settings have `?` tooltip descriptions |
 | **Logs** | Unified log viewer: Bot Logs (real-time, filterable) and Auth Logs (login events, IP blocks) with export |
 
 ## Configuration

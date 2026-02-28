@@ -360,13 +360,15 @@ All snapshots are exported in the XLSX "Configurations" sheet.
 
 ## Dashboard
 
-React/TypeScript SPA served by the Python backend via WebSocket.
+React/TypeScript SPA served by the Python backend via WebSocket. Uses `HashRouter` for client-side URL routing (no nginx config needed). Full-width layout optimized for 1920px screens.
 
 ### Pages
 
-- **Dashboard** — Real-time overview: portfolio P&L (sim + demo), trade/transfer stats, demo exchange status, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`), balance table, price grid, demo portfolio comparison, recent trades/transfers, rotation log. Fully responsive: 2×2 stats grid, horizontal-scroll tables, bottom tab nav on mobile.
-- **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist. All tables horizontal-scroll on mobile.
-- **Settings** — Three sub-tabs:
+All pages have their own URL routes (`/#/`, `/#/rankings`, `/#/settings`, `/#/logs`). Sub-tabs also have routes (e.g., `/#/settings/fees`, `/#/logs/auth`, `/#/rankings/historical`). Browser back/forward and refresh work correctly.
+
+- **Dashboard** — Real-time overview: portfolio P&L (sim + demo), trade/transfer stats, demo exchange status, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`) and live Cur Net% column, balance table, price grid, demo portfolio comparison, recent trades/transfers, rotation log. Fully responsive: 2×2 stats grid, horizontal-scroll tables, bottom tab nav on mobile.
+- **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist. Performance charts section (cumulative P&L, hourly P&L, exchange profit contribution) using recharts. Markdown export ("Copy MD") for sharing data with Claude. All tables horizontal-scroll on mobile.
+- **Settings** — Three sub-tabs (routed: `/settings`, `/settings/fees`, `/settings/transfers`). Each setting has a `?` tooltip icon with detailed description (hover on desktop, tap on mobile):
   - **General**: Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: "Restart Bot" button clears saved state and starts fresh with configured capital. Form grids stack single-column on mobile.
   - **Fee Management**: Per-exchange fee configuration — base taker rate, token discount toggle+%, fee model (received/spent/token), mechanism (instant/rebate/tier), referral cashback toggle+%+settlement delay, zero-fee pairs. Shows computed effective rates with formula breakdown. Cashback stats (pending/credited). Real mode banner. Save button with 5s cooldown. Hot-applied without restart.
   - **Transfer Fees**: Per-exchange withdrawal fee configuration — per-network fees (flat/percentage/conditional), preferred network selector (auto=cheapest), enable/disable individual networks. Shows effective fee and cheapest network per exchange. Save button with 5s cooldown. Hot-applied without restart.
@@ -384,14 +386,14 @@ Full authentication system for the WebSocket dashboard:
 - **Rate limiting**: 10 attempts per IP, 1-hour block after exhaustion. State persisted to `logs/auth/rate_limits.json` (survives restarts). CAPTCHA failures also count toward rate limit.
 - **IP whitelist**: Optional, configurable from Settings page. Validated with `ipaddress` module.
 - **reCAPTCHA v2**: "I'm not a robot" checkbox appears after 3 failed attempts (requires Google reCAPTCHA v2 keys in `.env`). Warning logged at startup if keys not configured.
-- **Email notifications**: Gmail SMTP alerts on successful login and IP block (requires Gmail App Password in `.env`). All user-controlled values HTML-escaped.
+- **Email notifications**: Gmail SMTP alerts on successful login and IP block (requires Gmail App Password in `.env`). All user-controlled values HTML-escaped. Email suppressed during 30s grace period after bot restart (prevents spam from auto-reconnection).
 - **Auth log**: All auth events persisted to `logs/auth/auth_events.jsonl` (5MB rotation, 2 backup files), loaded on startup (500 max), viewable in Logs → Auth Logs tab. Passwords masked (first 2 chars + asterisks). Legacy plaintext passwords stripped on load.
 - **Dedicated auth logger**: Human-readable log at `logs/auth/auth.log`
 - **X-Forwarded-For**: Only trusted from IPs in `TRUSTED_PROXIES` (default: `127.0.0.1,::1`). Prevents IP spoofing to bypass rate limits/whitelist.
 - **Origin validation**: When `ALLOWED_ORIGINS` is set, WebSocket connections from unknown origins are rejected (CSRF protection).
 - **Settings validation**: All settings validated against schema (type, min/max ranges). Unknown keys rejected. IP whitelist entries validated. 5s cooldown between settings saves.
 - **Bind host**: Default `127.0.0.1` (behind nginx). Override with `DASHBOARD_BIND_HOST=0.0.0.0` for direct access.
-- **IP denied flash prevention**: Connecting screen text is delayed 1.5s so IP-denied users see only a spinner before the "You are not allowed here" page.
+- **IP denied priority**: Denied IPs see nothing rendered (blank screen) until `auth_denied` arrives, then immediately the "You are not allowed here" page. No spinner, no loading text — `wsInitialized` gate ensures zero UI leakage.
 
 ### Bot Logging
 
@@ -427,31 +429,38 @@ Session state survives restarts (including deploys via `systemctl restart`). `St
 - State stored in `state/session.json` (gitignored)
 - `run()` methods guard timestamps (`_start_time`, `_discovery_start`) to avoid overwriting restored values
 
-**Restart button:** Settings → Danger Zone → "Restart Bot" clears saved state and restarts the process via `os.execv()`. Starts fresh with configured capital. Works both locally and under systemd.
+**Restart button:** Settings → Danger Zone → "Restart Bot" clears saved state and restarts the process via `os.execv()`. Starts fresh with configured capital. Works both locally and under systemd. On restart: writes `state/restart_marker` file, client receives `restart_ack` → preserves auth state and shows stale data with yellow "Reconnecting..." indicator in header, auto-reconnects in ~2-5s without re-login. Email notifications suppressed during 30s grace period after restart.
 
 ### XLSX Export
 
 Click "Export XLSX" on the Rankings page. 18 sheets: Summary, Rolling Rankings, Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange (Rolling/Historical), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History, Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations, Fee Configuration, Transfer Configuration, Discrepancies.
 
+### Markdown Export
+
+Click "Copy MD" on the Rankings page to copy markdown tables to clipboard (for sharing with Claude). Sections: Session Summary, Rolling Rankings, Historical Rankings, Exchange Rankings, Recent Trades (last 50), Recent Transfers (last 20). Generated by `exportMarkdown.ts`.
+
 ### Key Dashboard Files
 
 | File | Purpose |
 |------|---------|
-| `dashboard/src/App.tsx` | Main layout, tab routing, WebSocket state, IP-denied flash prevention |
+| `dashboard/src/App.tsx` | Main layout, HashRouter routing, WebSocket state, IP-denied priority gate, restart reconnection |
 | `dashboard/src/types.ts` | All TypeScript interfaces (Trade, SymbolRanking, AdaptiveConfig, ConfigSnapshot, AuthLogEntry, BotLogEntry, DemoComparisonState, etc.) |
-| `dashboard/src/hooks/useWebSocket.ts` | WebSocket connection, auth flow, state management, export callbacks |
+| `dashboard/src/hooks/useWebSocket.ts` | WebSocket connection, auth flow, state management, restart_ack handling, wsInitialized gate, export callbacks |
 | `dashboard/src/components/LoginPage.tsx` | Login form with reCAPTCHA integration |
 | `dashboard/src/components/LogsPage.tsx` | Unified Logs page container with Bot Logs / Auth Logs sub-tabs |
 | `dashboard/src/components/BotLogsTab.tsx` | Terminal-style real-time bot log viewer with filters and auto-scroll |
 | `dashboard/src/components/AuthLogPage.tsx` | Auth event log with filtering/search and CSV export |
 | `dashboard/src/components/ExportLogsModal.tsx` | Reusable export modal with time presets, custom UTC picker, filter toggle |
-| `dashboard/src/components/SymbolRankings.tsx` | Main page ranking card |
-| `dashboard/src/components/RankingPage.tsx` | Full ranking analysis page |
+| `dashboard/src/components/SymbolRankings.tsx` | Main page ranking card with Cur Net% column |
+| `dashboard/src/components/RankingPage.tsx` | Full ranking analysis page with performance charts and markdown export |
+| `dashboard/src/components/PerformanceCharts.tsx` | Recharts: cumulative P&L, hourly P&L, exchange profit contribution |
+| `dashboard/src/components/Tooltip.tsx` | Reusable `?` icon tooltip (hover/tap) for settings descriptions |
 | `dashboard/src/components/DemoComparison.tsx` | Per-exchange demo vs sim comparison cards with discrepancy log |
 | `dashboard/src/components/SettingsPage.tsx` | Settings form with General/Fee Management/Transfer Fees sub-tabs, adaptive mode toggle, IP whitelist, restart button |
 | `dashboard/src/components/FeeManagementTab.tsx` | Per-exchange fee configuration UI — discounts, referral cashback, zero-fee pairs |
 | `dashboard/src/components/TransferFeeManagementTab.tsx` | Per-exchange transfer fee configuration UI — per-network fees, preferred network, enable/disable |
 | `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 18 sheets |
+| `dashboard/src/utils/exportMarkdown.ts` | Markdown table export for clipboard (rankings, trades, transfers) |
 | `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings, log export from disk, restart handler |
 | `demo_fetcher.py` | Demo/testnet portfolio fetcher: REST API clients for Binance/OKX/Bybit, baseline snapshots, discrepancy detection |
 | `state_manager.py` | Session state persistence: atomic save/load, periodic saves, clear for fresh restart |
@@ -757,7 +766,7 @@ Detailed reference documents in `documentations/`:
 
 - **Language:** Python 3.12+
 - **Async:** asyncio + websockets library
-- **Dashboard:** React 18 + TypeScript + Vite + Tailwind CSS
+- **Dashboard:** React 18 + TypeScript + Vite + Tailwind CSS + react-router-dom (HashRouter) + recharts
 - **Data:** CSV snapshots per exchange per symbol (1s intervals)
 - **Architecture:** BaseFetcher with exchange-specific subclasses, ArbitrageMonitor reads all fetcher states, SymbolOptimizer handles symbol discovery/rotation/scoring, BalanceTracker simulates capital management
 - **Output:** Real-time dashboard + XLSX export + console arbitrage table
