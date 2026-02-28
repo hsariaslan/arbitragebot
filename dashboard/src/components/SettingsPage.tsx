@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
+import { NavLink, useParams } from 'react-router-dom';
 import type { Settings, ExchangeFeeConfig, ExchangeTransferConfig, FeeStats } from '../types';
 import FeeManagementTab from './FeeManagementTab';
 import TransferFeeManagementTab from './TransferFeeManagementTab';
+import Tooltip from './Tooltip';
 
 interface SettingsPageProps {
   currentSettings: Settings;
@@ -17,7 +19,8 @@ interface SettingsPageProps {
 type SettingsSubTab = 'general' | 'fees' | 'transfers';
 
 export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage, feeConfigs, feeRealMode, feeStats, transferConfigs }: SettingsPageProps) {
-  const [activeSubTab, setActiveSubTab] = useState<SettingsSubTab>('general');
+  const { subTab } = useParams<{ subTab?: string }>();
+  const activeSubTab: SettingsSubTab = subTab === 'fees' ? 'fees' : subTab === 'transfers' ? 'transfers' : 'general';
   const [tradeAmount, setTradeAmount] = useState(currentSettings.trade_amount_usd);
   const [totalCapital, setTotalCapital] = useState(currentSettings.total_capital ?? 1800);
   const [showConfirm, setShowConfirm] = useState(false);
@@ -136,15 +139,19 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     <div className="space-y-4 sm:space-y-6 max-w-3xl">
       {/* Sub-tab navigation */}
       <div className="flex gap-1 bg-slate-800/50 rounded-lg p-1">
-        {([['general', 'General'], ['fees', 'Fee Management'], ['transfers', 'Transfer Fees']] as const).map(([key, label]) => (
-          <button key={key} onClick={() => setActiveSubTab(key)}
-            className={`flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-              activeSubTab === key
+        {([
+          ['/settings', 'General'],
+          ['/settings/fees', 'Fee Management'],
+          ['/settings/transfers', 'Transfer Fees'],
+        ] as const).map(([to, label]) => (
+          <NavLink key={to} to={to} end
+            className={({ isActive }) => `flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors text-center ${
+              isActive
                 ? 'bg-slate-700 text-white'
                 : 'text-slate-400 hover:text-slate-300 hover:bg-slate-700/50'
             }`}>
             {label}
-          </button>
+          </NavLink>
         ))}
       </div>
 
@@ -167,13 +174,18 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Capital</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Total Capital ($)</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Total Capital ($)
+              <Tooltip text="Total USD capital distributed across all exchanges. Used for per-symbol allocation and adaptive trade sizing. Default: $1800" />
+            </label>
             <input type="number" value={totalCapital} min={100} onChange={d(setTotalCapital, 1800)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Distributed evenly across all connected exchanges</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Trade Amount ($)</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Trade Amount ($)
+              <Tooltip text="Base USD amount per trade before multipliers. With adaptive mode: actual size = trade_amount x symbol_multiplier x tick_quality_factor. Lower values ($10-20) work better with limited capital. Default: $20" />
+            </label>
             <div className="flex items-center gap-2">
               {[10, 50, 100, 200].map(amt => (
                 <button key={amt} onClick={() => { setDirty(true); setTradeAmount(amt); }}
@@ -194,22 +206,20 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               onChange={e => { setDirty(true); setAdaptiveMode(e.target.checked); }}
               className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
             <span className="text-sm text-slate-300">Enable Adaptive Mode</span>
+            <Tooltip text="Dynamically adjusts trade sizes, rebalance amounts, and thresholds based on real-time market conditions and available capital. Recommended for small capital (<$5k). Default: enabled" />
           </label>
-          <p className="text-xs text-slate-500 ml-7 mt-1">
-            Dynamically adjusts trade sizes, rebalance amounts, and thresholds based on real-time market conditions and available capital.
-          </p>
         </div>
         <div className="mt-4">
-          <label className="block text-sm text-slate-300 mb-1">Execution Mode</label>
+          <label className="flex items-center text-sm text-slate-300 mb-1">
+            Execution Mode
+            <Tooltip text="Simulation: no real orders (default). Demo: places real orders on exchange testnets alongside simulation. Requires API keys in .env. Restart required to take effect." />
+          </label>
           <select value={executionMode}
             onChange={e => { setDirty(true); setExecutionMode(e.target.value); }}
             className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
             <option value="simulation">Simulation</option>
             <option value="demo">Demo (Testnet)</option>
           </select>
-          <p className="text-xs text-slate-500 mt-1">
-            Demo mode places real orders on exchange testnets. Requires API keys in .env and a restart to take effect.
-          </p>
         </div>
       </div>
 
@@ -222,32 +232,42 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               onChange={e => { setDirty(true); setAutoRotate(e.target.checked); }}
               className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
             <span className="text-sm text-slate-300">Enable automatic symbol rotation</span>
+            <Tooltip text="When enabled, the optimizer automatically swaps underperforming symbols for better candidates. When disabled, only the initial symbol set is traded. Default: enabled" />
           </label>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
-              <label className="block text-xs text-slate-500 mb-1">Min Active Symbols</label>
+              <label className="flex items-center text-xs text-slate-500 mb-1">
+                Min Active Symbols
+                <Tooltip text="Starting number of active symbols after discovery. More symbols spread capital thinner but increase diversification. Default: 3" />
+              </label>
               <input type="number" value={numActiveSymbols} min={1} max={20} onChange={d(setNumActiveSymbols, 3)}
                 className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
             </div>
             <div>
-              <label className="block text-xs text-slate-500 mb-1">Max Active Symbols</label>
+              <label className="flex items-center text-xs text-slate-500 mb-1">
+                Max Active Symbols
+                <Tooltip text="Maximum symbols that can be active simultaneously. Expansion happens when strong candidates appear. Higher values need more capital. Default: 8" />
+              </label>
               <input type="number" value={maxActiveSymbols} min={1} max={30} onChange={d(setMaxActiveSymbols, 8)}
                 className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
             </div>
             <div>
-              <label className="block text-xs text-slate-500 mb-1">Scoring Window (s)</label>
+              <label className="flex items-center text-xs text-slate-500 mb-1">
+                Scoring Window (s)
+                <Tooltip text="Rolling time window (in seconds) for scoring symbol profitability. Longer windows are more stable but slower to react. Default: 1800s (30 min)" />
+              </label>
               <input type="number" value={scoringWindow} min={60} onChange={d(setScoringWindow, 1800)}
                 className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
             </div>
             <div>
-              <label className="block text-xs text-slate-500 mb-1">Eval Interval (s)</label>
+              <label className="flex items-center text-xs text-slate-500 mb-1">
+                Eval Interval (s)
+                <Tooltip text="How often the optimizer evaluates rotations, expansions, and demotions. Shorter intervals react faster but cause more churn. Default: 300s (5 min)" />
+              </label>
               <input type="number" value={evaluationInterval} min={30} onChange={d(setEvaluationInterval, 300)}
                 className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
             </div>
           </div>
-          <p className="text-xs text-slate-500">
-            Discovery scores all 60 symbols. Active set starts at min and can expand to max when confirmed candidates appear.
-          </p>
         </div>
       </div>
 
@@ -256,69 +276,89 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Advanced Optimizer</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Safety Multiplier</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Safety Multiplier
+              <Tooltip text="For rotation: estimated hourly gain of new symbol must exceed safety_multiplier x switching cost. Higher values prevent frequent rotations. Default: 2.0" />
+            </label>
             <input type="number" value={safetyMultiplier} min={1} step={0.5} onChange={d(setSafetyMultiplier, 2.0)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Hourly gain must exceed N x switching cost</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Min Rebalance Score</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Min Rebalance Score
+              <Tooltip text="Symbols below this score won't trigger rebalancing. Prevents wasting transfer fees on low-performing symbols. Default: 0.0001" />
+            </label>
             <input type="number" value={minRebalanceScore} min={0} step={0.0001}
               onChange={d(setMinRebalanceScore, 0.0001)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Skip transfers for symbols below this score</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Confirmation Period (s)</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Confirmation Period (s)
+              <Tooltip text="How long a candidate symbol must sustain a high score before it's eligible for activation. Prevents short-lived spikes from triggering rotations. Default: 300s (5 min)" />
+            </label>
             <input type="number" value={confirmationPeriod} min={0} onChange={d(setConfirmationPeriod, 300)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">How long a candidate must sustain high score</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Promotion Threshold</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Promotion Threshold
+              <Tooltip text="Minimum score for a symbol to enter the watchlist as a candidate. Symbols below this are ignored for promotion. Default: 0.0001" />
+            </label>
             <input type="number" value={promotionThreshold} min={0} step={0.0001}
               onChange={d(setPromotionThreshold, 0.0001)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Min score to enter watchlist</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Demotion Threshold</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Demotion Threshold
+              <Tooltip text="Score below which the demotion timer starts. A symbol must stay below this for the full demotion period to be removed. Set to 0 to only demote at exactly zero. Default: 0.0" />
+            </label>
             <input type="number" value={demotionThreshold} min={0} step={0.0001}
               onChange={d(setDemotionThreshold, 0.0)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Score below which demotion timer starts</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Demotion Period (s)</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Demotion Period (s)
+              <Tooltip text="How long a symbol must stay below demotion threshold before being deactivated. Tiered: weaker scores are demoted faster. Default: 600s (10 min)" />
+            </label>
             <input type="number" value={demotionPeriod} min={0} onChange={d(setDemotionPeriod, 600)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">How long below threshold before removal</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Min Net Profit %</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Min Net Profit %
+              <Tooltip text="Minimum net spread (after fees) required to execute a trade. Higher values skip marginal opportunities. Set lower for high-frequency, low-spread strategies. Default: 0.02%" />
+            </label>
             <input type="number" value={minNetProfitPct} min={0} step={0.01}
               onChange={d(setMinNetProfitPct, 0.02)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Don't trade unless net spread exceeds this %</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Rebalance Cooldown (s)</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Rebalance Cooldown (s)
+              <Tooltip text="Minimum seconds between rebalances for the same exchange/direction pair. Prevents rapid-fire transfers. Default: 30s" />
+            </label>
             <input type="number" value={rebalanceCooldown} min={0} onChange={d(setRebalanceCooldown, 30)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Min seconds between rebalances per exchange</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Miss Streak Before Rebalance</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Miss Streak Before Rebalance
+              <Tooltip text="Consecutive missed trades (due to insufficient balance) before triggering a rebalance. Dynamic in adaptive mode: adjusts 10-30 based on trade frequency. Default: 15" />
+            </label>
             <input type="number" value={minMissesBeforeRebalance} min={1} max={100} step={1}
               onChange={d(setMinMissesBeforeRebalance, 5)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Consecutive missed trades before triggering rebalance</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Rebalance ROI Horizon (s)</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Rebalance ROI Horizon (s)
+              <Tooltip text="Maximum time to recoup the cost of a rebalance transfer. If estimated recovery time exceeds this, the rebalance is blocked. Default: 1800s (30 min)" />
+            </label>
             <input type="number" value={rebalanceRoiHorizon} min={0} onChange={d(setRebalanceRoiHorizon, 1800)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Max seconds to recoup rebalance cost</p>
           </div>
         </div>
 
@@ -326,51 +366,63 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-3">Score Thresholds</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Trading Threshold</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Trading Threshold
+              <Tooltip text="Minimum score to allow trading and rebalancing for a symbol. Below this, the symbol gets trade_multiplier = 0 (no trading). Default: 0.01" />
+            </label>
             <input type="number" value={tradingScoreThreshold} min={0.001} max={0.5} step={0.001}
               onChange={d(setTradingScoreThreshold, 0.01)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Min score to trade/rebalance (default 0.01)</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Strong Threshold</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Strong Threshold
+              <Tooltip text="Score for the Strong tier. Strong symbols get 2-3x trade multiplier and up to 2 exchanges per direction. Default: 0.1" />
+            </label>
             <input type="number" value={strongScoreThreshold} min={0.01} max={1.0} step={0.01}
               onChange={d(setStrongScoreThreshold, 0.1)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Score for Strong tier (default 0.1)</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Very Strong Threshold</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Very Strong Threshold
+              <Tooltip text="Score for the Very Strong tier. Very Strong symbols get 3-4x trade multiplier and up to 3 exchanges per direction. Default: 0.3" />
+            </label>
             <input type="number" value={veryStrongScoreThreshold} min={0.05} max={2.0} step={0.05}
               onChange={d(setVeryStrongScoreThreshold, 0.3)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Score for Very Strong tier (default 0.3)</p>
           </div>
         </div>
 
         {/* Net P&L Gate */}
         <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-3">Net P&L Gate</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Warmup Trades</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Warmup Trades
+              <Tooltip text="Number of trades before the net P&L gate activates. During warmup, rebalancing is always allowed. Prevents premature blocking from a few early bad trades. Default: 10" />
+            </label>
             <input type="number" value={netPnlGateWarmupTrades} min={1} max={200} step={1}
               onChange={d(setNetPnlGateWarmupTrades, 10)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Min trades before P&L gate activates (default 10)</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">Grace Period (s)</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Grace Period (s)
+              <Tooltip text="Time after bot start before the net P&L gate activates. During grace period, rebalancing is always allowed regardless of profitability. Default: 1800s (30 min)" />
+            </label>
             <input type="number" value={netPnlGateGraceSeconds} min={60} max={7200} step={60}
               onChange={d(setNetPnlGateGraceSeconds, 1800)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">Grace period before blocking rebalances (default 1800s)</p>
           </div>
           <div>
-            <label className="block text-xs text-slate-500 mb-1">ROI Gate Divisor</label>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              ROI Gate Divisor
+              <Tooltip text="Controls rebalancing sensitivity. ROI threshold = fee_rate / divisor. Higher values (5-10) allow rebalancing at lower expected profit, good for small capital. Default: 3" />
+            </label>
             <input type="number" value={rebalanceRoiDivisor} min={2} max={20} step={1}
               onChange={d(setRebalanceRoiDivisor, 3)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            <p className="text-xs text-slate-500 mt-1">ROI threshold = fee_rate / divisor. Higher = easier rebalance (default 3, try 5-10 for small capital)</p>
           </div>
         </div>
       </div>
@@ -384,13 +436,14 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               onChange={e => setIpWhitelistEnabled(e.target.checked)}
               className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
             <span className="text-sm text-slate-300">Enable IP Whitelist</span>
+            <Tooltip text="Restrict dashboard access to specific IP addresses. When enabled, connections from non-whitelisted IPs are immediately denied. Leave the list empty to allow all." />
           </label>
-          <p className="text-xs text-slate-500 ml-7 -mt-2">
-            Only allow connections from specific IP addresses. Leave empty to allow all.
-          </p>
           {ipWhitelistEnabled && (
             <div>
-              <label className="block text-xs text-slate-500 mb-1">Allowed IPs (comma-separated)</label>
+              <label className="flex items-center text-xs text-slate-500 mb-1">
+                Allowed IPs (comma-separated)
+                <Tooltip text="Enter IPv4 or IPv6 addresses separated by commas. Changes take effect immediately after saving. Example: 212.253.218.204, 10.0.0.1" />
+              </label>
               <input type="text" value={ipWhitelist}
                 onChange={e => setIpWhitelist(e.target.value)}
                 placeholder="e.g. 212.253.218.204, 10.0.0.1"
