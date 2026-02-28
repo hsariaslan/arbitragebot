@@ -397,6 +397,13 @@ Full authentication system for the WebSocket dashboard:
 - **Daily rotation**: `TimedRotatingFileHandler` rotates at 00:00 UTC, keeps 30 days. Files: `logs/coirnabot.log` (current), `logs/coirnabot.log.YYYY-MM-DD` (rotated).
 - **DashboardLogHandler**: Custom `logging.Handler` in `dashboard_server.py`. Captures entries in-memory (`deque` for live broadcast, `list` for session export). Parses `[Component]` prefix from log messages.
 - **Latency logging**: `[Latency]` component prefix. Every 60s logs per-exchange: processing time (avg/min/max ms), data freshness (avg/max age ms), symbols with data count. Also logs first-data-after-connect timing. Filterable in Bot Logs tab.
+- **Diagnostic logging** (added v0.13.5): Six production-level log lines for self-sufficient diagnostics:
+  - `[Config]` — All key config values at startup (trade_amount, capital, adaptive, min_net, max_symbols, execution_mode)
+  - `[Trade]` — Per-trade execution: symbol, exchanges, buy/sell prices, qty, size, profit, net%
+  - `[Monitor] SIZE_ZERO` — Why trade_size=0: which constraint hit (usdt_avail/crypto_val/base < min_trade). Throttled: first per symbol, then every 30th.
+  - `[Rebalance] BLOCKED` — Why rebalancing was blocked: which gate rejected (score_gate/net_pnl_gate/roi_gate) with values. Throttled per miss_key.
+  - `[Balance] Snapshot` — Every 5 min: per-exchange total value (USDT + crypto USD) and portfolio total
+  - `[Session]` — Every 5 min: aggregate trades, pnl, transfer fees, cashback (credited/pending), net, $/hr
 - **Disk export**: `_read_bot_logs_from_disk()` reads rotated + current log files for cross-day export ranges. `_read_auth_logs_from_disk()` reads JSONL files. Both use `asyncio.to_thread()` for non-blocking I/O.
 
 ### State Persistence
