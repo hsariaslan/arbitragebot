@@ -323,22 +323,29 @@ class BaseFetcher(abc.ABC):
                 # Keep only last 1000 samples
                 self._latency_samples = samples[-1000:] if count > 1000 else []
 
-                # Compute data freshness: avg age of state entries
+                # Compute data freshness: separate active vs dormant symbols
                 now = time.time()
-                ages = [
-                    (now - s.received_at) * 1000
-                    for s in self._state.values()
-                    if s.received_at > 0
-                ]
-                symbols_with_data = len(ages)
-                avg_age_ms = sum(ages) / len(ages) if ages else 0.0
-                max_age_ms = max(ages) if ages else 0.0
+                _MAX_FRESHNESS_AGE_MS = 120_000  # 2 minutes
+                active_ages: list[float] = []
+                dormant_count = 0
+                for s in self._state.values():
+                    if s.received_at > 0:
+                        age_ms = (now - s.received_at) * 1000
+                        if age_ms <= _MAX_FRESHNESS_AGE_MS:
+                            active_ages.append(age_ms)
+                        else:
+                            dormant_count += 1
 
+                avg_age_ms = sum(active_ages) / len(active_ages) if active_ages else 0.0
+                max_age_ms = max(active_ages) if active_ages else 0.0
+                dormant_str = f", {dormant_count} dormant" if dormant_count > 0 else ""
+
+                msgs_per_sec = count / self._latency_log_interval
                 logger.info(
                     f"[Latency] [{self.exchange_name}] "
                     f"proc: avg={avg_ms:.2f}ms min={min_ms:.2f}ms max={max_ms:.2f}ms "
-                    f"({count} msgs) | "
+                    f"({count} msgs, rate={msgs_per_sec:.0f}/s) | "
                     f"freshness: avg={avg_age_ms:.0f}ms max={max_age_ms:.0f}ms "
-                    f"({symbols_with_data}/{len(self.symbols)} symbols)"
+                    f"({len(active_ages)} active{dormant_str} / {len(self.symbols)} symbols)"
                 )
             await asyncio.sleep(self._latency_log_interval)
