@@ -29,6 +29,8 @@ import logging
 import time
 from typing import Any
 
+import websockets
+
 from config import MEXC_EXCHANGE_NAME, MEXC_WS_URL
 from fetchers.base import BaseFetcher, PriceState
 
@@ -225,3 +227,184 @@ class MEXCFetcher(BaseFetcher):
     def _parse_message(self, raw_message: dict[str, Any]) -> tuple[str, PriceState] | None:
         """Not used — MEXC uses binary protobuf parsed in _listen()."""
         return None
+
+    async def run(self) -> None:
+        """Override run to handle 2 connections when symbols > 30."""
+        if len(self.symbols) <= 30:
+            await super().run()
+            return
+
+        mid = len(self.symbols) // 2
+        batch1 = self.symbols[:mid]
+        batch2 = self.symbols[mid:]
+
+        logger.info(
+            f"[{self.exchange_name}] Splitting {len(self.symbols)} symbols "
+            f"across 2 connections ({len(batch1)} + {len(batch2)})"
+        )
+
+        fetcher1 = _MEXCSubFetcher(self, batch1)
+        fetcher2 = _MEXCSubFetcher(self, batch2)
+
+        self._running = True
+        self._ensure_output_dir()
+        self._connect_time = time.time()
+        self._first_data_time = 0.0
+
+        try:
+            await asyncio.gather(
+                fetcher1.run(),
+                fetcher2.run(),
+                self._snapshot_loop(),
+                self._latency_log_loop(),
+            )
+        except Exception as e:
+            if self._running:
+                logger.error(f"[{self.exchange_name}] Multi-connection error: {e}")
+
+    def stop(self) -> None:
+        """Signal stop for main fetcher and any sub-fetchers."""
+        self._running = False
+        logger.info(f"[{self.exchange_name}] Stop requested")
+
+
+class _MEXCSubFetcher:
+    """Internal helper: single MEXC WS connection for a subset of symbols (≤30)."""
+
+    def __init__(self, parent: MEXCFetcher, symbols: list[str]) -> None:
+        self._parent = parent
+        self._symbols = symbols
+        self._last_data_time: float = 0.0
+
+    async def run(self) -> None:
+        """Connect and listen loop with reconnection."""
+        from config import RECONNECT_INITIAL_DELAY, RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY
+
+        delay = RECONNECT_INITIAL_DELAY
+        while self._parent._running:
+            try:
+                await self._connect_and_listen()
+                delay = RECONNECT_INITIAL_DELAY
+            except Exception as e:
+                if not self._parent._running:
+                    break
+                logger.error(
+                    f"[{self._parent.exchange_name}] Sub-connection error: {e}"
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY)
+
+    async def _connect_and_listen(self) -> None:
+        url = self._parent._build_ws_url()
+        kwargs = self._parent._ws_connect_kwargs()
+
+        async with websockets.connect(url, **kwargs) as ws:
+            self._parent._ws_connected = True
+            logger.info(
+                f"[{self._parent.exchange_name}] Sub-connection for "
+                f"{len(self._symbols)} symbols connected"
+            )
+
+            # Subscribe (single batch, all ≤30 — within MEXC limit)
+            params = [
+                f"spot@public.aggre.bookTicker.v3.api.pb@100ms@{s}"
+                for s in self._symbols
+            ]
+            await ws.send(json.dumps({"method": "SUBSCRIPTION", "params": params}))
+            logger.info(
+                f"[{self._parent.exchange_name}] Subscribed to "
+                f"{len(self._symbols)} bookTickers"
+            )
+
+            listener = asyncio.create_task(self._listen(ws))
+            keepalive = asyncio.create_task(self._keep_alive(ws))
+            staleness = asyncio.create_task(self._staleness_watchdog(ws))
+
+            done, pending = await asyncio.wait(
+                [listener, keepalive, staleness],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+
+    async def _listen(self, ws: Any) -> None:
+        """Listen for binary protobuf messages and update parent state."""
+        async for raw in ws:
+            if not self._parent._running:
+                break
+            try:
+                t0 = time.time()
+
+                # Text frames are JSON control messages (subscription ack, pong)
+                if isinstance(raw, str):
+                    continue
+
+                # Binary frames are protobuf
+                result = _parse_book_ticker_pb(raw)
+                if result is None:
+                    continue
+
+                symbol, bid, bid_qty, ask, ask_qty, send_time_ms = result
+                if symbol not in self._parent._state:
+                    continue
+
+                now = time.time()
+                updated_at = send_time_ms / 1000.0 if send_time_ms else 0.0
+
+                price_data = PriceState(
+                    bid=bid,
+                    ask=ask,
+                    bid_qty=bid_qty,
+                    ask_qty=ask_qty,
+                    last_price="",
+                    volume="",
+                    updated_at=updated_at,
+                    received_at=now,
+                )
+                self._parent._last_data_received = now
+                self._last_data_time = now
+                self._parent._state[symbol] = price_data
+                self._parent._message_count += 1
+
+                proc_ms = (now - t0) * 1000
+                self._parent._latency_samples.append(proc_ms)
+
+                if self._parent._first_data_time == 0.0:
+                    self._parent._first_data_time = now
+                    conn_to_data_ms = (now - self._parent._connect_time) * 1000
+                    logger.info(
+                        f"[Latency] [{self._parent.exchange_name}] "
+                        f"First data received in {conn_to_data_ms:.0f}ms "
+                        f"after connect"
+                    )
+            except Exception as e:
+                logger.debug(f"[{self._parent.exchange_name}] Parse error: {e}")
+
+    async def _keep_alive(self, ws: Any) -> None:
+        """Send {"method": "PING"} every 15 seconds."""
+        while self._parent._running:
+            try:
+                await ws.send(json.dumps({"method": "PING"}))
+            except Exception:
+                break
+            await asyncio.sleep(15)
+
+    async def _staleness_watchdog(self, ws: Any) -> None:
+        """Force reconnect if no data received for 30 seconds."""
+        while self._parent._running:
+            await asyncio.sleep(5.0)
+            if self._last_data_time > 0:
+                stale = time.time() - self._last_data_time
+                if stale >= self._parent.STALENESS_RECONNECT_SECONDS:
+                    logger.warning(
+                        f"[{self._parent.exchange_name}] Sub-connection stale "
+                        f"({stale:.0f}s, {len(self._symbols)} symbols), "
+                        f"reconnecting"
+                    )
+                    self._last_data_time = 0.0
+                    await ws.close()
+                    return
