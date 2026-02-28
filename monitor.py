@@ -873,10 +873,16 @@ class ArbitrageMonitor:
 
                             if score_ok and rebal_ok:
                                 prices = self._get_current_prices()
-                                self._balance.try_rebalance(
+                                rebal_transfers = self._balance.try_rebalance(
                                     buy_ex, sell_ex, sym, self._trade_amount, prices
                                 )
-                                self._miss_streak[miss_key] = 0
+                                if rebal_transfers:
+                                    self._miss_streak[miss_key] = 0
+                                else:
+                                    logger.info(
+                                        f"[Rebalance] EMPTY {sym} {buy_ex}->{sell_ex} "
+                                        f"streak={streak}: try_rebalance returned no transfers"
+                                    )
                             else:
                                 streak = self._miss_streak.get(miss_key, 0)
                                 self._rebalance_block_log_count[miss_key] += 1
@@ -1017,10 +1023,17 @@ class ArbitrageMonitor:
 
                             if score_ok and rebal_ok:
                                 prices = self._get_current_prices()
-                                self._balance.try_rebalance(
+                                rebal_transfers = self._balance.try_rebalance(
                                     buy_ex, sell_ex, sym, self._trade_amount, prices
                                 )
-                                self._miss_streak[miss_key] = 0
+                                if rebal_transfers:
+                                    self._miss_streak[miss_key] = 0
+                                else:
+                                    streak = self._miss_streak.get(miss_key, 0)
+                                    logger.info(
+                                        f"[Rebalance] EMPTY {sym} {buy_ex}->{sell_ex} "
+                                        f"streak={streak}: try_rebalance returned no transfers"
+                                    )
                             else:
                                 streak = self._miss_streak.get(miss_key, 0)
                                 self._rebalance_block_log_count[miss_key] += 1

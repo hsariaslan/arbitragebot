@@ -24,7 +24,6 @@ from config import (
     ACTIVE_SYMBOLS,
     INITIAL_BALANCE_PER_SYMBOL,
     REBALANCE_AMOUNT,
-    REBALANCE_THRESHOLD,
 )
 
 from typing import TYPE_CHECKING
@@ -164,6 +163,15 @@ class BalanceTracker:
     @property
     def initialized(self) -> bool:
         return self._initialized
+
+    @property
+    def _rebalance_buffer(self) -> float:
+        """Dynamic buffer for rebalance eligibility, scales with trade amount.
+
+        Replaces the fixed REBALANCE_THRESHOLD ($50). With $10 trades this
+        returns $20, making internal sell viable for smaller positions.
+        """
+        return self._trade_amount * 2
 
     def _check_hourly_transfer_budget(self, proposed_fee: float) -> bool:
         """Return True if external transfer is within hourly budget."""
@@ -385,7 +393,11 @@ class BalanceTracker:
         """
         # Cooldown check
         cooldown_key = f"{exchange}:usdt"
-        if now - self._last_rebalance.get(cooldown_key, 0) < self._rebalance_cooldown:
+        remaining = self._rebalance_cooldown - (now - self._last_rebalance.get(cooldown_key, 0))
+        if remaining > 0:
+            logger.debug(
+                f"[Balance] USDT rebalance {exchange}: cooldown {remaining:.0f}s remaining"
+            )
             return None
 
         if self._adaptive_mode:
@@ -399,16 +411,17 @@ class BalanceTracker:
         external_cost = float("inf")
         external_source = None
         external_rebal = rebal
+        buf = self._rebalance_buffer
         eligible = [
             ex for ex in self._exchanges
-            if ex != exchange and self.usdt[ex] >= rebal + REBALANCE_THRESHOLD
+            if ex != exchange and self.usdt[ex] >= rebal + buf
         ]
         # Fallback: if no source covers full amount, try 1× trade_amount from cheapest source
         if not eligible:
             min_rebal = self._trade_amount
             smaller_eligible = [
                 ex for ex in self._exchanges
-                if ex != exchange and self.usdt[ex] >= min_rebal + REBALANCE_THRESHOLD
+                if ex != exchange and self.usdt[ex] >= min_rebal + buf
             ]
             if smaller_eligible:
                 eligible = smaller_eligible
@@ -451,7 +464,7 @@ class BalanceTracker:
                 internal_sym = sym
                 internal_price = p
 
-        if internal_sym and internal_price > 0 and best_value >= rebal + REBALANCE_THRESHOLD:
+        if internal_sym and internal_price > 0 and best_value >= rebal + self._rebalance_buffer:
             internal_cost = rebal * (self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001)
 
         # --- Pick cheapest ---
@@ -521,6 +534,18 @@ class BalanceTracker:
             )
             return transfer
 
+        # Log why USDT rebalance failed
+        best_other = max(
+            (self.usdt[ex] for ex in self._exchanges if ex != exchange),
+            default=0.0,
+        )
+        logger.info(
+            f"[Balance] USDT rebalance FAILED for {exchange}: "
+            f"need=${rebal:.2f}+buf=${buf:.2f}, "
+            f"best_other_usdt=${best_other:.2f}, "
+            f"best_crypto_val=${best_value:.2f}, "
+            f"ext={'blocked' if external_source is None else f'${external_cost:.2f}'}"
+        )
         return None
 
     def _rebalance_crypto(
@@ -540,7 +565,11 @@ class BalanceTracker:
         """
         # Cooldown check
         cooldown_key = f"{exchange}:crypto:{symbol}"
-        if now - self._last_rebalance.get(cooldown_key, 0) < self._rebalance_cooldown:
+        remaining = self._rebalance_cooldown - (now - self._last_rebalance.get(cooldown_key, 0))
+        if remaining > 0:
+            logger.debug(
+                f"[Balance] Crypto rebalance {exchange}/{symbol}: cooldown {remaining:.0f}s remaining"
+            )
             return None
 
         if self._adaptive_mode:
@@ -650,13 +679,13 @@ class BalanceTracker:
         ext_buy_rebal = rebal
         eligible = [
             ex for ex in self._exchanges
-            if ex != exchange and self.usdt[ex] >= rebal + REBALANCE_THRESHOLD
+            if ex != exchange and self.usdt[ex] >= rebal + self._rebalance_buffer
         ]
         if not eligible:
             min_rebal = self._trade_amount
             eligible = [
                 ex for ex in self._exchanges
-                if ex != exchange and self.usdt[ex] >= min_rebal + REBALANCE_THRESHOLD
+                if ex != exchange and self.usdt[ex] >= min_rebal + self._rebalance_buffer
             ]
             if eligible:
                 ext_buy_rebal = min_rebal
@@ -713,6 +742,19 @@ class BalanceTracker:
             )
             return transfer
 
+        # Log why crypto rebalance failed
+        best_crypto_source = max(
+            (self.crypto[ex].get(symbol, 0.0) * price
+             for ex in self._exchanges if ex != exchange),
+            default=0.0,
+        )
+        local_usdt = self.usdt.get(exchange, 0.0)
+        logger.info(
+            f"[Balance] Crypto rebalance FAILED for {symbol} on {exchange}: "
+            f"need=${rebal:.2f}, local_usdt=${local_usdt:.2f}, "
+            f"best_other_crypto=${best_crypto_source:.2f}, "
+            f"crypto_sources={len(crypto_sources)}"
+        )
         return None
 
     def execute_trade(
