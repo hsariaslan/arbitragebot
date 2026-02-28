@@ -38,7 +38,7 @@ All 9 exchanges have working WebSocket fetchers implemented.
 | 8 | **Gate.io** | 0.09% | GT (10% off, enabled) | Post-connect JSON | 60/60 |
 | 9 | **Pionex** | 0.05% | None (VIP tiers only, volume-gated) | Post-connect JSON | 60/60 |
 
-**MEXC note:** Accessible from Bangkok VPS. 0.05% taker fee (lowest after Bitfinex), no discount token needed.
+**MEXC note:** Accessible from Bangkok VPS. 0.05% taker fee (lowest after Bitfinex), no discount token needed. Uses protobuf binary WS messages. 30 sub limit per connection — uses 2 connections for 60 symbols.
 **Pionex note:** Aggregates ~50-60% of order book from Binance (per CTO statement) — Pionex↔Binance arbitrage will be near-zero. Value is in Pionex vs OKX/KuCoin/Gate.io/Bybit/Bitget pairs.
 **Bitfinex note:** 0% taker/maker fees permanent since Dec 17, 2025. Free USDT withdrawals on 14 networks. Uses `tBTCUST` symbol format (UST not USDT). 30 sub limit per WS connection — uses 2 connections for 60 symbols. No BEP20 support. ~40-50 of 60 symbols available as UST pairs.
 
@@ -219,7 +219,7 @@ Transfer each coin on its own native chain (e.g., SOL on Solana, XRP on XRP Ledg
 
 ## Strong-Only Trading
 
-The bot only trades and transfers for **strong** (score ≥ 0.1) and **very strong** (score ≥ 0.3) symbols. All other symbols are scored but not traded. This is defined by `STRONG_SCORE_THRESHOLD = 0.1` in `optimizer.py`.
+The bot only trades and transfers for **strong** (score ≥ 0.1) and **very strong** (score ≥ 0.3) symbols. All other symbols are scored but not traded. Thresholds are configurable via dashboard Settings: `TRADING_SCORE_THRESHOLD` (0.01), `STRONG_SCORE_THRESHOLD` (0.1), `VERY_STRONG_SCORE_THRESHOLD` (0.3) — stored as instance variables `_trading_threshold`, `_strong_threshold`, `_very_strong_threshold` in `optimizer.py`.
 
 ### Rules
 
@@ -228,6 +228,7 @@ The bot only trades and transfers for **strong** (score ≥ 0.1) and **very stro
 - **Trading**: Normal tier (0.01–0.1) gets `trade_multiplier = 0.5–1.5×`. Weak symbols (< 0.01) get `trade_multiplier = 0`.
 - **Rebalancing**: `should_allow_rebalance()` requires score ≥ 0.01 (`TRADING_SCORE_THRESHOLD`). ROI gate, net P&L gate, and transfer worthiness checks protect against unprofitable transfers.
 - **Expansion/Rotation**: Only strong/very_strong candidates can be activated or replace existing symbols.
+- **Faster activation**: Watchlist confirmation period is score-dependent: very strong (≥0.3) confirmed in `confirmation_period × 0.1` (30s default), strong (≥0.1) in `× 0.4` (120s), normal in full period (300s). Strong candidates shouldn't sit idle.
 - **Demotion**: Symbols dropping below 0.1 are demoted on a tiered schedule (faster for weaker scores). No minimum active count protection — better idle than bleeding money on transfers.
 
 ### Focus Tiers & Trade Multipliers
@@ -254,6 +255,7 @@ Instead of spreading capital uniformly across all exchanges, the bot concentrate
 
 `_compute_dominant_pairs(symbol, max_per_direction)` analyzes rolling tick data:
 - Weights each exchange's buyer/seller score by `best_net_pct` (profitability)
+- **Fee-weighted tie-breaking**: Lower-fee exchanges get weight boost in `_select_top()`. Bitfinex (0%) gets ~2× boost vs Bybit (0.10%). Large profitability differences still dominate.
 - Selects top N exchanges per direction (buy/sell), ignoring < 2% weight
 - `max_per_direction` is tier-based: 2 for default/strong, 3 for very_strong
 - Falls back to historical `buy_exchange_counts` / `sell_exchange_counts` if insufficient rolling data
@@ -284,8 +286,8 @@ Each active symbol gets a **trade multiplier** based on its focus tier (see Stro
 
 - `allocated_trade_size = trade_amount × multiplier × tick_quality_factor`
 - Tick quality factor: 1.0 (net ≥ 0.10%), 0.90 (≥ 0.05%), 0.85 (< 0.05%)
-- Trade size capped by 80% of available USDT (buy side) and 80% of available crypto (sell side)
-- Minimum trade: `max($5, total_capital × 0.003)`
+- **Dynamic buffer**: Trade size capped by 95% of available balance when balance < 2× min_trade (small positions), 80% otherwise. Prevents wasting $2-8 on tiny positions.
+- Minimum trade: `max($5, total_capital × 0.003)` — computed before buffer to enable dynamic sizing
 
 ### Transfer Fee Awareness
 
@@ -318,9 +320,9 @@ After discovery, capital is allocated via the Exchange & Symbol Concentration sy
 Multiple gates prevent unprofitable rebalancing:
 
 1. **Tradeable gate**: `should_allow_rebalance()` requires `score >= 0.01` (`TRADING_SCORE_THRESHOLD`). Weak symbols (< 0.01) never trigger rebalances.
-2. **ROI gate**: `_should_rebalance()` in monitor.py estimates rebalance cost (2× internal transfer fees on 3× trade_amount) and requires `expected_profit > cost × 1.5`. Blocks rebalances when amortized transfer cost exceeds per-trade profit.
-3. **Net P&L gate**: After 10+ trades, if `trading_pnl < total_transfer_fees` (net negative), all rebalancing is blocked. Prevents loss spirals.
-4. **Miss-streak threshold**: 15 consecutive missed ticks required before rebalancing triggers (was 5, increased to reduce frequency).
+2. **ROI gate**: `_should_rebalance()` in monitor.py estimates rebalance cost. Threshold = `fee_rate / rebalance_roi_divisor` (configurable, default 3, recommended 5-10 for small capital). Blocks when amortized cost exceeds per-trade profit.
+3. **Net P&L gate**: After `net_pnl_gate_warmup_trades` (default 10) trades AND `net_pnl_gate_grace_seconds` (default 1800s) elapsed, if `trading_pnl + cashback < external_transfer_fees` (net negative using external-only fees), all rebalancing is blocked. All three params configurable via Settings.
+4. **Dynamic miss-streak threshold**: `_get_miss_threshold(buy_ex, sell_ex)` returns lower threshold for cheap exchanges. Free transfers (both ≤ $0.01): `base // 3` (min 3). Cheap (either < $0.20): `base // 2` (min 5). Otherwise: full `min_misses_before_rebalance`.
 5. **Transfer worthiness**: External transfers blocked if `withdrawal_fee / estimated_profit > 50`.
 6. **Cooldown**: 60s between rebalances per exchange/direction.
 
@@ -330,7 +332,7 @@ In `try_rebalance()`, crypto rebalance runs BEFORE USDT rebalance. This ensures 
 
 ### Net Profit Awareness
 
-The optimizer tracks whether net profit (trading P&L - transfer fees + credited cashback) is positive. When in deficit:
+The optimizer tracks whether net profit (trading P&L - **external** transfer fees + credited cashback) is positive. Uses external-only fees (withdrawal fees) not total transfer fees (which includes internal taker fees). Supports grace period: `update_profit_state(net_profit, hourly_rate, grace_active)` — during grace period, rotation gate stays open. Logs transitions: `[Optimizer] Rotation gate CLOSED/OPENED`. When in deficit (after grace):
 - Rotations, expansions, AND rebalancing are blocked
 - Demotions still run to remove dead symbols
 - Updated by dashboard server every state broadcast via `update_profit_state()`
@@ -396,14 +398,14 @@ Full authentication system for the WebSocket dashboard:
 - **Format**: UTC timestamps via `time.gmtime` converter: `YYYY-MM-DD HH:MM:SS [LEVEL] [Component] message`
 - **Daily rotation**: `TimedRotatingFileHandler` rotates at 00:00 UTC, keeps 30 days. Files: `logs/coirnabot.log` (current), `logs/coirnabot.log.YYYY-MM-DD` (rotated).
 - **DashboardLogHandler**: Custom `logging.Handler` in `dashboard_server.py`. Captures entries in-memory (`deque` for live broadcast, `list` for session export). Parses `[Component]` prefix from log messages.
-- **Latency logging**: `[Latency]` component prefix. Every 60s logs per-exchange: processing time (avg/min/max ms), data freshness (avg/max age ms), symbols with data count. Also logs first-data-after-connect timing. Filterable in Bot Logs tab.
+- **Latency logging**: `[Latency]` component prefix. Every 60s logs per-exchange: processing time (avg/min/max ms), message rate (msgs/s), data freshness (avg/max age ms) with active/dormant symbol separation (>2min = dormant). Also logs first-data-after-connect timing. Filterable in Bot Logs tab.
 - **Diagnostic logging** (added v0.13.5): Six production-level log lines for self-sufficient diagnostics:
   - `[Config]` — All key config values at startup (trade_amount, capital, adaptive, min_net, max_symbols, execution_mode)
   - `[Trade]` — Per-trade execution: symbol, exchanges, buy/sell prices, qty, size, profit, net%
   - `[Monitor] SIZE_ZERO` — Why trade_size=0: which constraint hit (usdt_avail/crypto_val/base < min_trade). Throttled: first per symbol, then every 30th.
   - `[Rebalance] BLOCKED` — Why rebalancing was blocked: which gate rejected (score_gate/net_pnl_gate/roi_gate) with values. Throttled per miss_key.
-  - `[Balance] Snapshot` — Every 5 min: per-exchange total value (USDT + crypto USD) and portfolio total
-  - `[Session]` — Every 5 min: aggregate trades, pnl, transfer fees, cashback (credited/pending), net, $/hr
+  - `[Balance] Snapshot` — Every 5 min: per-exchange total value (USDT + crypto USD), portfolio total, fee breakdown (total vs external-only)
+  - `[Session]` — Every 5 min: aggregate trades, pnl, transfer fees, cashback (credited/pending), net, $/hr, SIZE_ZERO count (sz0=), rebalance blocked count (rebal_blocked=)
 - **Disk export**: `_read_bot_logs_from_disk()` reads rotated + current log files for cross-day export ranges. `_read_auth_logs_from_disk()` reads JSONL files. Both use `asyncio.to_thread()` for non-blocking I/O.
 
 ### State Persistence
