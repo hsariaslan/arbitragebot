@@ -46,7 +46,7 @@ from fetchers.bitget import BitgetFetcher
 from fetchers.bybit import BybitFetcher
 from fetchers.gateio import GateIOFetcher
 from fetchers.kucoin import KuCoinFetcher
-# from fetchers.mexc import MEXCFetcher  # Disabled (geo-blocked in Japan)
+from fetchers.mexc import MEXCFetcher
 from fetchers.okx import OKXFetcher
 from fetchers.pionex import PionexFetcher
 from fetchers.bitfinex import BitfinexFetcher
@@ -113,7 +113,7 @@ async def main() -> None:
         OKXFetcher(),
         BybitFetcher(),
         BitgetFetcher(),
-        # MEXCFetcher(),  # Disabled (geo-blocked in Japan, re-add in Phase 2)
+        MEXCFetcher(),
         KuCoinFetcher(),
         GateIOFetcher(),
         PionexFetcher(),

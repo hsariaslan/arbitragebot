@@ -1,25 +1,28 @@
 {
-  "trade_amount_usd": 100.0,
-  "total_capital": 1800.0,
+  "trade_amount_usd": 25,
+  "total_capital": 1800,
   "auto_rotate": true,
   "num_active_symbols": 3,
   "max_active_symbols": 8,
   "scoring_window": 1800,
   "evaluation_interval": 300,
-  "safety_multiplier": 2.0,
+  "safety_multiplier": 2,
   "discovery_duration": 300,
   "min_rebalance_score": 0.0001,
   "confirmation_period": 300,
   "promotion_threshold": 0.0001,
-  "demotion_threshold": 0.0,
+  "demotion_threshold": 0,
   "demotion_period": 600,
-  "min_net_profit_pct": 0.02,
-  "rebalance_cooldown": 30,
+  "min_net_profit_pct": 0.04,
+  "rebalance_cooldown": 10,
   "rebalance_roi_horizon": 1800,
   "adaptive_mode": true,
   "execution_mode": "simulation",
-  "ip_whitelist_enabled": false,
-  "ip_whitelist": [],
+  "ip_whitelist_enabled": true,
+  "ip_whitelist": [
+    "212.253.218.204",
+    "178.244.148.94"
+  ],
   "fee_configs": {
     "Binance": {
       "base_taker_rate": 0.001,
@@ -36,7 +39,7 @@
     "OKX": {
       "base_taker_rate": 0.001,
       "token_discount_enabled": false,
-      "token_discount_pct": 0.0,
+      "token_discount_pct": 0,
       "fee_mechanism": "tier",
       "fee_model": "received",
       "referral_enabled": true,
@@ -47,8 +50,8 @@
     },
     "Bybit": {
       "base_taker_rate": 0.001,
-      "token_discount_enabled": false,
-      "token_discount_pct": 0.0,
+      "token_discount_enabled": true,
+      "token_discount_pct": 0.25,
       "fee_mechanism": "tier",
       "fee_model": "received",
       "referral_enabled": true,
@@ -110,7 +113,7 @@
     "Pionex": {
       "base_taker_rate": 0.0005,
       "token_discount_enabled": false,
-      "token_discount_pct": 0.0,
+      "token_discount_pct": 0,
       "fee_mechanism": "instant",
       "fee_model": "received",
       "referral_enabled": true,
@@ -120,16 +123,1174 @@
       "zero_fee_pairs": []
     },
     "Bitfinex": {
-      "base_taker_rate": 0.0,
+      "base_taker_rate": 0,
       "token_discount_enabled": false,
-      "token_discount_pct": 0.0,
+      "token_discount_pct": 0,
       "fee_mechanism": "instant",
       "fee_model": "received",
       "referral_enabled": false,
-      "referral_cashback_pct": 0.0,
+      "referral_cashback_pct": 0,
       "referral_settlement_minutes": 0,
       "referral_paid_in": "same_as_fee",
       "zero_fee_pairs": []
     }
-  }
+  },
+  "fee_real_mode": false,
+  "transfer_configs": {
+    "Binance": {
+      "preferred_network": "auto",
+      "networks": [
+        {
+          "network": "BEP20",
+          "fee": 0.01,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Plasma",
+          "fee": 0.012,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "opBNB",
+          "fee": 0.015,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Aptos",
+          "fee": 0.02,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Kaia",
+          "fee": 0.02,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "AVAX C-Chain",
+          "fee": 0.04,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Optimism",
+          "fee": 0.04,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Celo",
+          "fee": 0.05,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Polygon",
+          "fee": 0.07,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Tezos",
+          "fee": 0.1,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 30,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Scroll",
+          "fee": 0.1,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Arbitrum",
+          "fee": 0.1,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Kava",
+          "fee": 0.2,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 6,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "NEAR",
+          "fee": 0.2,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "Solana",
+          "fee": 0.3,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "ERC20",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 12,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "TRC20",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": ""
+        }
+      ]
+    },
+    "OKX": {
+      "preferred_network": "auto",
+      "networks": [
+        {
+          "network": "Polygon",
+          "fee": 0.1,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "dynamic $0.01-0.10"
+        },
+        {
+          "network": "Solana",
+          "fee": 0.1,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "dynamic"
+        },
+        {
+          "network": "BEP20",
+          "fee": 0.3,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "dynamic $0.20-0.50"
+        },
+        {
+          "network": "AVAX C-Chain",
+          "fee": 0.3,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "dynamic"
+        },
+        {
+          "network": "Arbitrum",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "dynamic"
+        },
+        {
+          "network": "Optimism",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "dynamic"
+        },
+        {
+          "network": "TRC20",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": "dynamic $0.10-2.30"
+        },
+        {
+          "network": "ERC20",
+          "fee": 3.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 12,
+          "enabled": true,
+          "notes": "dynamic"
+        }
+      ]
+    },
+    "Bybit": {
+      "preferred_network": "auto",
+      "networks": [
+        {
+          "network": "Aptos",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "promo, may expire"
+        },
+        {
+          "network": "Plasma",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "likely supported"
+        },
+        {
+          "network": "BEP20",
+          "fee": 0.2,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "dynamic $0.20-0.50"
+        },
+        {
+          "network": "Arbitrum",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "dynamic"
+        },
+        {
+          "network": "Optimism",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "dynamic"
+        },
+        {
+          "network": "Polygon",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "dynamic"
+        },
+        {
+          "network": "Solana",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "dynamic"
+        },
+        {
+          "network": "TRC20",
+          "fee": 1.6,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": "confirmed"
+        },
+        {
+          "network": "ERC20",
+          "fee": 3.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 12,
+          "enabled": true,
+          "notes": "estimated"
+        }
+      ]
+    },
+    "MEXC": {
+      "preferred_network": "auto",
+      "networks": [
+        {
+          "network": "Arbitrum",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "permanent free"
+        },
+        {
+          "network": "Polygon",
+          "fee": 0.007,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "very cheap"
+        },
+        {
+          "network": "BEP20",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "promo"
+        },
+        {
+          "network": "Solana",
+          "fee": 0.01,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "near-zero"
+        },
+        {
+          "network": "TRC20",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": ""
+        },
+        {
+          "network": "ERC20",
+          "fee": 3.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 12,
+          "enabled": true,
+          "notes": "estimated"
+        }
+      ]
+    },
+    "Bitget": {
+      "preferred_network": "auto",
+      "networks": [
+        {
+          "network": "Plasma",
+          "fee": 0.001,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "verified, cheapest"
+        },
+        {
+          "network": "Aptos",
+          "fee": 0.03,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Morph",
+          "fee": 0.1,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "AVAX C-Chain",
+          "fee": 0.11,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "BEP20",
+          "fee": 0.15,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Arbitrum",
+          "fee": 0.15,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Optimism",
+          "fee": 0.15,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "TON",
+          "fee": 0.15,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Polygon",
+          "fee": 0.2,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Solana",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "TRC20",
+          "fee": 1.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "ERC20",
+          "fee": 1.6,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 12,
+          "enabled": true,
+          "notes": "verified"
+        }
+      ]
+    },
+    "KuCoin": {
+      "preferred_network": "auto",
+      "networks": [
+        {
+          "network": "Plasma",
+          "fee": 0.4,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 5,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "KCC",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 1,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Aptos",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 1,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "NEAR",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 3,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "TON",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 1,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Polygon",
+          "fee": 0.8,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 1.6,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "BEP20",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Arbitrum",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 5,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Optimism",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 3,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "AVAX C-Chain",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 2,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "KAVA EVM",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 3,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Polkadot",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Tezos",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 2,
+          "speed_seconds": 30,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "Solana",
+          "fee": 1.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 3,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "TRC20",
+          "fee": 1.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 3,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": "verified"
+        },
+        {
+          "network": "ERC20",
+          "fee": 5.5,
+          "fee_type": "percentage",
+          "percentage_rate": 0.002,
+          "percentage_min": 5.5,
+          "min_withdrawal": 30,
+          "speed_seconds": 12,
+          "enabled": true,
+          "notes": "verified, 0.2% rate"
+        }
+      ]
+    },
+    "Gate.io": {
+      "preferred_network": "auto",
+      "networks": [
+        {
+          "network": "TRC20",
+          "fee": 0.0,
+          "fee_type": "conditional",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 2020,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": "free if >= 2,020 USDT"
+        },
+        {
+          "network": "BEP20",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "promo may have expired"
+        },
+        {
+          "network": "Arbitrum",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "estimated"
+        },
+        {
+          "network": "Optimism",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "estimated"
+        },
+        {
+          "network": "Polygon",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "estimated"
+        },
+        {
+          "network": "Solana",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "estimated"
+        },
+        {
+          "network": "AVAX C-Chain",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "estimated"
+        },
+        {
+          "network": "ERC20",
+          "fee": 4.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 12,
+          "enabled": true,
+          "notes": "estimated"
+        }
+      ]
+    },
+    "Pionex": {
+      "preferred_network": "auto",
+      "networks": [
+        {
+          "network": "Arbitrum",
+          "fee": 0.2,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "estimated <$0.20"
+        },
+        {
+          "network": "Optimism",
+          "fee": 0.2,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "estimated <$0.20"
+        },
+        {
+          "network": "BEP20",
+          "fee": 0.8,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "confirmed"
+        },
+        {
+          "network": "TRC20",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": "confirmed"
+        },
+        {
+          "network": "Solana",
+          "fee": 1.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "estimated"
+        },
+        {
+          "network": "ERC20",
+          "fee": 10.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 12,
+          "enabled": true,
+          "notes": "confirmed, avoid"
+        }
+      ]
+    },
+    "Bitfinex": {
+      "preferred_network": "auto",
+      "networks": [
+        {
+          "network": "TRC20",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 5,
+          "enabled": true,
+          "notes": "free"
+        },
+        {
+          "network": "Arbitrum",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "free via USDT0"
+        },
+        {
+          "network": "Optimism",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "free via USDT0"
+        },
+        {
+          "network": "Polygon",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "free via USDT0"
+        },
+        {
+          "network": "Avalanche",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "free"
+        },
+        {
+          "network": "TON",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "free"
+        },
+        {
+          "network": "Aptos",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "free"
+        },
+        {
+          "network": "Near",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 2,
+          "enabled": true,
+          "notes": "free"
+        },
+        {
+          "network": "Solana",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 1,
+          "enabled": true,
+          "notes": "free, some sources say $0.50"
+        },
+        {
+          "network": "Cosmos",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "free"
+        },
+        {
+          "network": "Tezos",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "free"
+        },
+        {
+          "network": "Polkadot",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "free"
+        },
+        {
+          "network": "Celo",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "free"
+        },
+        {
+          "network": "Kava",
+          "fee": 0.0,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 3,
+          "enabled": true,
+          "notes": "free"
+        },
+        {
+          "network": "ERC20",
+          "fee": 0.5,
+          "fee_type": "flat",
+          "percentage_rate": 0.0,
+          "percentage_min": 0.0,
+          "min_withdrawal": 10.0,
+          "speed_seconds": 12,
+          "enabled": true,
+          "notes": "dynamic, ~$0.50, only network with fee"
+        }
+      ]
+    }
+  },
+  "active_symbols": [
+    "STRKUSDT",
+    "POLUSDT"
+  ],
+  "allocations": {
+    "Binance": {
+      "usdt": 200.0,
+      "crypto": {}
+    },
+    "OKX": {
+      "usdt": 200.0,
+      "crypto": {}
+    },
+    "Bybit": {
+      "usdt": 200.0,
+      "crypto": {}
+    },
+    "MEXC": {
+      "usdt": 200.0,
+      "crypto": {}
+    },
+    "Bitget": {
+      "usdt": 200.0,
+      "crypto": {}
+    },
+    "KuCoin": {
+      "usdt": 200.0,
+      "crypto": {}
+    },
+    "Gate.io": {
+      "usdt": 200.0,
+      "crypto": {}
+    },
+    "Pionex": {
+      "usdt": 200.0,
+      "crypto": {}
+    },
+    "Bitfinex": {
+      "usdt": 200.0,
+      "crypto": {}
+    }
+  },
+  "min_misses_before_rebalance": 3
 }
