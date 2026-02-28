@@ -783,6 +783,9 @@ class DashboardServer:
         "net_pnl_gate_warmup_trades": (int, 1, 200),
         "net_pnl_gate_grace_seconds": (int, 60, 7200),
         "rebalance_roi_divisor": (int, 2, 20),
+        "reallocation_cost_horizon": (float, 0.5, 24.0),
+        "demotion_cooldown_multiplier": (float, 1.0, 20.0),
+        "hourly_external_transfer_cap": (float, 0, 100.0),
     }
 
     _SETTINGS_ENUMS: dict[str, list[str]] = {
@@ -1255,6 +1258,15 @@ class DashboardServer:
             self._monitor._min_misses_before_rebalance = int(settings["min_misses_before_rebalance"])
         self._balance._trade_amount = trade_amount
         self._balance._max_rebalance = trade_amount * 4
+
+        # Profitability controls
+        if "reallocation_cost_horizon" in settings:
+            self._optimizer._reallocation_cost_horizon = float(settings["reallocation_cost_horizon"])
+        if "demotion_cooldown_multiplier" in settings:
+            self._optimizer._demotion_cooldown_multiplier = float(settings["demotion_cooldown_multiplier"])
+            self._optimizer._demotion_cooldown = self._optimizer._demotion_period * self._optimizer._demotion_cooldown_multiplier
+        if "hourly_external_transfer_cap" in settings:
+            self._balance._hourly_external_transfer_cap = float(settings["hourly_external_transfer_cap"])
 
         # execution_mode: persisted to settings.json but requires restart
         # (no hot-apply — executor creation happens at startup)

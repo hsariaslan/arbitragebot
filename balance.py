@@ -89,6 +89,7 @@ class BalanceTracker:
         exchange_info: "ExchangeInfoManager | None" = None,
         fee_manager: "FeeManager | None" = None,
         transfer_fee_manager: "TransferFeeManager | None" = None,
+        hourly_external_transfer_cap: float = 2.0,
     ) -> None:
         self._fee_manager = fee_manager
         self._transfer_fee_mgr = transfer_fee_manager
@@ -152,12 +153,38 @@ class BalanceTracker:
         self._in_transit: list[InTransitFund] = []
         self._execution_mode: str = "simulation"
 
+        # Hourly external transfer fee budget tracking
+        self._external_fee_log: deque[tuple[float, float]] = deque()  # (timestamp, fee_amount)
+        self._hourly_external_transfer_cap: float = hourly_external_transfer_cap
+
         # Initialization state
         self._initialized: bool = False
 
     @property
     def initialized(self) -> bool:
         return self._initialized
+
+    def _check_hourly_transfer_budget(self, proposed_fee: float) -> bool:
+        """Return True if external transfer is within hourly budget."""
+        if self._hourly_external_transfer_cap <= 0:
+            return True  # Disabled
+        now = time.time()
+        # Evict entries older than 1 hour
+        while self._external_fee_log and self._external_fee_log[0][0] < now - 3600:
+            self._external_fee_log.popleft()
+        current = sum(fee for _, fee in self._external_fee_log)
+        if current + proposed_fee > self._hourly_external_transfer_cap:
+            logger.info(
+                f"[Balance] External transfer BLOCKED by hourly cap: "
+                f"${current:.2f}+${proposed_fee:.2f} > "
+                f"${self._hourly_external_transfer_cap:.2f}/hr"
+            )
+            return False
+        return True
+
+    def _record_external_fee(self, fee: float) -> None:
+        """Record external transfer fee for hourly budget tracking."""
+        self._external_fee_log.append((time.time(), fee))
 
     def _get_withdrawal_fee(self, exchange: str, amount: float = 0.0) -> float:
         """Get withdrawal fee for an exchange, using TransferFeeManager if available."""
@@ -404,6 +431,11 @@ class BalanceTracker:
                     external_cost = float("inf")
                     external_source = None
 
+            # Hourly external transfer budget check
+            if external_source and not self._check_hourly_transfer_budget(external_cost):
+                external_cost = float("inf")
+                external_source = None
+
         # Internal option: sell crypto for USDT (percentage taker fee)
         internal_cost = float("inf")
         internal_sym = None
@@ -445,6 +477,7 @@ class BalanceTracker:
 
             self.total_transfer_fees += external_cost
             self.total_external_transfer_fees += external_cost
+            self._record_external_fee(external_cost)
 
             transfer = Transfer(
                 timestamp=now,
@@ -557,12 +590,17 @@ class BalanceTracker:
                 if trades_to_recoup > 50:
                     crypto_sources = []  # Skip, fall through to internal
 
+            # Hourly external transfer budget check
+            if crypto_sources and not self._check_hourly_transfer_budget(external_crypto_cost):
+                crypto_sources = []  # Skip, fall through to internal
+
             # Prefer external crypto if cheaper than internal buy
             if crypto_sources and external_crypto_cost < internal_buy_cost:
                 self.crypto[best_source][symbol] -= transfer_qty
                 self.crypto[exchange][symbol] += transfer_qty
                 self.total_transfer_fees += external_crypto_cost
                 self.total_external_transfer_fees += external_crypto_cost
+                self._record_external_fee(external_crypto_cost)
 
                 transfer = Transfer(
                     timestamp=now,
@@ -640,6 +678,10 @@ class BalanceTracker:
                     )
                     return None
 
+            # Hourly external transfer budget check
+            if not self._check_hourly_transfer_budget(withdrawal_fee):
+                return None
+
             fee_rate = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
             buy_fee = ext_buy_rebal * fee_rate
 
@@ -651,6 +693,7 @@ class BalanceTracker:
             total_fee = withdrawal_fee + buy_fee
             self.total_transfer_fees += total_fee
             self.total_external_transfer_fees += withdrawal_fee  # Only withdrawal portion
+            self._record_external_fee(withdrawal_fee)
 
             transfer = Transfer(
                 timestamp=now,
@@ -847,6 +890,7 @@ class BalanceTracker:
             "last_trade_time": dict(self.last_trade_time),
             "_in_transit": [asdict(f) for f in self._in_transit],
             "_execution_mode": self._execution_mode,
+            "_external_fee_log": list(self._external_fee_log),
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -886,3 +930,6 @@ class BalanceTracker:
             InTransitFund(**f) for f in data.get("_in_transit", [])
         ]
         self._execution_mode = data.get("_execution_mode", "simulation")
+        self._external_fee_log = deque(
+            tuple(x) for x in data.get("_external_fee_log", [])
+        )

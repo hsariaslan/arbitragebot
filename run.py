@@ -157,6 +157,7 @@ async def main() -> None:
         exchange_info=exchange_info,
         fee_manager=fee_manager,
         transfer_fee_manager=transfer_fee_manager,
+        hourly_external_transfer_cap=settings.get("hourly_external_transfer_cap", 2.0),
     )
     monitor = ArbitrageMonitor(
         fetchers,
@@ -165,7 +166,7 @@ async def main() -> None:
         exchanges=active_exchanges,
         trade_amount=trade_amount,
         min_net_profit_pct=settings.get("min_net_profit_pct", 0.02),
-        min_misses_before_rebalance=int(settings.get("min_misses_before_rebalance", 5)),
+        min_misses_before_rebalance=int(settings.get("min_misses_before_rebalance", 15)),
         rebalance_roi_horizon=settings.get("rebalance_roi_horizon", 1800),
         total_capital=total_capital,
         adaptive_mode=adaptive_mode,
@@ -195,6 +196,8 @@ async def main() -> None:
         promotion_threshold=settings.get("promotion_threshold", 0.0001),
         demotion_threshold=settings.get("demotion_threshold", 0.0),
         demotion_period=settings.get("demotion_period", 600),
+        demotion_cooldown_multiplier=settings.get("demotion_cooldown_multiplier", 5.0),
+        reallocation_cost_horizon=settings.get("reallocation_cost_horizon", 2.0),
         min_warmup_ticks=MIN_WARMUP_TICKS,
     )
     # Apply configurable score thresholds and gate params from settings

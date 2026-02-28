@@ -200,6 +200,8 @@ class SymbolOptimizer:
         promotion_threshold: float = 0.0001,
         demotion_threshold: float = 0.0,
         demotion_period: int = 600,
+        demotion_cooldown_multiplier: float = 5.0,
+        reallocation_cost_horizon: float = 2.0,
     ) -> None:
         self._fetchers = fetchers
         self._monitor = monitor
@@ -235,7 +237,11 @@ class SymbolOptimizer:
         self._demotion_tracking: dict[str, float] = {}
         # Anti-churning: cooldown after demotion prevents immediate re-activation
         self._recently_demoted: dict[str, float] = {}  # symbol -> demotion timestamp
-        self._demotion_cooldown = demotion_period * 3  # 3x demotion period (default 1800s)
+        self._demotion_cooldown_multiplier = demotion_cooldown_multiplier
+        self._demotion_cooldown = demotion_period * demotion_cooldown_multiplier
+
+        # Reallocation cost gate
+        self._reallocation_cost_horizon = reallocation_cost_horizon
 
         # Configurable score thresholds (settable from dashboard)
         self._trading_threshold: float = TRADING_SCORE_THRESHOLD
@@ -1149,6 +1155,24 @@ class SymbolOptimizer:
             self._discovery_duration = self._initial_discovery_duration
             self._monitor._paused = True
 
+    # ── Activation threshold ─────────────────────────────────────────────
+
+    def _get_activation_threshold(self, symbol: str) -> float:
+        """Minimum score for activation, elevated for frequently-demoted symbols."""
+        base = self._trading_threshold  # 0.01
+        stats = self._historical_stats.get(symbol)
+        if not stats or stats.times_demoted <= 0:
+            return base
+        # Each demotion adds 50% of base, cap at strong threshold
+        elevated = base * (1.0 + stats.times_demoted * 0.5)
+        result = min(elevated, self._strong_threshold)
+        if result > base:
+            logger.info(
+                f"[Optimizer] Activation threshold elevated for {symbol}: "
+                f"{result:.3f} (demoted {stats.times_demoted} times)"
+            )
+        return result
+
     # ── Expansion ────────────────────────────────────────────────────────
 
     def _expand_active(self, symbol: str, score: SymbolScore) -> None:
@@ -1311,8 +1335,8 @@ class SymbolOptimizer:
                 break
 
             best_candidate = confirmed_candidates[0]
-            # Gate: candidate must be tradeable (score >= 0.01)
-            if best_candidate.score < self._trading_threshold:
+            # Gate: candidate must meet activation threshold (elevated for frequently-demoted)
+            if best_candidate.score < self._get_activation_threshold(best_candidate.symbol):
                 break
             # Require candidate score to be at least 3x the worst active score
             if best_candidate.score <= worst.score * 3:
@@ -1356,7 +1380,7 @@ class SymbolOptimizer:
                     s for s in self._scores.values()
                     if s.symbol not in active_set
                     and s.symbol not in cooldown_set_now
-                    and s.score >= self._trading_threshold
+                    and s.score >= self._get_activation_threshold(s.symbol)
                     and s.total_ticks >= 30  # minimum data points
                     and s.est_hourly_profit > expansion_cost * self._safety_multiplier
                 ],
@@ -1607,7 +1631,7 @@ class SymbolOptimizer:
             return
 
         now = time.time()
-        realloc_cooldown = self._evaluation_interval * 2
+        realloc_cooldown = self._evaluation_interval * 3
 
         for sym in list(self._active_symbols):
             old_pairs = self._dominant_pairs.get(sym)
@@ -1666,6 +1690,38 @@ class SymbolOptimizer:
         added_sellers = new_sellers - old_sellers
 
         if not removed_sellers and not added_sellers:
+            return
+
+        # --- Cost estimation gate ---
+        est_sell_cost = 0.0
+        for ex in removed_sellers:
+            qty = self._balance.crypto[ex].get(symbol, 0.0)
+            if qty > 0:
+                fee_rate = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
+                est_sell_cost += qty * price * fee_rate
+
+        est_buy_cost = 0.0
+        freed_est = sum(
+            self._balance.crypto[ex].get(symbol, 0.0) * price
+            for ex in removed_sellers
+        )
+        if freed_est > 0 and added_sellers:
+            per_new = freed_est / len(added_sellers)
+            for ex in added_sellers:
+                fee_rate = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
+                est_buy_cost += per_new * fee_rate
+
+        total_est_cost = est_sell_cost + est_buy_cost
+        score_obj = self._scores.get(symbol)
+        est_hourly = score_obj.est_hourly_profit if score_obj else 0.0
+        benefit = est_hourly * self._reallocation_cost_horizon
+
+        if total_est_cost > benefit and total_est_cost > 0.001:
+            logger.info(
+                f"[Optimizer] Reallocation SKIPPED for {symbol}: "
+                f"est_cost=${total_est_cost:.4f} > benefit=${benefit:.4f} "
+                f"(hourly=${est_hourly:.4f} x {self._reallocation_cost_horizon}h)"
+            )
             return
 
         # Sell crypto on exchanges no longer dominant

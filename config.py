@@ -302,6 +302,11 @@ NET_PNL_GATE_WARMUP_TRADES: int = 10     # Min trades before net P&L gate activa
 NET_PNL_GATE_GRACE_SECONDS: int = 1800   # Grace period (seconds) before gate activates
 REBALANCE_ROI_DIVISOR: int = 3           # ROI threshold = fee_rate / divisor (higher = easier rebalance)
 
+# Profitability controls (configurable via settings page)
+REALLOCATION_COST_HORIZON: float = 2.0    # Hours of profit to justify reallocation cost
+DEMOTION_COOLDOWN_MULTIPLIER: float = 5.0 # Cooldown after demotion = period × multiplier
+HOURLY_EXTERNAL_TRANSFER_CAP: float = 2.0 # Max external withdrawal fees per hour ($), 0=disabled
+
 # Execution mode: "simulation" (default), "demo" (testnet orders)
 EXECUTION_MODE: str = "simulation"
 

@@ -53,7 +53,7 @@ class ConfigSnapshot:
     max_active_symbols: int
     avg_trade_size: float
     estimated_profit_per_trade: float
-    min_misses_before_rebalance: int = 5
+    min_misses_before_rebalance: int = 15
 
 
 @dataclass
@@ -116,7 +116,7 @@ class ArbitrageMonitor:
         log_file: "Path | None" = None,
         exchange_info: "ExchangeInfoManager | None" = None,
         fee_manager: "FeeManager | None" = None,
-        min_misses_before_rebalance: int = 5,
+        min_misses_before_rebalance: int = 15,
     ) -> None:
         self._fetchers = fetchers
         self._balance = balance
