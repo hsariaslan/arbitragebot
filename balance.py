@@ -139,6 +139,7 @@ class BalanceTracker:
         # Transfer/rebalance log
         self.transfers: list[Transfer] = []
         self.total_transfer_fees: float = 0.0
+        self.total_external_transfer_fees: float = 0.0  # Only withdrawal fees (not internal taker fees)
         self.skipped_trades: int = 0
 
         # Rebalance cooldown tracking: "exchange:direction" → last rebalance timestamp
@@ -443,6 +444,7 @@ class BalanceTracker:
                 self.usdt[exchange] += amt
 
             self.total_transfer_fees += external_cost
+            self.total_external_transfer_fees += external_cost
 
             transfer = Transfer(
                 timestamp=now,
@@ -560,6 +562,7 @@ class BalanceTracker:
                 self.crypto[best_source][symbol] -= transfer_qty
                 self.crypto[exchange][symbol] += transfer_qty
                 self.total_transfer_fees += external_crypto_cost
+                self.total_external_transfer_fees += external_crypto_cost
 
                 transfer = Transfer(
                     timestamp=now,
@@ -647,6 +650,7 @@ class BalanceTracker:
             self.crypto[exchange][symbol] += buy_qty
             total_fee = withdrawal_fee + buy_fee
             self.total_transfer_fees += total_fee
+            self.total_external_transfer_fees += withdrawal_fee  # Only withdrawal portion
 
             transfer = Transfer(
                 timestamp=now,
@@ -836,6 +840,7 @@ class BalanceTracker:
             "_initialized": self._initialized,
             "transfers": [asdict(t) for t in self.transfers],
             "total_transfer_fees": self.total_transfer_fees,
+            "total_external_transfer_fees": self.total_external_transfer_fees,
             "skipped_trades": self.skipped_trades,
             "_last_rebalance": dict(self._last_rebalance),
             "_estimated_profit_per_trade": self._estimated_profit_per_trade,
@@ -872,6 +877,7 @@ class BalanceTracker:
             for t in data.get("transfers", [])
         ]
         self.total_transfer_fees = data.get("total_transfer_fees", 0.0)
+        self.total_external_transfer_fees = data.get("total_external_transfer_fees", 0.0)
         self.skipped_trades = data.get("skipped_trades", 0)
         self._last_rebalance = data.get("_last_rebalance", {})
         self._estimated_profit_per_trade = data.get("_estimated_profit_per_trade", 0.02)
