@@ -321,4 +321,37 @@ class TransferFeeManager:
                     _flat("ERC20", 4.00, 12),
                 ],
             ),
+            "MEXC": ExchangeTransferConfig(
+                exchange="MEXC",
+                preferred_network="auto",
+                networks=[
+                    _flat("Arbitrum", 0.00, 1, notes="free"),
+                    _flat("BEP20", 0.00, 3, notes="promo"),
+                    _flat("Solana", 0.00, 1, notes="promo"),
+                    _flat("TRC20", 1.00, 5),
+                ],
+            ),
+            "Pionex": ExchangeTransferConfig(
+                exchange="Pionex",
+                preferred_network="auto",
+                networks=[
+                    _flat("Arbitrum", 0.20, 1),
+                    _flat("Optimism", 0.20, 2),
+                    _flat("BEP20", 0.80, 3),
+                    _flat("Solana", 1.00, 1),
+                    _flat("TRC20", 1.00, 5),
+                ],
+            ),
+            "Bitfinex": ExchangeTransferConfig(
+                exchange="Bitfinex",
+                preferred_network="auto",
+                networks=[
+                    _flat("TRC20", 0.00, 5, notes="free"),
+                    _flat("Arbitrum", 0.00, 1, notes="free"),
+                    _flat("Optimism", 0.00, 2, notes="free"),
+                    _flat("Polygon", 0.00, 3, notes="free"),
+                    _flat("Solana", 0.00, 1, notes="free"),
+                    _flat("ERC20", 0.00, 12, notes="free"),
+                ],
+            ),
         }

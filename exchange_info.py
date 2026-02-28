@@ -27,9 +27,12 @@ from config import (
     BINANCE_EXCHANGE_NAME,
     OKX_EXCHANGE_NAME,
     BYBIT_EXCHANGE_NAME,
+    MEXC_EXCHANGE_NAME,
     BITGET_EXCHANGE_NAME,
     KUCOIN_EXCHANGE_NAME,
     GATEIO_EXCHANGE_NAME,
+    PIONEX_EXCHANGE_NAME,
+    BITFINEX_EXCHANGE_NAME,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,9 +42,12 @@ _API_URLS = {
     BINANCE_EXCHANGE_NAME: "https://api.binance.com/api/v3/exchangeInfo",
     OKX_EXCHANGE_NAME: "https://www.okx.com/api/v5/public/instruments",
     BYBIT_EXCHANGE_NAME: "https://api.bybit.com/v5/market/instruments-info",
+    MEXC_EXCHANGE_NAME: "https://api.mexc.com/api/v3/exchangeInfo",
     BITGET_EXCHANGE_NAME: "https://api.bitget.com/api/v2/spot/public/symbols",
     KUCOIN_EXCHANGE_NAME: "https://api.kucoin.com/api/v1/symbols",
     GATEIO_EXCHANGE_NAME: "https://api.gateio.ws/api/v4/spot/currency_pairs",
+    PIONEX_EXCHANGE_NAME: "https://api.pionex.com/api/v1/common/symbols",
+    BITFINEX_EXCHANGE_NAME: "https://api-pub.bitfinex.com/v2/conf/pub:info:pair",
 }
 
 # Persist cache here as fallback if API calls fail
@@ -123,14 +129,16 @@ class ExchangeInfoManager:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             tasks = []
+            task_exchanges: list[str] = []
             for ex in self._exchanges:
                 if ex in _API_URLS:
                     tasks.append(self._fetch_exchange(session, ex))
+                    task_exchanges.append(ex)
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
         fetched = 0
         failed_exchanges: list[str] = []
-        for ex, result in zip(self._exchanges, results):
+        for ex, result in zip(task_exchanges, results):
             if isinstance(result, Exception):
                 logger.warning("[ExchangeInfo] %s fetch failed: %s", ex, result)
                 failed_exchanges.append(ex)
@@ -259,12 +267,18 @@ class ExchangeInfoManager:
                 return await self._fetch_okx(session)
             elif exchange == BYBIT_EXCHANGE_NAME:
                 return await self._fetch_bybit(session)
+            elif exchange == MEXC_EXCHANGE_NAME:
+                return await self._fetch_mexc(session)
             elif exchange == BITGET_EXCHANGE_NAME:
                 return await self._fetch_bitget(session)
             elif exchange == KUCOIN_EXCHANGE_NAME:
                 return await self._fetch_kucoin(session)
             elif exchange == GATEIO_EXCHANGE_NAME:
                 return await self._fetch_gateio(session)
+            elif exchange == PIONEX_EXCHANGE_NAME:
+                return await self._fetch_pionex(session)
+            elif exchange == BITFINEX_EXCHANGE_NAME:
+                return await self._fetch_bitfinex(session)
             else:
                 logger.debug("[ExchangeInfo] No fetcher for %s", exchange)
                 return 0
@@ -562,6 +576,181 @@ class ExchangeInfoManager:
         logger.info("[ExchangeInfo] Gate.io: loaded %d/%d symbols", count, len(SYMBOLS))
         return count
 
+    async def _fetch_mexc(self, session: aiohttp.ClientSession) -> int:
+        """MEXC: GET /api/v3/exchangeInfo — Binance-compatible API."""
+        url = _API_URLS[MEXC_EXCHANGE_NAME]
+        async with session.get(url) as resp:
+            data = await resp.json()
+
+        target_symbols = set(SYMBOLS)
+        count = 0
+
+        for sym_info in data.get("symbols", []):
+            symbol = sym_info.get("symbol", "")
+            if symbol not in target_symbols:
+                continue
+
+            lot_step = Decimal("1")
+            min_qty = Decimal("0")
+            tick_size = Decimal("1")
+            min_notional = Decimal("5")
+
+            for f in sym_info.get("filters", []):
+                ft = f.get("filterType", "")
+                if ft == "LOT_SIZE":
+                    lot_step = Decimal(f.get("stepSize", "1"))
+                    min_qty = Decimal(f.get("minQty", "0"))
+                elif ft == "PRICE_FILTER":
+                    tick_size = Decimal(f.get("tickSize", "1"))
+                elif ft in ("NOTIONAL", "MIN_NOTIONAL"):
+                    min_notional = Decimal(f.get("minNotional", "5"))
+
+            # MEXC may use baseSizePrecision/quoteSizePrecision instead of filters
+            if lot_step == Decimal("1"):
+                base_prec = sym_info.get("baseSizePrecision") or sym_info.get("baseAssetPrecision")
+                if base_prec is not None:
+                    lot_step = Decimal(10) ** Decimal(-int(base_prec))
+            if tick_size == Decimal("1"):
+                quote_prec = sym_info.get("quotePrecision") or sym_info.get("quoteAssetPrecision")
+                if quote_prec is not None:
+                    tick_size = Decimal(10) ** Decimal(-int(quote_prec))
+
+            rules = SymbolRules(
+                symbol=symbol,
+                exchange=MEXC_EXCHANGE_NAME,
+                lot_size_step=lot_step,
+                min_qty=min_qty,
+                tick_size=tick_size,
+                min_notional=min_notional,
+                base_precision=_decimal_places(lot_step),
+                quote_precision=_decimal_places(tick_size),
+            )
+            self._rules[f"{MEXC_EXCHANGE_NAME}:{symbol}"] = rules
+            count += 1
+
+        logger.info("[ExchangeInfo] MEXC: loaded %d/%d symbols", count, len(target_symbols))
+        return count
+
+    async def _fetch_pionex(self, session: aiohttp.ClientSession) -> int:
+        """Pionex: GET /api/v1/common/symbols — returns all spot symbols."""
+        url = _API_URLS[PIONEX_EXCHANGE_NAME]
+        async with session.get(url) as resp:
+            data = await resp.json()
+
+        if not data.get("result"):
+            logger.warning("[ExchangeInfo] Pionex API error: %s", data.get("message", data))
+            return 0
+
+        target_symbols = set(SYMBOLS)
+        count = 0
+
+        for sym_info in data.get("data", {}).get("symbols", []):
+            # Pionex format: "BTC_USDT" -> "BTCUSDT"
+            pionex_sym = sym_info.get("symbol", "")
+            symbol = pionex_sym.replace("_", "")
+            if symbol not in target_symbols:
+                continue
+
+            base_prec = int(sym_info.get("basePrecision", 8))
+            quote_prec = int(sym_info.get("quotePrecision", 2))
+            lot_step = Decimal(10) ** Decimal(-base_prec)
+            tick_size = Decimal(10) ** Decimal(-quote_prec)
+
+            try:
+                min_qty = Decimal(str(sym_info.get("minAmount", "0")))
+            except InvalidOperation:
+                min_qty = Decimal("0")
+
+            try:
+                min_notional = Decimal(str(sym_info.get("minTotal", "1")))
+            except InvalidOperation:
+                min_notional = Decimal("1")
+
+            rules = SymbolRules(
+                symbol=symbol,
+                exchange=PIONEX_EXCHANGE_NAME,
+                lot_size_step=lot_step,
+                min_qty=min_qty,
+                tick_size=tick_size,
+                min_notional=min_notional,
+                base_precision=base_prec,
+                quote_precision=quote_prec,
+            )
+            self._rules[f"{PIONEX_EXCHANGE_NAME}:{symbol}"] = rules
+            count += 1
+
+        logger.info("[ExchangeInfo] Pionex: loaded %d/%d symbols", count, len(target_symbols))
+        return count
+
+    async def _fetch_bitfinex(self, session: aiohttp.ClientSession) -> int:
+        """Bitfinex: GET /v2/conf/pub:info:pair — returns pair info for all symbols.
+
+        Bitfinex uses tBTCUST format (UST not USDT). Precision fields are
+        significant_digits, not decimal_places, so we convert.
+        """
+        url = _API_URLS[BITFINEX_EXCHANGE_NAME]
+        async with session.get(url) as resp:
+            data = await resp.json()
+
+        if not data or not isinstance(data, list) or not data[0]:
+            logger.warning("[ExchangeInfo] Bitfinex: unexpected response format")
+            return 0
+
+        # Build map from Bitfinex pair to our symbol format
+        # Bitfinex: "BTCUST" (without t prefix) in pair info
+        target_map: dict[str, str] = {}
+        for sym in SYMBOLS:
+            base = sym.replace("USDT", "")
+            bfx_pair = f"{base}UST"
+            target_map[bfx_pair.upper()] = sym
+
+        pair_info = data[0]  # First (only) element is the pair info dict
+        count = 0
+
+        if isinstance(pair_info, dict):
+            for bfx_pair, info in pair_info.items():
+                symbol = target_map.get(bfx_pair.upper())
+                if not symbol:
+                    continue
+
+                if not isinstance(info, list) or len(info) < 4:
+                    continue
+
+                # info = [placeholder, min_order_size, max_order_size, ?, ?, price_precision, ...]
+                # Indices may vary. Use safe defaults.
+                try:
+                    min_qty = Decimal(str(info[1])) if len(info) > 1 else Decimal("0")
+                except (InvalidOperation, IndexError):
+                    min_qty = Decimal("0")
+
+                # Bitfinex uses 5 significant digits typically
+                price_prec = 5
+                if len(info) > 5:
+                    try:
+                        price_prec = int(info[5])
+                    except (ValueError, TypeError):
+                        price_prec = 5
+
+                # Conservative defaults — Bitfinex doesn't expose lot_step/tick_size directly
+                lot_step = Decimal("0.00000001")  # 8 decimals (standard crypto precision)
+                tick_size = Decimal(10) ** Decimal(-price_prec)
+
+                rules = SymbolRules(
+                    symbol=symbol,
+                    exchange=BITFINEX_EXCHANGE_NAME,
+                    lot_size_step=lot_step,
+                    min_qty=abs(min_qty),
+                    tick_size=tick_size,
+                    min_notional=Decimal("0.1"),  # Bitfinex has very low minimums
+                    base_precision=8,
+                    quote_precision=price_prec,
+                )
+                self._rules[f"{BITFINEX_EXCHANGE_NAME}:{symbol}"] = rules
+                count += 1
+
+        logger.info("[ExchangeInfo] Bitfinex: loaded %d/%d symbols", count, len(target_map))
+        return count
+
     # ─── Cache Persistence ───────────────────────────────────────
 
     def _save_cache(self) -> None:
@@ -613,6 +802,9 @@ class ExchangeInfoManager:
             if OKX_EXCHANGE_NAME in self._exchanges:
                 tasks.append(self._fetch_okx_withdrawal_fee(session))
                 exchange_names.append(OKX_EXCHANGE_NAME)
+            if MEXC_EXCHANGE_NAME in self._exchanges:
+                tasks.append(self._fetch_mexc_withdrawal_fee(session))
+                exchange_names.append(MEXC_EXCHANGE_NAME)
             if BITGET_EXCHANGE_NAME in self._exchanges:
                 tasks.append(self._fetch_bitget_withdrawal_fee(session))
                 exchange_names.append(BITGET_EXCHANGE_NAME)
@@ -644,9 +836,10 @@ class ExchangeInfoManager:
                     ex, configured, actual_fee,
                 )
 
-        # Log exchanges we can't validate
+        # Log exchanges we can't validate via public API
         skip = []
-        for ex in (BINANCE_EXCHANGE_NAME, BYBIT_EXCHANGE_NAME, GATEIO_EXCHANGE_NAME):
+        for ex in (BINANCE_EXCHANGE_NAME, BYBIT_EXCHANGE_NAME, GATEIO_EXCHANGE_NAME,
+                    PIONEX_EXCHANGE_NAME, BITFINEX_EXCHANGE_NAME):
             if ex in self._exchanges:
                 skip.append(ex)
         if skip:
@@ -655,6 +848,43 @@ class ExchangeInfoManager:
                 "validated via demo_fetcher if keys available)",
                 ", ".join(skip),
             )
+
+    async def _fetch_mexc_withdrawal_fee(
+        self, session: aiohttp.ClientSession
+    ) -> float | None:
+        """MEXC: GET /api/v3/capital/config/getall — public endpoint for coin info."""
+        try:
+            url = "https://api.mexc.com/api/v3/capital/config/getall"
+            async with session.get(url) as resp:
+                data = await resp.json()
+
+            if not isinstance(data, list):
+                logger.warning("[WithdrawalFees] MEXC: unexpected response: %s", type(data))
+                return None
+
+            best_fee = float("inf")
+            best_chain = ""
+            for coin_info in data:
+                if coin_info.get("coin") != "USDT":
+                    continue
+                for network in coin_info.get("networkList", []):
+                    if not network.get("withdrawEnable", False):
+                        continue
+                    fee_str = network.get("withdrawFee", "")
+                    if fee_str:
+                        fee = float(fee_str)
+                        chain_name = network.get("network", "unknown")
+                        if fee < best_fee:
+                            best_fee = fee
+                            best_chain = chain_name
+
+            if best_fee < float("inf"):
+                logger.info("[WithdrawalFees] MEXC cheapest: $%.4f (%s)", best_fee, best_chain)
+                return best_fee
+            return None
+        except Exception as e:
+            logger.warning("[WithdrawalFees] MEXC query error: %s", e)
+            return None
 
     async def _fetch_okx_withdrawal_fee(
         self, session: aiohttp.ClientSession
