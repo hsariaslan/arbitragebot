@@ -768,6 +768,12 @@ class DashboardServer:
         "rebalance_roi_horizon": (int, 0, 86400),
         "adaptive_mode": (bool, None, None),
         "execution_mode": (str, None, None),
+        "trading_score_threshold": (float, 0.001, 0.5),
+        "strong_score_threshold": (float, 0.01, 1.0),
+        "very_strong_score_threshold": (float, 0.05, 2.0),
+        "net_pnl_gate_warmup_trades": (int, 1, 200),
+        "net_pnl_gate_grace_seconds": (int, 60, 7200),
+        "rebalance_roi_divisor": (int, 2, 20),
     }
 
     _SETTINGS_ENUMS: dict[str, list[str]] = {
@@ -1172,6 +1178,12 @@ class DashboardServer:
                 opt._demotion_threshold = settings["demotion_threshold"]
             if "demotion_period" in settings:
                 opt._demotion_period = settings["demotion_period"]
+            if "trading_score_threshold" in settings:
+                opt._trading_threshold = settings["trading_score_threshold"]
+            if "strong_score_threshold" in settings:
+                opt._strong_threshold = settings["strong_score_threshold"]
+            if "very_strong_score_threshold" in settings:
+                opt._very_strong_threshold = settings["very_strong_score_threshold"]
             opt.reset(
                 trade_amount=trade_amount,
                 num_active_symbols=settings.get("num_active_symbols"),
@@ -1187,6 +1199,14 @@ class DashboardServer:
         if "rebalance_roi_horizon" in settings:
             self._monitor._rebalance_roi_horizon = settings["rebalance_roi_horizon"]
         self._monitor._total_capital = total_capital
+
+        # Net P&L gate params
+        if "net_pnl_gate_warmup_trades" in settings:
+            self._monitor._net_pnl_gate_warmup_trades = int(settings["net_pnl_gate_warmup_trades"])
+        if "net_pnl_gate_grace_seconds" in settings:
+            self._monitor._net_pnl_gate_grace_seconds = int(settings["net_pnl_gate_grace_seconds"])
+        if "rebalance_roi_divisor" in settings:
+            self._monitor._rebalance_roi_divisor = int(settings["rebalance_roi_divisor"])
 
         # Adaptive mode
         if "adaptive_mode" in settings:
@@ -1292,8 +1312,14 @@ class DashboardServer:
         net_profit = trading_pnl - transfer_fees + credited_cashback
         elapsed_hours = max((now - self._start_time) / 3600, 1 / 3600)
         session_hourly_rate = net_profit / elapsed_hours
+        # For optimizer gating: use external-only fees (internal rebalances are cheap)
+        external_fees = self._balance.total_external_transfer_fees
+        net_profit_gating = trading_pnl - external_fees + credited_cashback
+        elapsed_s = now - self._start_time if self._start_time else 0
+        grace_seconds = getattr(self._monitor, "_net_pnl_gate_grace_seconds", 1800)
+        grace_active = elapsed_s < grace_seconds
         if self._optimizer:
-            self._optimizer.update_profit_state(net_profit, session_hourly_rate)
+            self._optimizer.update_profit_state(net_profit_gating, session_hourly_rate, grace_active)
 
         # Balances per exchange (include ALL held crypto, not just active symbols)
         balances: dict[str, Any] = {}

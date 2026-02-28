@@ -292,6 +292,16 @@ REBALANCE_COOLDOWN_SECONDS: float = 30   # Seconds between rebalances per exchan
 REBALANCE_ROI_HORIZON: int = 1800        # Max seconds to recoup rebalance cost
 ADAPTIVE_MODE: bool = True               # Enable adaptive trade sizing and smart rebalancing
 
+# Score thresholds (configurable via settings page)
+TRADING_SCORE_THRESHOLD: float = 0.01    # Min score to trade/rebalance
+STRONG_SCORE_THRESHOLD: float = 0.1      # Strong tier threshold
+VERY_STRONG_SCORE_THRESHOLD: float = 0.3 # Very strong tier threshold
+
+# Net P&L gate params (configurable via settings page)
+NET_PNL_GATE_WARMUP_TRADES: int = 10     # Min trades before net P&L gate activates
+NET_PNL_GATE_GRACE_SECONDS: int = 1800   # Grace period (seconds) before gate activates
+REBALANCE_ROI_DIVISOR: int = 3           # ROI threshold = fee_rate / divisor (higher = easier rebalance)
+
 # Execution mode: "simulation" (default), "demo" (testnet orders)
 EXECUTION_MODE: str = "simulation"
 

@@ -38,6 +38,12 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [rebalanceCooldown, setRebalanceCooldown] = useState(currentSettings.rebalance_cooldown ?? 30);
   const [minMissesBeforeRebalance, setMinMissesBeforeRebalance] = useState(currentSettings.min_misses_before_rebalance ?? 5);
   const [rebalanceRoiHorizon, setRebalanceRoiHorizon] = useState(currentSettings.rebalance_roi_horizon ?? 1800);
+  const [tradingScoreThreshold, setTradingScoreThreshold] = useState(currentSettings.trading_score_threshold ?? 0.01);
+  const [strongScoreThreshold, setStrongScoreThreshold] = useState(currentSettings.strong_score_threshold ?? 0.1);
+  const [veryStrongScoreThreshold, setVeryStrongScoreThreshold] = useState(currentSettings.very_strong_score_threshold ?? 0.3);
+  const [netPnlGateWarmupTrades, setNetPnlGateWarmupTrades] = useState(currentSettings.net_pnl_gate_warmup_trades ?? 10);
+  const [netPnlGateGraceSeconds, setNetPnlGateGraceSeconds] = useState(currentSettings.net_pnl_gate_grace_seconds ?? 1800);
+  const [rebalanceRoiDivisor, setRebalanceRoiDivisor] = useState(currentSettings.rebalance_roi_divisor ?? 3);
   const [adaptiveMode, setAdaptiveMode] = useState(currentSettings.adaptive_mode ?? true);
   const [executionMode, setExecutionMode] = useState(currentSettings.execution_mode ?? 'simulation');
   const [ipWhitelistEnabled, setIpWhitelistEnabled] = useState(currentSettings.ip_whitelist_enabled ?? false);
@@ -66,6 +72,12 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setRebalanceCooldown(currentSettings.rebalance_cooldown ?? 30);
       setMinMissesBeforeRebalance(currentSettings.min_misses_before_rebalance ?? 5);
       setRebalanceRoiHorizon(currentSettings.rebalance_roi_horizon ?? 1800);
+      setTradingScoreThreshold(currentSettings.trading_score_threshold ?? 0.01);
+      setStrongScoreThreshold(currentSettings.strong_score_threshold ?? 0.1);
+      setVeryStrongScoreThreshold(currentSettings.very_strong_score_threshold ?? 0.3);
+      setNetPnlGateWarmupTrades(currentSettings.net_pnl_gate_warmup_trades ?? 10);
+      setNetPnlGateGraceSeconds(currentSettings.net_pnl_gate_grace_seconds ?? 1800);
+      setRebalanceRoiDivisor(currentSettings.rebalance_roi_divisor ?? 3);
       setAdaptiveMode(currentSettings.adaptive_mode ?? true);
       setExecutionMode(currentSettings.execution_mode ?? 'simulation');
       setIpWhitelistEnabled(currentSettings.ip_whitelist_enabled ?? false);
@@ -92,6 +104,12 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     rebalance_cooldown: rebalanceCooldown,
     min_misses_before_rebalance: minMissesBeforeRebalance,
     rebalance_roi_horizon: rebalanceRoiHorizon,
+    trading_score_threshold: tradingScoreThreshold,
+    strong_score_threshold: strongScoreThreshold,
+    very_strong_score_threshold: veryStrongScoreThreshold,
+    net_pnl_gate_warmup_trades: netPnlGateWarmupTrades,
+    net_pnl_gate_grace_seconds: netPnlGateGraceSeconds,
+    rebalance_roi_divisor: rebalanceRoiDivisor,
     adaptive_mode: adaptiveMode,
     execution_mode: executionMode,
   });
@@ -301,6 +319,58 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             <input type="number" value={rebalanceRoiHorizon} min={0} onChange={d(setRebalanceRoiHorizon, 1800)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
             <p className="text-xs text-slate-500 mt-1">Max seconds to recoup rebalance cost</p>
+          </div>
+        </div>
+
+        {/* Score Thresholds */}
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-3">Score Thresholds</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Trading Threshold</label>
+            <input type="number" value={tradingScoreThreshold} min={0.001} max={0.5} step={0.001}
+              onChange={d(setTradingScoreThreshold, 0.01)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+            <p className="text-xs text-slate-500 mt-1">Min score to trade/rebalance (default 0.01)</p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Strong Threshold</label>
+            <input type="number" value={strongScoreThreshold} min={0.01} max={1.0} step={0.01}
+              onChange={d(setStrongScoreThreshold, 0.1)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+            <p className="text-xs text-slate-500 mt-1">Score for Strong tier (default 0.1)</p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Very Strong Threshold</label>
+            <input type="number" value={veryStrongScoreThreshold} min={0.05} max={2.0} step={0.05}
+              onChange={d(setVeryStrongScoreThreshold, 0.3)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+            <p className="text-xs text-slate-500 mt-1">Score for Very Strong tier (default 0.3)</p>
+          </div>
+        </div>
+
+        {/* Net P&L Gate */}
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-3">Net P&L Gate</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Warmup Trades</label>
+            <input type="number" value={netPnlGateWarmupTrades} min={1} max={200} step={1}
+              onChange={d(setNetPnlGateWarmupTrades, 10)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+            <p className="text-xs text-slate-500 mt-1">Min trades before P&L gate activates (default 10)</p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Grace Period (s)</label>
+            <input type="number" value={netPnlGateGraceSeconds} min={60} max={7200} step={60}
+              onChange={d(setNetPnlGateGraceSeconds, 1800)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+            <p className="text-xs text-slate-500 mt-1">Grace period before blocking rebalances (default 1800s)</p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">ROI Gate Divisor</label>
+            <input type="number" value={rebalanceRoiDivisor} min={2} max={20} step={1}
+              onChange={d(setRebalanceRoiDivisor, 3)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+            <p className="text-xs text-slate-500 mt-1">ROI threshold = fee_rate / divisor. Higher = easier rebalance (default 3, try 5-10 for small capital)</p>
           </div>
         </div>
       </div>

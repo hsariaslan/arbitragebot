@@ -95,6 +95,14 @@ export interface Settings {
   rebalance_roi_horizon?: number;
   adaptive_mode?: boolean;
   execution_mode?: string;
+  // Score thresholds
+  trading_score_threshold?: number;
+  strong_score_threshold?: number;
+  very_strong_score_threshold?: number;
+  // Net P&L gate params
+  net_pnl_gate_warmup_trades?: number;
+  net_pnl_gate_grace_seconds?: number;
+  rebalance_roi_divisor?: number;
   // Security
   ip_whitelist_enabled?: boolean;
   ip_whitelist?: string[];

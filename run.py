@@ -197,6 +197,20 @@ async def main() -> None:
         demotion_period=settings.get("demotion_period", 600),
         min_warmup_ticks=MIN_WARMUP_TICKS,
     )
+    # Apply configurable score thresholds and gate params from settings
+    if "trading_score_threshold" in settings:
+        optimizer._trading_threshold = settings["trading_score_threshold"]
+    if "strong_score_threshold" in settings:
+        optimizer._strong_threshold = settings["strong_score_threshold"]
+    if "very_strong_score_threshold" in settings:
+        optimizer._very_strong_threshold = settings["very_strong_score_threshold"]
+    if "net_pnl_gate_warmup_trades" in settings:
+        monitor._net_pnl_gate_warmup_trades = int(settings["net_pnl_gate_warmup_trades"])
+    if "net_pnl_gate_grace_seconds" in settings:
+        monitor._net_pnl_gate_grace_seconds = int(settings["net_pnl_gate_grace_seconds"])
+    if "rebalance_roi_divisor" in settings:
+        monitor._rebalance_roi_divisor = int(settings["rebalance_roi_divisor"])
+
     monitor.set_optimizer(optimizer)
     monitor.record_config_snapshot("initial")
     logger.info(
