@@ -38,7 +38,7 @@ All 9 exchanges have working WebSocket fetchers implemented.
 | 8 | **Gate.io** | 0.09% | GT (10% off, enabled) | Post-connect JSON | 60/60 |
 | 9 | **Pionex** | 0.05% | None (VIP tiers only, volume-gated) | Post-connect JSON | 60/60 |
 
-**MEXC note:** Currently geo-blocked from user's location. Will use with future VPS deployment.
+**MEXC note:** Accessible from Bangkok VPS. 0.05% taker fee (lowest after Bitfinex), no discount token needed.
 **Pionex note:** Aggregates ~50-60% of order book from Binance (per CTO statement) — Pionex↔Binance arbitrage will be near-zero. Value is in Pionex vs OKX/KuCoin/Gate.io/Bybit/Bitget pairs.
 **Bitfinex note:** 0% taker/maker fees permanent since Dec 17, 2025. Free USDT withdrawals on 14 networks. Uses `tBTCUST` symbol format (UST not USDT). 30 sub limit per WS connection — uses 2 connections for 60 symbols. No BEP20 support. ~40-50 of 60 symbols available as UST pairs.
 
@@ -101,7 +101,7 @@ ARB, OP, FIL, ATOM, INJ
 
 ### Tier 4 - High Volume Additions (40 symbols)
 
-Sorted by ~24h volume. 38/40 available on all 8 exchanges.
+Sorted by ~24h volume. 38/40 available on all 9 exchanges.
 
 AAVE, BCH, PEPE, ZEC (6/7, not Bybit), LTC, HYPE (6/7, not Binance), XLM, UNI, ENA, SNX, TON, SHIB, ICP, ETC, TRUMP, HBAR, CHZ, AXS, PENGU, WLD, WIF, RENDER, ONDO, STRK, CRV, AR, FET, LDO, ALGO, EIGEN, PENDLE, APE, TIA, FLOKI, W, GRT, ORDI, JUP, COMP, DYDX
 
@@ -616,9 +616,10 @@ In demo mode, external USDT transfers use `InTransitFund` with estimated network
 
 | Phase | Setup | Cost |
 |-------|-------|------|
-| Test | Kamatera Tokyo (30-day free trial) with demo API keys | $0 |
-| Production | Contabo Tokyo with real API keys | ~$7.50/mo |
-| Optimized | 3 VPS: Tokyo (Binance) + Singapore (Bybit/Bitget/KuCoin/OKX) + Bangkok (MEXC + orchestrator) | ~$22.50/mo |
+| Current | LightNode Bangkok (monolithic, all 9 exchanges) | $7.70/mo |
+| Phase 2 | + Oracle Zurich (free, Bitfinex <1ms) | $7.70/mo |
+| Phase 3 | + Vultr Singapore (OKX/Bybit/Bitget/KuCoin/Gate.io) | $12.70/mo |
+| Phase 4 | + Tokyo VPS (Binance <1ms, Pionex) | ~$20/mo |
 
 ## Fee Management
 
@@ -663,26 +664,26 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 
 ## VPS Infrastructure
 
-### Current: Kamatera Tokyo (Test Phase)
+### Current: LightNode Bangkok (Production)
 
-- **Provider**: Kamatera — 30-day free trial (up to $100 credit)
-- **Location**: Tokyo, Japan
-- **OS**: Ubuntu
-- **Purpose**: Testing with demo/testnet API keys only. No real API keys on free VPS.
+- **Provider**: LightNode — $7.70/mo (2 vCPU, 2 GB RAM, 50 GB SSD)
+- **Location**: Bangkok, Thailand
+- **OS**: Ubuntu 22.04
+- **Purpose**: Production monolithic deployment — all 9 exchanges from single VPS. MEXC accessible (Thailand not geo-blocked). Auto-deploy via GitHub Actions on push to master.
 
-### Exchange Server Locations & Latency from Tokyo
+### Exchange Server Locations & Latency from Bangkok
 
-| Exchange | Server Location | Cloud | Latency from Tokyo |
-|----------|----------------|-------|:------------------:|
-| Binance | Tokyo, Japan | AWS ap-northeast-1 | **<1ms** |
-| OKX | Hong Kong | Alibaba Cloud / AWS HK | ~35ms |
-| Bybit | Singapore | AWS ap-southeast-1 | ~68ms |
-| Bitget | Singapore | AWS ap-southeast-1 | ~68ms |
-| KuCoin | Singapore | AWS | ~68ms |
-| Gate.io | Singapore | AWS ap-southeast-1 | ~68ms |
-| MEXC | Singapore | AWS ap-southeast-1 | ~68ms |
-| Pionex | Virginia, USA (likely) | AWS us-east-1 (via Cloudflare) | ~160ms |
-| Bitfinex | Zug, Switzerland | Bare-metal (Market Synergy) | ~250ms |
+| Exchange | Server Location | Cloud | Latency from Bangkok |
+|----------|----------------|-------|:--------------------:|
+| Binance | Tokyo, Japan | AWS ap-northeast-1 | ~4ms |
+| OKX | Hong Kong | Alibaba Cloud / AWS HK | ~63ms |
+| Bybit | Singapore | AWS ap-southeast-1 | ~90ms |
+| Bitget | Singapore | AWS ap-southeast-1 | ~106ms |
+| KuCoin | Singapore | AWS | ~25ms |
+| Gate.io | Singapore | AWS ap-southeast-1 | ~161ms |
+| MEXC | Singapore | AWS ap-southeast-1 | ~25ms |
+| Pionex | Virginia, USA (likely) | AWS us-east-1 (via Cloudflare) | ~5.8s (slow) |
+| Bitfinex | Zug, Switzerland | Bare-metal (Market Synergy) | ~1.2s |
 
 ### Pionex Geo-Restrictions
 
@@ -701,23 +702,18 @@ MEXC is **fully banned** in: Singapore, Hong Kong, US, Canada, China, North Kore
 MEXC is **partially restricted** in: Japan (API works, but bot crackdown risk), Turkey (use mexc.fm domain).
 MEXC is **fully accessible** in: Thailand, Vietnam, most of Europe.
 
-Tokyo VPS: MEXC API access works but monitor for enforcement. Use `mexc.fm` domain as fallback.
+Bangkok VPS: MEXC fully accessible from Thailand. No geo-restrictions.
 
-### Production Plan: Contabo Tokyo (~$7.50/mo)
+### Distributed Plan: 4 VPS (~$20/mo)
 
-- **Specs**: 4 vCPU, 8 GB RAM, 75 GB NVMe, unlimited traffic (200Mbps)
-- **Why**: Best value — 4× RAM needed, unlimited bandwidth for 6 WebSocket streams (~0.9 TB/mo)
-- **Location**: Tokyo — <1ms to Binance, ~68ms to SG exchanges
+| VPS | Location | Provider | Exchanges | Cost |
+|-----|----------|----------|-----------|:----:|
+| VPS 1 | Bangkok | LightNode | MEXC + **Orchestrator** | $7.70 |
+| VPS 2 | Singapore | Vultr | OKX, Bybit, Bitget, KuCoin, Gate.io | $5.00 |
+| VPS 3 | Tokyo | TBD | Binance (<1ms), Pionex | ~$7.50 |
+| VPS 4 | Zurich | Oracle (free) | Bitfinex (<1ms) | $0 |
 
-### Optimized Plan: 3 VPS (~$22.50/mo) — Recommended
-
-| VPS | Location | Exchanges | Worst Latency | Cost |
-|-----|----------|-----------|:-------------:|:----:|
-| VPS 1 | Tokyo | Binance (<1ms), OKX (35ms) | 35ms | ~$7.50 |
-| VPS 2 | Bangkok | Bybit (25ms), Bitget (25ms), KuCoin (25ms), Gate.io (25ms), MEXC (25ms), Pionex (~200ms) + **Orchestrator** | ~200ms | ~$7.50 |
-| VPS 3 | Frankfurt | Bitfinex (~5ms) | ~5ms | ~$7.50 |
-
-Bangkok is the optimal orchestrator location (all 9 exchanges accessible, lowest aggregate inter-VPS latency). Bitfinex at 0% fees deserves dedicated low-latency VPS (~5ms vs ~250ms from Tokyo).
+Bangkok is the orchestrator (all 9 exchanges accessible, MEXC requires Thailand). Bitfinex at 0% fees benefits from dedicated low-latency VPS in Zurich (<1ms vs ~1.2s from Bangkok).
 
 See `documentations/VPS.md` for full latency matrix, geo-restriction matrix, and 4 VPS configuration options (2-5 VPS).
 

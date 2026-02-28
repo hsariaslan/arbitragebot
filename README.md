@@ -1,8 +1,8 @@
 # CoirnaBot
 
-**v0.12.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
+**v0.13.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
 
-Monitors real-time prices across 9 crypto exchanges via WebSocket, detects price discrepancies, and executes simultaneous buy/sell orders to profit from the spread. Supports simulation mode and demo/testnet execution with automatic discrepancy detection.
+Monitors real-time prices across 9 crypto exchanges via WebSocket, detects price discrepancies, and executes simultaneous buy/sell orders to profit from the spread. Deployed on Bangkok VPS with auto-deploy via GitHub Actions. Supports simulation mode and demo/testnet execution with automatic discrepancy detection.
 
 ## Features
 
@@ -107,6 +107,7 @@ coirnabot/
     binance.py            # Binance WebSocket fetcher
     okx.py                # OKX WebSocket fetcher
     bybit.py              # Bybit WebSocket fetcher
+    mexc.py               # MEXC WebSocket fetcher
     bitget.py             # Bitget WebSocket fetcher
     kucoin.py             # KuCoin WebSocket fetcher (REST token + WS)
     gateio.py             # Gate.io WebSocket fetcher
