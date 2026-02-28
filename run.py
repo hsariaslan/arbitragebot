@@ -199,6 +199,13 @@ async def main() -> None:
     )
     monitor.set_optimizer(optimizer)
     monitor.record_config_snapshot("initial")
+    logger.info(
+        f"[Config] trade_amount=${trade_amount} capital=${total_capital:.0f} "
+        f"adaptive={adaptive_mode} min_net={settings.get('min_net_profit_pct', 0.02):.2f}% "
+        f"rebalance_cooldown={settings.get('rebalance_cooldown', 30.0):.0f}s "
+        f"max_symbols={settings.get('max_active_symbols', 8)} "
+        f"execution_mode={settings.get('execution_mode', 'simulation')}"
+    )
 
     state_mgr = StateManager()
     saved = state_mgr.load()
