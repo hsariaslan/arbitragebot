@@ -5,10 +5,26 @@ on:
     branches: [master]
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy via SSH
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build Dashboard
+        run: |
+          cd dashboard
+          npm ci
+          npm run build
+
+      - name: Deploy code to VPS
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -17,4 +33,26 @@ jobs:
           script: |
             cd /root/coirnabot
             git pull origin master
-            bash scripts/deploy.sh
+            cp scripts/coirnabot.service /etc/systemd/system/coirnabot.service
+            systemctl daemon-reload
+            .venv/bin/pip install -r requirements.txt --quiet
+
+      - name: Upload built dashboard
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "dashboard/dist/"
+          target: "/root/coirnabot/"
+          overwrite: true
+
+      - name: Restart bot
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            systemctl restart coirnabot
+            echo "Deploy complete, bot restarted"

@@ -18,203 +18,391 @@ Optimal VPS placement for minimizing latency across 9 exchanges, accounting for 
 
 ## Full Latency Matrix (RTT in ms)
 
-| Exchange | Tokyo | Bangkok | Singapore | Frankfurt | Virginia |
-|----------|:-----:|:-------:|:---------:|:---------:|:--------:|
-| Binance | **<1** | ~90 | ~68 | ~245 | ~170 |
-| OKX | ~35 | ~60 | ~35 | ~150 | ~200 |
-| Bybit | ~68 | ~25 | **<1** | ~160 | ~230 |
-| Bitget | ~68 | ~25 | **<1** | ~160 | ~230 |
-| KuCoin | ~68 | ~25 | **<1** | ~160 | ~230 |
-| Gate.io | ~68 | ~25 | **<1** | ~160 | ~230 |
-| MEXC | ~68 | ~25 | **<1** | ~160 | ~230 |
-| Pionex | ~160 | ~200 | ~230 | ~90 | **~5** |
-| Bitfinex | ~250 | ~220 | ~180 | **~5** | ~80 |
+| Exchange | Tokyo | Bangkok | Singapore | Zurich | Frankfurt | Virginia |
+|----------|:-----:|:-------:|:---------:|:------:|:---------:|:--------:|
+| Binance | **<1** | ~70 | ~68 | ~240 | ~245 | ~170 |
+| OKX | ~35 | ~60 | ~35 | ~150 | ~150 | ~200 |
+| Bybit | ~68 | ~25 | **<1** | ~180 | ~160 | ~230 |
+| Bitget | ~68 | ~25 | **<1** | ~180 | ~160 | ~230 |
+| KuCoin | ~68 | ~25 | **<1** | ~180 | ~160 | ~230 |
+| Gate.io | ~68 | ~25 | **<1** | ~180 | ~160 | ~230 |
+| MEXC | ~68 | ~25 | **<1** | ~180 | ~160 | ~230 |
+| Pionex | ~160 | ~200 | ~230 | ~90 | ~90 | **~5** |
+| Bitfinex | ~250 | ~250 | ~180 | **<1** | **~5** | ~80 |
+
+**Zurich vs Frankfurt for Bitfinex**: Bitfinex is in Zug, Switzerland — ~30km from Zurich. RTT from Zurich is <1ms vs ~5ms from Frankfurt. Zurich is the optimal location for Bitfinex.
 
 ## Geo-Restriction Matrix
 
 Exchanges blocked from each VPS location (X = blocked, ! = risky):
 
-| Exchange | Tokyo | Bangkok | Singapore | Frankfurt | Virginia |
-|----------|:-----:|:-------:|:---------:|:---------:|:--------:|
-| Binance | OK | OK | OK | OK | **X** (US) |
-| OKX | OK | OK | OK | OK | **X** (US) |
-| Bybit | **!** (exiting JP 2026) | OK | **X** | OK | **X** (US) |
-| Bitget | OK | OK | **X** | OK | **X** (US) |
-| KuCoin | OK | OK | **X** | OK | **X** (US) |
-| Gate.io | OK | OK | OK | OK | **X** (US) |
-| MEXC | **!** (FSA risk) | OK | **X** | OK | **X** (US) |
-| Pionex | **X** (KYC-blocked) | OK | **X** | OK (monitor EU) | **X** (US) |
-| Bitfinex | **!** (FSA warnings) | OK | OK | OK | **X** (US) |
+| Exchange | Tokyo | Bangkok | Singapore | Zurich | Frankfurt | Virginia |
+|----------|:-----:|:-------:|:---------:|:------:|:---------:|:--------:|
+| Binance | OK | OK | OK | OK | OK | **X** (US) |
+| OKX | OK | OK | OK | OK | OK | **X** (US) |
+| Bybit | **!** (exiting JP 2026) | OK | **X** | OK | OK | **X** (US) |
+| Bitget | OK | OK | **X** | OK | OK | **X** (US) |
+| KuCoin | OK | OK | **X** | OK | OK | **X** (US) |
+| Gate.io | OK | OK | OK | OK | OK | **X** (US) |
+| MEXC | **!** (FSA risk) | OK | **X** | OK | OK | **X** (US) |
+| Pionex | **X** (KYC-blocked) | OK | **X** | OK (monitor EU) | OK (monitor EU) | **X** (US) |
+| Bitfinex | **!** (FSA warnings) | OK | OK | OK | OK | **X** (US) |
 
 **Summary of blocked locations**:
 - **Tokyo**: Pionex KYC-blocked. MEXC/Bybit/Bitfinex at regulatory risk from Japan FSA.
-- **Bangkok**: All 9 exchanges accessible. No restrictions.
-- **Singapore**: Bybit, Bitget, KuCoin, MEXC, Pionex all blocked. Only 4/9 accessible.
-- **Frankfurt**: All 9 accessible. Germany not on any exchange's restricted list. Monitor EU MiCA for Pionex.
+- **Bangkok**: All 9 exchanges accessible. No restrictions. Best for orchestrator.
+- **Singapore**: Bybit, Bitget, KuCoin, MEXC, Pionex all blocked. Only 4/9 accessible (Binance, OKX, Gate.io, Bitfinex).
+- **Zurich/Frankfurt**: All 9 accessible. Monitor EU MiCA for Pionex.
 - **Virginia**: All exchanges blocked (US).
+
+## Current Infrastructure
+
+### Active VPS Providers
+
+| VPS | Location | Provider | Cost | Specs | Expiry |
+|-----|----------|----------|:----:|-------|--------|
+| 1 | **Bangkok** | LightNode | $7.70/mo | 1 vCPU, 2 GB RAM, 50 GB NVMe | Ongoing (hourly billing) |
+| 2 | **Tokyo** | Kamatera | $0 (trial) | 2 vCPU, 2 GB RAM, 30 GB NVMe | ~30 days from creation |
+| 3 | **Singapore** | Vultr | $5 credit | Not yet deployed | $5 credit available |
+| 4 | **Zurich** | Oracle Cloud | $0 (always free) | 4 ARM OCPUs, 24 GB RAM | Never (always free tier) |
+
+**Status**: Bangkok VPS active. Tokyo VPS on free trial. Vultr Singapore paid ($5) but not deployed. Oracle Zurich pending account setup.
+
+### VPS Provider Notes
+
+**LightNode (Bangkok)**:
+- Confirmed Bangkok datacenter (ASN AS138915, Kaopu Cloud HK Limited)
+- Verified via traceroute and IP geolocation — real Bangkok, not Singapore proxy
+- Speed test: lightnode.com/speed/tha-bangkok-1
+- Hourly billing — can upgrade/downgrade anytime
+- ~$15 signup credit covers first ~2 months
+- 4.9/5 reliability rating on HostAdvice
+
+**Kamatera (Tokyo)**:
+- 30-day free trial (up to $100 credit)
+- Good for testing, not long-term (limited free tier)
+
+**Vultr (Singapore)**:
+- $5 account activation already paid
+- Has Singapore datacenter (confirmed)
+- Does NOT have Bangkok datacenter (only Tokyo, Osaka, Seoul, Singapore, Mumbai, Bangalore, Delhi in Asia)
+- Cheapest plan: $5/mo (1 vCPU, 1 GB RAM, 25 GB SSD, 1 TB bandwidth)
+
+**Oracle Cloud (Zurich)**:
+- Always Free tier: 2x AMD Micro VMs (1 OCPU, 1 GB each) + 4x ARM A1 Flex (total 4 OCPUs, 24 GB RAM)
+- Only one free account per person (email, phone, credit card checked)
+- Zurich datacenter: <1ms to Bitfinex in Zug (~30km)
+- Note: Account signup has aggressive rate limiting — may need to wait and retry
+
+### Bangkok VPS Provider Comparison
+
+| # | Provider | Price/mo | vCPU | RAM | Storage | Bangkok DC? |
+|---|----------|:--------:|:----:|:---:|---------|:-----------:|
+| 1 | **LightNode** | **$7.70** | 1 | 2 GB | 50 GB NVMe | **Yes** (verified) |
+| 2 | **VinaHost** | **$9.45** | 2 | 2 GB | 30 GB SSD | **Yes** (Tier 3) |
+| 3 | **AplusHosting** | **$12.90** | 1 | 2 GB | 40 GB SSD | **Yes** |
+| 4 | **VPSThai** | **$79** | 1 | 4 GB | 200 GB | **Yes** (UIH IDC) |
+
+**Not in Bangkok**: Vultr (no Bangkok DC), IONOS (no Asia DCs), Cloudzy (uses Singapore DC).
 
 ## VPS Combinations
 
-### Option A: 2 VPS — Practical Minimum (~$15/mo)
+### Option A: 2 VPS — Current Setup (~$7.70/mo)
 
-| VPS | Location | Exchanges | Worst Latency | Cost |
-|-----|----------|-----------|:-------------:|:----:|
-| 1 | **Tokyo** | Binance (<1ms), OKX (35ms), Bybit (68ms), Bitget (68ms), KuCoin (68ms), Gate.io (68ms) | 68ms | ~$7.50 |
-| 2 | **Bangkok** | MEXC (25ms), Pionex (~200ms), Bitfinex (~220ms) + **Orchestrator** | ~220ms | ~$7.50 |
+| VPS | Location | Provider | Exchanges | Worst Latency | Cost |
+|-----|----------|----------|-----------|:-------------:|:----:|
+| 1 | **Bangkok** | LightNode | All 9 exchanges + **Orchestrator** | ~250ms (Bitfinex) | $7.70 |
+| 2 | **Tokyo** | Kamatera | (backup/testing) | — | $0 (trial) |
 
-**Pros**: Cheapest option. Handles all geo-restrictions. 6 exchanges at <68ms.
-**Cons**: Bitfinex at ~220ms and Pionex at ~200ms from Bangkok. Inter-VPS latency Bangkok→Tokyo: ~90ms.
+**Monolithic**: Entire bot runs on Bangkok VPS. All 9 exchanges connect directly.
 
-**Architecture**: Bangkok orchestrator collects prices from all VPS, detects arbitrage, dispatches orders. Tokyo VPS runs 6 exchange fetchers + order execution for those exchanges.
+### Option B: 3 VPS — Balanced (~$7.70/mo + free)
 
-### Option B: 3 VPS — Balanced (~$22.50/mo) ★ Recommended
+| VPS | Location | Provider | Exchanges | Worst Latency | Cost |
+|-----|----------|----------|-----------|:-------------:|:----:|
+| 1 | **Bangkok** | LightNode | MEXC (25ms) + **Orchestrator** | 25ms | $7.70 |
+| 2 | **Tokyo** | Kamatera | Binance (<1ms), Pionex (~160ms) | ~160ms | $0 |
+| 3 | **Zurich** | Oracle Cloud | Bitfinex (<1ms) | <1ms | $0 |
 
-| VPS | Location | Exchanges | Worst Latency | Cost |
-|-----|----------|-----------|:-------------:|:----:|
-| 1 | **Tokyo** | Binance (<1ms), OKX (35ms) | 35ms | ~$7.50 |
-| 2 | **Bangkok** | Bybit (25ms), Bitget (25ms), KuCoin (25ms), Gate.io (25ms), MEXC (25ms), Pionex (~200ms) + **Orchestrator** | ~200ms | ~$7.50 |
-| 3 | **Frankfurt** | Bitfinex (~5ms) | ~5ms | ~$7.50 |
+**Requires**: Distributed relay architecture (see below).
 
-**Pros**: Bitfinex latency drops from ~220ms to ~5ms (50x improvement). 8/9 exchanges under 68ms. Bitfinex is the most valuable exchange (0% fees) — deserves dedicated low-latency connection.
-**Cons**: Pionex still ~200ms from Bangkok. Inter-VPS latency: Frankfurt→Bangkok ~180ms, Tokyo→Bangkok ~90ms.
+### Option C: 4 VPS — Optimal (~$12.70/mo) ★ Recommended
 
-**Why this is recommended**: Bitfinex at 0% fees is the #1 exchange for arbitrage profit. Every Bitfinex-involving pair saves 0.05-0.10% in fees compared to any other pair. Reducing Bitfinex latency from ~220ms to ~5ms significantly increases the chance of capturing these opportunities before they close.
+| VPS | Location | Provider | Exchanges | Worst Latency | Cost |
+|-----|----------|----------|-----------|:-------------:|:----:|
+| 1 | **Bangkok** | LightNode | MEXC (25ms) + **Orchestrator** | 25ms | $7.70 |
+| 2 | **Singapore** | Vultr | OKX (<35ms), Bybit (<1ms), Bitget (<1ms), KuCoin (<1ms), Gate.io (<1ms) | ~35ms | $5 |
+| 3 | **Tokyo** | Kamatera | Binance (<1ms), Pionex (~160ms) | ~160ms | $0 |
+| 4 | **Zurich** | Oracle Cloud | Bitfinex (<1ms) | <1ms | $0 |
 
-### Option C: 4 VPS — Optimal (~$30/mo)
+**Requires**: Distributed relay architecture.
 
-| VPS | Location | Exchanges | Worst Latency | Cost |
-|-----|----------|-----------|:-------------:|:----:|
-| 1 | **Tokyo** | Binance (<1ms) | <1ms | ~$7.50 |
-| 2 | **Singapore** | Bybit (<1ms), Bitget (<1ms), KuCoin (<1ms), Gate.io (<1ms), OKX (35ms) | 35ms | ~$7.50 |
-| 3 | **Bangkok** | MEXC (25ms), Pionex (~200ms) + **Orchestrator** | ~200ms | ~$7.50 |
-| 4 | **Frankfurt** | Bitfinex (~5ms) | ~5ms | ~$7.50 |
+**Why this is recommended**: Every exchange connects from its optimal geographic location. Total cost $12.70/mo ($7.70 LightNode + $5 Vultr). Tokyo and Zurich are free. All 9 exchanges accessible (MEXC in Bangkok, not blocked). 7/9 exchanges at <35ms from their fetcher node.
 
-**Pros**: Every exchange except Pionex is <35ms from its VPS. Singapore gets 5 exchanges at <1ms (vs 25ms from Bangkok). Cleanest separation.
-**Cons**: Singapore can't run MEXC or Pionex (blocked). OKX slightly better from Hong Kong but 35ms from Singapore is fine. Extra $7.50/mo for marginal improvement over Option B.
+**Note on Singapore geo-restrictions**: Bybit, Bitget, KuCoin, MEXC, Pionex are listed as blocked in Singapore. However, these restrictions are typically KYC/account-level (not IP-level). WebSocket data feeds (read-only, no authentication) may work from Singapore even for "blocked" exchanges. **Must verify** by testing WebSocket connections from the Vultr Singapore VPS before committing to this architecture. If blocked at IP level, fall back to Option B (move those exchanges to Bangkok).
 
-**Note**: Singapore VPS cannot run MEXC (blocked) or Pionex (blocked). Only use it for Bybit, Bitget, KuCoin, Gate.io, and optionally OKX.
+### Option D: 5 VPS — Maximum (~$12.70/mo + $7.50)
 
-### Option D: 5 VPS — Maximum (~$37.50/mo)
+| VPS | Location | Provider | Exchanges | Worst Latency | Cost |
+|-----|----------|----------|-----------|:-------------:|:----:|
+| 1 | **Bangkok** | LightNode | MEXC (25ms) + **Orchestrator** | 25ms | $7.70 |
+| 2 | **Singapore** | Vultr | Bybit (<1ms), Bitget (<1ms), KuCoin (<1ms), Gate.io (<1ms), OKX (~35ms) | ~35ms | $5 |
+| 3 | **Tokyo** | Contabo | Binance (<1ms), Pionex (~160ms) | ~160ms | ~$7.50 |
+| 4 | **Zurich** | Oracle Cloud | Bitfinex (<1ms) | <1ms | $0 |
+| 5 | **Virginia** | Any | Pionex (~5ms) | ~5ms | ~$7.50 |
 
-| VPS | Location | Exchanges | Worst Latency | Cost |
-|-----|----------|-----------|:-------------:|:----:|
-| 1 | **Tokyo** | Binance (<1ms) | <1ms | ~$7.50 |
-| 2 | **Singapore** | Bybit (<1ms), Bitget (<1ms), KuCoin (<1ms), Gate.io (<1ms), OKX (35ms) | 35ms | ~$7.50 |
-| 3 | **Bangkok** | MEXC (25ms) + **Orchestrator** | 25ms | ~$7.50 |
-| 4 | **Frankfurt** | Bitfinex (~5ms) | ~5ms | ~$7.50 |
-| 5 | **Virginia** | Pionex (~5ms) | ~5ms | ~$7.50 |
+**Same as Option C** but with a paid Tokyo VPS (when Kamatera trial expires) and an optional Virginia VPS for Pionex. The Virginia VPS for a single 0.05% exchange is not justified — skip it.
 
-**Pros**: Every single exchange at <35ms. Pionex drops from ~200ms to ~5ms.
-**Cons**: Pionex at 0.05% fee with shared Binance order book doesn't justify a dedicated $7.50/mo VPS. Virginia VPS would only serve one exchange. Overkill.
+**Post-trial plan**: When Kamatera Tokyo expires, either pay for a Tokyo VPS (~$7.50/mo Contabo) or move Binance/Pionex to Bangkok (70ms/200ms — acceptable for monolithic fallback).
 
 ## Inter-VPS Communication Latency
 
-For multi-VPS setups, the orchestrator needs to communicate with all VPS nodes.
+For the distributed architecture, the orchestrator (Bangkok) communicates with all fetcher nodes:
 
 | From → To | RTT (ms) | Notes |
 |-----------|:--------:|-------|
-| Bangkok → Tokyo | ~90ms | |
-| Bangkok → Singapore | ~25ms | |
-| Bangkok → Frankfurt | ~180ms | |
-| Bangkok → Virginia | ~250ms | |
+| Bangkok → Singapore | ~25ms | Excellent — 5 SG exchanges |
+| Bangkok → Tokyo | ~70ms | Good — Binance |
+| Bangkok → Zurich | ~250ms | High — but Bitfinex data is inherently slow |
 | Tokyo → Singapore | ~68ms | |
-| Tokyo → Frankfurt | ~245ms | |
-| Frankfurt → Virginia | ~90ms | |
+| Tokyo → Zurich | ~240ms | |
+| Singapore → Zurich | ~180ms | |
 
-**Bangkok is the best orchestrator location** for Options A-D:
-- Total aggregate RTT to all other VPS is lowest from Bangkok
-- Handles MEXC (geo-blocked elsewhere) and Pionex (geo-blocked from Tokyo/Singapore)
-- ~90ms to Tokyo, ~25ms to Singapore, ~180ms to Frankfurt
+**Bangkok is the best orchestrator location**:
+- Only location where all 9 exchanges are accessible (no geo-restrictions)
+- ~25ms to Singapore fetcher node (5 exchanges)
+- ~70ms to Tokyo fetcher node (Binance)
+- Handles MEXC locally (geo-blocked in Singapore/Tokyo-risky)
 
-## Orchestrator Architecture
+## Distributed Relay Architecture
+
+### Why Distributed?
+
+The monolithic bot connects to all exchanges from a single location. The distributed architecture places fetcher nodes close to exchanges for better **WebSocket connection quality** (stability, fewer reconnections, lower jitter).
+
+**Key insight**: Distributed does NOT make the orchestrator see prices faster — the relay adds the same delay as a direct connection. The real benefits are:
+
+1. **WebSocket connection stability**: A fetcher <1ms from its exchange has rock-solid connections. From 250ms away, you get more jitter, packet loss, and reconnections. For a 24/7 bot, this compounds.
+2. **Accurate timestamps**: Local fetcher timestamps data at capture time, before relay delay. The orchestrator knows the TRUE age of each price.
+3. **Resilience**: If one VPS goes down briefly, other fetcher nodes keep collecting data. Orchestrator reconnects and catches up.
+4. **Clean separation**: Each node handles its geographic cluster. Easy to add/remove exchanges.
+
+### Latency Comparison: Monolithic vs Distributed
+
+| Exchange | Monolithic (Bangkok) | Distributed (capture + relay) | Net Difference |
+|----------|:-------------------:|:-----------------------------:|:--------------:|
+| OKX, Bybit, Bitget, KuCoin, Gate.io | 25ms direct | <1ms + 25ms relay = 26ms | ~0 (same) |
+| Binance | ~70ms direct | <1ms + 70ms relay = 71ms | ~0 (same) |
+| MEXC | ~25ms direct | 25ms local | 0 (same) |
+| Pionex | ~200ms direct | ~160ms + 70ms relay = 230ms | +30ms (worse) |
+| Bitfinex | ~250ms direct | <1ms + 250ms relay = 251ms | ~0 (same) |
+
+**Detection latency is the same**. The orchestrator sees prices at roughly the same speed. The benefit is connection quality, not speed.
+
+### Architecture Diagram (Option C — 4 VPS)
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌───────────────┐
-│  Tokyo VPS  │     │ Bangkok VPS  │     │ Frankfurt VPS │
-│             │     │ (Orchestrator)│     │               │
-│  Binance    │◄───►│  MEXC        │◄───►│  Bitfinex     │
-│  OKX        │     │  Pionex      │     │               │
-│             │     │              │     │               │
-│  Fetcher +  │     │  Fetcher +   │     │  Fetcher +    │
-│  Executor   │     │  Executor +  │     │  Executor     │
-│             │     │  Monitor +   │     │               │
-│             │     │  Dashboard   │     │               │
-└─────────────┘     └──────────────┘     └───────────────┘
-       ~90ms              Hub               ~180ms
+Zurich (Oracle, Free)          Tokyo (Kamatera, Free)
+  Bitfinex <1ms                  Binance <1ms
+  Fetcher + Executor             Pionex ~160ms
+       │                         Fetcher + Executor
+       │                              │
+       └──── relay (~250ms) ──────────┤
+                                      │
+                               Bangkok (LightNode, $7.70)
+                                 MEXC ~25ms (local)
+                                 Orchestrator:
+                                   Monitor + Optimizer
+                                   Balance + Dashboard
+                                   State Manager
+                                      │
+                                      │
+       ┌──── relay (~25ms) ───────────┘
+       │
+Singapore (Vultr, $5)
+  OKX ~35ms
+  Bybit <1ms
+  Bitget <1ms
+  KuCoin <1ms
+  Gate.io <1ms
+  Fetcher + Executor
 ```
 
-Each VPS runs:
-- **Fetcher**: WebSocket connections to assigned exchanges, streams price data to orchestrator
-- **Executor**: Receives order commands from orchestrator, executes on local exchanges (lowest latency)
+### Relay Protocol
+
+Each fetcher node runs a lightweight WebSocket relay server that streams price data to the orchestrator:
+
+**Fetcher Node → Orchestrator (price relay)**:
+```json
+{
+  "type": "price_update",
+  "exchange": "binance",
+  "symbol": "BTCUSDT",
+  "bid": "84250.50",
+  "ask": "84251.00",
+  "bid_qty": "1.5",
+  "ask_qty": "2.0",
+  "last_price": "84250.75",
+  "volume": "12345.6",
+  "captured_at": 1709136000.123,
+  "node": "tokyo"
+}
+```
+
+**Orchestrator → Fetcher Node (execution command)**:
+```json
+{
+  "type": "execute_trade",
+  "exchange": "binance",
+  "symbol": "BTCUSDT",
+  "side": "buy",
+  "quantity": "0.001",
+  "price": "84251.00",
+  "order_type": "market",
+  "client_order_id": "coirna-BTC-buy-1709136000-a1b2c3"
+}
+```
+
+### Components
+
+Each fetcher node runs:
+- **Exchange Fetchers**: WebSocket connections to assigned exchanges (existing code)
+- **Relay Server**: Streams `PriceState` updates to orchestrator via authenticated WebSocket
+- **Executor**: Receives trade commands from orchestrator, executes on local exchanges
 
 Orchestrator (Bangkok) runs:
+- **Relay Client**: Connects to all fetcher nodes, populates local `_state` dicts (acts like a virtual fetcher)
+- **Local Fetchers**: MEXC connects directly (local to Bangkok)
 - **Monitor**: Aggregates all prices, detects arbitrage opportunities
-- **Balance Tracker**: Manages capital across all exchanges
 - **Optimizer**: Symbol scoring, rotation, dominant pair detection
+- **Balance Tracker**: Capital management across all exchanges
 - **Dashboard**: WebSocket server for the React dashboard
 - **State Manager**: Persistence, periodic saves
 
+### Execution Routing
+
+When the orchestrator detects an opportunity (e.g., buy on Binance, sell on Bitget):
+1. Orchestrator sends `execute_trade` command to **Tokyo node** (buy on Binance)
+2. Orchestrator sends `execute_trade` command to **Singapore node** (sell on Bitget)
+3. Both execute locally with <1ms to their exchanges
+4. Both report `TradeResult` back to orchestrator
+5. Orchestrator records the trade, updates balance tracker
+
+**MEXC trades**: Executed directly by the orchestrator (MEXC is local to Bangkok, ~25ms to SG servers).
+
+### Security
+
+- Relay connections authenticated with pre-shared API key (not exchange keys — just inter-node auth)
+- Relay WebSocket uses WSS (TLS) for encrypted transit
+- Fetcher nodes never expose exchange API keys to the orchestrator
+- Each node stores only the exchange API keys it needs
+
 ## Recommended Deployment Phases
 
-### Phase 1: Test (Current) — 1 VPS, $0
+### Phase 1: Monolithic Bangkok (Current) — $7.70/mo
 
-| VPS | Location | Exchanges | Purpose |
-|-----|----------|-----------|---------|
-| 1 | **Kamatera Tokyo** (30-day free trial) | All 9 from single location | Testing with demo API keys |
+| VPS | Location | Provider | Exchanges | Purpose |
+|-----|----------|----------|-----------|---------|
+| 1 | **Bangkok** | LightNode | All 9 from single location | 24/7 production, all exchanges |
+| 2 | **Tokyo** | Kamatera (trial) | — | Backup/testing |
 
-Latency: <1ms to Binance, ~68ms to SG exchanges, ~160ms to Pionex, ~250ms to Bitfinex.
-Good enough for simulation and demo testing.
+Deploy the monolithic bot to Bangkok. Measure actual latencies and data freshness. All 9 exchanges accessible. ~25ms to SG exchanges, ~70ms to Binance, ~200ms to Pionex, ~250ms to Bitfinex.
 
-### Phase 2: Production Start — 2 VPS, ~$15/mo (Option A)
+**Immediate goal**: Get 24/7 uptime. Replace running from local PC.
 
-| VPS | Location | Provider | Exchanges |
-|-----|----------|----------|-----------|
-| 1 | **Tokyo** | Contabo (4 vCPU, 8GB, $7.50) | Binance, OKX, Bybit, Bitget, KuCoin, Gate.io |
-| 2 | **Bangkok** | Contabo (4 vCPU, 8GB, $7.50) | MEXC, Pionex, Bitfinex + Orchestrator |
+### Phase 2: Add Bitfinex Node — $7.70/mo + free
 
-Start here. Measure Bitfinex performance. If Bitfinex pairs are profitable but latency-limited, upgrade.
+| VPS | Location | Provider | Exchanges | Purpose |
+|-----|----------|----------|-----------|---------|
+| 1 | **Bangkok** | LightNode | 8 exchanges + Orchestrator | Main bot |
+| 2 | **Zurich** | Oracle Cloud (free) | Bitfinex (<1ms) | Bitfinex fetcher + executor |
 
-### Phase 3: Bitfinex Optimization — 3 VPS, ~$22.50/mo (Option B) ★
+Set up Oracle Cloud Zurich (always free). Run Bitfinex fetcher there. Requires implementing the relay protocol. Bitfinex connection quality improves dramatically (<1ms vs 250ms).
 
-| VPS | Location | Provider | Exchanges |
-|-----|----------|----------|-----------|
-| 1 | **Tokyo** | Contabo | Binance, OKX |
-| 2 | **Bangkok** | Contabo | Bybit, Bitget, KuCoin, Gate.io, MEXC, Pionex + Orchestrator |
-| 3 | **Frankfurt** | Contabo | Bitfinex |
+### Phase 3: Distribute to Singapore — $12.70/mo + free
 
-Add Frankfurt VPS when data shows Bitfinex opportunities are being missed due to latency.
+| VPS | Location | Provider | Exchanges | Purpose |
+|-----|----------|----------|-----------|---------|
+| 1 | **Bangkok** | LightNode | MEXC + Orchestrator | Hub |
+| 2 | **Singapore** | Vultr ($5) | OKX, Bybit, Bitget, KuCoin, Gate.io | SG fetcher + executor |
+| 3 | **Tokyo** | Kamatera (free) | Binance, Pionex | JP fetcher + executor |
+| 4 | **Zurich** | Oracle Cloud (free) | Bitfinex | CH fetcher + executor |
 
-### Phase 4: Full Optimization — 4 VPS, ~$30/mo (Option C)
+Full distributed architecture (Option C). Verify Singapore geo-restrictions first — test WebSocket connections from Vultr SG VPS. If SG exchanges block Vultr IPs, move those exchanges back to Bangkok.
 
-| VPS | Location | Provider | Exchanges |
-|-----|----------|----------|-----------|
-| 1 | **Tokyo** | Contabo | Binance |
-| 2 | **Singapore** | Contabo | Bybit, Bitget, KuCoin, Gate.io, OKX |
-| 3 | **Bangkok** | Contabo | MEXC, Pionex + Orchestrator |
-| 4 | **Frankfurt** | Contabo | Bitfinex |
+### Phase 4: Post-Trial — ~$20/mo
 
-Add Singapore VPS when data shows SG-exchange latency matters (25ms vs 68ms from Bangkok).
+When Kamatera Tokyo trial expires:
+- **Option A**: Pay for Tokyo VPS (~$7.50/mo Contabo) — keeps Binance at <1ms
+- **Option B**: Move Binance/Pionex to Bangkok — saves $7.50/mo, Binance at ~70ms (acceptable)
+- **Option C**: Move Binance to Singapore node — ~68ms from SG (acceptable, saves Tokyo VPS)
 
 ## Hardware Requirements
 
-| Resource | Requirement | Notes |
-|----------|:-----------:|-------|
-| **RAM** | 2 GB sufficient | 6 WS connections ~200MB + dashboard build ~500MB peak |
-| **CPU** | 1 vCPU fine | WebSocket parsing is not CPU-bound |
-| **Storage** | 40+ GB | Logs, CSV snapshots, node_modules, dashboard build |
-| **Bandwidth** | ~0.9 TB/mo | 9 exchanges × 60 symbols × ~1KB/update × 1/sec |
+| Resource | Orchestrator | Fetcher Node | Notes |
+|----------|:----------:|:------------:|-------|
+| **RAM** | 2 GB | 1 GB | Orchestrator needs more for dashboard + optimizer |
+| **CPU** | 1 vCPU | 1 vCPU | WebSocket parsing is not CPU-bound |
+| **Storage** | 40+ GB | 10 GB | Logs, CSV, state on orchestrator; minimal on fetchers |
+| **Bandwidth** | ~0.5 TB/mo | ~0.2-0.4 TB/mo | Fetcher nodes relay to orchestrator |
 
-### VPS Provider Comparison (Tokyo)
+**2 GB RAM is sufficient** for the orchestrator (Bangkok). Dashboard is built on GitHub Actions runners (16 GB RAM), not on the VPS. VPS only serves pre-built static files (~2-5 MB).
 
-| Provider | vCPU | RAM | Storage | Bandwidth | Price/mo |
-|----------|:----:|:---:|---------|-----------|:--------:|
-| **Contabo** | 4 | 8 GB | 75 GB NVMe | Unlimited (200Mbps) | ~$7.50 |
-| Kamatera | 2 | 2 GB | 30 GB NVMe | Included | ~$6 |
-| Vultr | 1 | 2 GB | 55 GB | 2 TB | $10 |
-| AWS Lightsail | 2 | 2 GB | 60 GB SSD | 3 TB | $12 |
-| Vultr High Perf | 1 | 2 GB | 50 GB NVMe | 3 TB | $12 |
+| Component | RAM Usage |
+|-----------|:---------:|
+| OS (Ubuntu) | ~200-300 MB |
+| Python + WebSocket fetchers | ~200 MB |
+| Monitor + Optimizer + Balance | ~100 MB |
+| Dashboard server (runtime) | ~50 MB |
+| **Total runtime** | **~550-650 MB** |
 
-**Contabo** is the best value: 4× the RAM needed, unlimited bandwidth for all WebSocket streams, available in Tokyo/Singapore/multiple locations.
+### VPS Provider Comparison
+
+| Provider | Location | vCPU | RAM | Storage | Bandwidth | Price/mo |
+|----------|----------|:----:|:---:|---------|-----------|:--------:|
+| **LightNode** | Bangkok | 1 | 2 GB | 50 GB NVMe | 1 TB | $7.70 |
+| **Vultr** | Singapore | 1 | 1 GB | 25 GB SSD | 1 TB | $5 |
+| **Kamatera** | Tokyo | 2 | 2 GB | 30 GB NVMe | Included | Free (trial) |
+| **Oracle Cloud** | Zurich | 4 ARM | 24 GB | 200 GB | 10 TB | Free (always) |
+| **Contabo** | Tokyo/SG | 4 | 8 GB | 75 GB NVMe | Unlimited | ~$7.50 |
+
+**Contabo** is the best value for long-term paid VPS: 4x RAM, unlimited bandwidth, available in Tokyo/Singapore.
+
+## Auto-Deployment with GitHub Actions
+
+Deployment is automated via GitHub Actions. Push to master triggers build + deploy to all VPS nodes.
+
+### How It Works
+
+```
+Developer PC → git push → GitHub Actions (16 GB runner)
+                              ├─ npm install + vite build (dashboard)
+                              ├─ SSH to Bangkok → git pull + restart bot
+                              ├─ SSH to Singapore → git pull + restart fetcher
+                              ├─ SSH to Tokyo → git pull + restart fetcher
+                              └─ SSH to Zurich → git pull + restart fetcher
+```
+
+The GitHub runner handles the heavy dashboard build (~1.5 GB RAM). VPSes only receive built files and Python code.
+
+### Required GitHub Secrets
+
+| Secret | Value |
+|--------|-------|
+| `BANGKOK_HOST` | LightNode IP |
+| `SINGAPORE_HOST` | Vultr IP |
+| `TOKYO_HOST` | Kamatera IP |
+| `ZURICH_HOST` | Oracle IP |
+| `SSH_PRIVATE_KEY` | Shared deploy key |
+| `SSH_USER` | e.g. `ubuntu` |
+
+### Deployment Process Per VPS
+
+1. SSH into VPS
+2. `git pull origin master`
+3. `pip install -r requirements.txt` (if changed)
+4. Copy pre-built `dashboard/dist/` from GitHub artifact
+5. `systemctl restart coirnabot` (or equivalent)
 
 ## Latency Impact on Arbitrage
 
@@ -230,24 +418,36 @@ Arbitrage opportunities typically persist for **1-10 seconds**. One-way latency 
 | ~160ms | ~80ms | Some narrow-spread opportunities missed. |
 | ~250ms | ~125ms | Wide spreads only. Co-located traders capture tight spreads first. |
 
+### Connection Quality vs Raw Latency
+
+For a 24/7 bot, **WebSocket connection stability** matters more than raw latency savings:
+
+| Metric | <1ms Connection | ~25ms Connection | ~250ms Connection |
+|--------|:--------------:|:----------------:|:-----------------:|
+| Reconnection frequency | Very rare | Occasional | More frequent |
+| Packet jitter | <1ms | 1-5ms | 10-50ms |
+| Data gaps | None | Rare | Occasional |
+| Heartbeat reliability | Perfect | Good | May timeout |
+
+A fetcher <1ms from its exchange has rock-solid WebSocket connections — fewer reconnections, less jitter, no data gaps. At 250ms, the connection is functional but experiences more instability over hours/days of continuous operation.
+
+This is the primary justification for the distributed architecture: not faster detection, but **healthier, more reliable connections** that produce better quality data over time.
+
 ### Bitfinex Latency Calculus
 
-Despite ~250ms RTT from Tokyo, Bitfinex is still highly profitable because:
+Despite ~250ms RTT from Bangkok, Bitfinex is still highly profitable because:
 
-1. **0% fee advantage**: Bitfinex↔Binance = 0.075% total cost (vs 0.15% for Binance↔OKX). This means Bitfinex pairs profit from spreads that would be losses on other pairs.
-
-2. **Wider spread tolerance**: A 0.15% spread with Bitfinex = 0.075% profit. Same spread with two 0.10% exchanges = -0.05% loss.
-
+1. **0% fee advantage**: Bitfinex + any exchange = only the other exchange's fee. This means Bitfinex pairs profit from spreads that would be losses on other pairs.
+2. **Wider spread tolerance**: A 0.15% spread with Bitfinex = 0.075% profit (if other side is Binance). Same spread with two 0.10% exchanges = -0.05% loss.
 3. **Opportunity persistence**: Most real arbitrage spreads last 1-10 seconds. Even at 250ms RTT, you're seeing prices from ~125ms ago — well within the opportunity window.
-
-4. **Frankfurt VPS solution**: If needed, a Frankfurt VPS reduces Bitfinex RTT to ~5ms, recovering almost all latency-sensitive opportunities.
+4. **Zurich VPS solution**: Oracle Cloud Zurich (free) reduces Bitfinex RTT to <1ms.
 
 ### Pionex Latency Calculus
 
 Pionex at ~160ms from Tokyo or ~200ms from Bangkok is acceptable because:
 
-1. **0.05% fee** — same as MEXC, but shares Binance's order book (near-zero Pionex↔Binance spread)
-2. Real value is in Pionex↔OKX, Pionex↔KuCoin, Pionex↔Gate.io pairs
+1. **0.05% fee** — same as MEXC, but shares Binance's order book (near-zero Pionex<->Binance spread)
+2. Real value is in Pionex<->OKX, Pionex<->KuCoin, Pionex<->Gate.io pairs
 3. These cross-exchange spreads are typically wider and persist longer
 4. A dedicated Virginia VPS ($7.50/mo) for one 0.05% exchange is not justified
 
@@ -267,10 +467,10 @@ Time from WebSocket connection to first usable price update:
 | OKX | **64** | Post-connect subscribe |
 | Bitget | **85** | Post-connect subscribe |
 | Bybit | **88** | Post-connect subscribe (orderbook + tickers) |
-| Bitfinex | **1,312** | 2 connections × 30 symbols, Zug origin (~250ms RTT) |
+| Bitfinex | **1,312** | 2 connections x 30 symbols, Zug origin (~250ms RTT) |
 | Pionex | **5,891** | 3 connections staggered 5s apart, 250ms throttle per symbol |
 
-Pionex's 5.9s is dominated by the stagger delay (5s between sub-connections) and per-symbol subscription throttle (250ms × 20 symbols = 5s). Actual network RTT is ~160ms.
+Pionex's 5.9s is dominated by the stagger delay (5s between sub-connections) and per-symbol subscription throttle (250ms x 20 symbols = 5s). Actual network RTT is ~160ms.
 
 ### Processing Latency (Per Message)
 
@@ -331,10 +531,10 @@ The most important metric for arbitrage: how old is the price data when a tick f
 Both Bitfinex and Pionex route through Cloudflare's anycast CDN:
 
 ```
-Your VPS → Cloudflare edge (local POP) → Cloudflare backbone → Origin server
+Your VPS -> Cloudflare edge (local POP) -> Cloudflare backbone -> Origin server
 ```
 
-- Cloudflare has POPs in Tokyo (AT Tokyo CC1, Equinix TY2), Bangkok, Singapore, Frankfurt
+- Cloudflare has POPs in Tokyo (AT Tokyo CC1, Equinix TY2), Bangkok, Singapore, Zurich, Frankfurt
 - TLS handshake and WebSocket upgrade happen at the local Cloudflare POP (fast)
 - Every subsequent WebSocket message traverses the full path to origin (adds latency)
 - Cloudflare adds ~5-10ms overhead per hop for WebSocket proxying
