@@ -1,5 +1,8 @@
 # CoirnaBot - Cross-Exchange Crypto Arbitrage Bot
 
+## Project Start Date
+2026-02-22
+
 ## Instructions
 - Never run `git checkout` or `git commit` commands without my confirmation.
 - Always use `read_xlsx.py` when reading a xlsx output file.
@@ -229,7 +232,7 @@ The bot only trades and transfers for **strong** (score ≥ 0.1) and **very stro
 - **Rebalancing**: `should_allow_rebalance()` requires score ≥ 0.01 (`TRADING_SCORE_THRESHOLD`). ROI gate, net P&L gate, and transfer worthiness checks protect against unprofitable transfers.
 - **Expansion/Rotation**: Only strong/very_strong candidates can be activated or replace existing symbols.
 - **Faster activation**: Watchlist confirmation period is score-dependent: very strong (≥0.3) confirmed in `confirmation_period × 0.1` (30s default), strong (≥0.1) in `× 0.4` (120s), normal in full period (300s). Strong candidates shouldn't sit idle.
-- **Demotion**: Symbols dropping below 0.1 are demoted on a tiered schedule (faster for weaker scores). Cooldown = `demotion_period × demotion_cooldown_multiplier` (default 5.0 = 3000s/50 min). No minimum active count protection — better idle than bleeding money on transfers.
+- **Demotion**: Symbols dropping below 0.1 are demoted on a tiered schedule (faster for weaker scores). All held crypto is **sold immediately** on demotion (internal sell → USDT) to eliminate market exposure risk. Cooldown = `demotion_period × demotion_cooldown_multiplier` (default 5.0 = 3000s/50 min). No minimum active count protection — better idle than bleeding money on transfers.
 - **Elevated re-activation**: `_get_activation_threshold(symbol)` raises the required score for frequently-demoted symbols. Each demotion adds 50% of base threshold, capped at `strong_threshold`. A symbol demoted 3 times needs score ≥ 0.025 instead of 0.01.
 
 ### Focus Tiers & Trade Multipliers
@@ -264,7 +267,8 @@ Instead of spreading capital uniformly across all exchanges, the bot concentrate
 ### Capital Allocation
 
 After discovery, capital is allocated per-symbol to dominant exchanges:
-- USDT → buyer exchanges (proportional to buyer weight)
+- **Bitfinex reserve carved out first**: `total_capital × bitfinex_reserve_pct` (default 15%) kept as USDT on Bitfinex before symbol allocation
+- Remaining capital: USDT → buyer exchanges (proportional to buyer weight)
 - Crypto → seller exchanges (proportional to seller weight)
 - 50/50 split between buy side and sell side per symbol
 - Score-weighted across symbols: higher-scoring symbols get more capital
@@ -276,6 +280,30 @@ After discovery, capital is allocated per-symbol to dominant exchanges:
 ### Dashboard Display
 
 The "Exchanges" column in Symbol Rankings shows dominant pairs as `BIN→KUC` (buyer→seller). The Buy-Sell Distribution sheet in XLSX shows per-exchange tick counts.
+
+## Bitfinex USDT Reserve
+
+Bitfinex has $0 withdrawal fees on 14/15 networks, making it the ideal capital safety net. The reserve prevents "death spirals" where the net P&L gate blocks rebalancing, capital gets stuck on wrong exchanges, and trading stalls.
+
+### Configuration
+
+- `BITFINEX_RESERVE_PCT` (default 0.15 = 15%) in `config.py`, configurable via Settings
+- Reserve target = `total_capital × reserve_pct` (e.g., $270 for $1800 capital)
+
+### How It Works
+
+1. **Carve-out at discovery**: Before allocating capital to symbols, `reserve_amount` is set aside as USDT on Bitfinex
+2. **Protection during rebalancing**: Normal rebalance source selection uses `_available_usdt_for_rebalance()` which excludes the reserve from Bitfinex's available balance
+3. **Emergency draw**: When net P&L gate blocks rebalancing AND miss streak ≥ 2× threshold, `emergency_reserve_draw()` transfers USDT from Bitfinex to the starved exchange — **bypasses all gates** (net P&L, hourly cap, transfer worthiness). Fee = $0.
+4. **Periodic replenishment**: Every evaluation cycle (when net profit is positive), `replenish_reserve()` tops up from exchanges with cheap withdrawals (fee < $0.10). Respects cooldown and hourly budget.
+
+### Key Methods
+
+| Method | File | Purpose |
+|--------|------|---------|
+| `_available_usdt_for_rebalance(ex)` | `balance.py` | Returns USDT minus reserve if Bitfinex |
+| `emergency_reserve_draw(target, amount)` | `balance.py` | Emergency $0-fee transfer from reserve |
+| `replenish_reserve()` | `balance.py` | Top up reserve from cheap exchanges |
 
 ## Adaptive Trading System
 
