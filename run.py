@@ -120,8 +120,16 @@ async def main() -> None:
         BitfinexFetcher(),
     ]
 
-    # Derive active exchanges from fetchers, use configured default symbols
-    active_exchanges = [f.exchange_name for f in fetchers]
+    # Derive active exchanges from fetchers, filtering out disabled ones
+    enabled_set = set(fee_manager.get_enabled_exchanges())
+    active_exchanges = [
+        f.exchange_name for f in fetchers
+        if f.exchange_name in enabled_set
+    ]
+    if not active_exchanges:
+        # Safety: if all are disabled, fall back to all
+        active_exchanges = [f.exchange_name for f in fetchers]
+        logger.warning("[Config] All exchanges disabled — falling back to all 9")
     active_symbols = list(ACTIVE_SYMBOLS)  # from config.py, discovery may override
 
     # Compute uniform initial allocations from total_capital

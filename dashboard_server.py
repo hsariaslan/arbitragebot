@@ -512,6 +512,11 @@ class DashboardServer:
         self._running = True
         self._start_time = time.time()
 
+        # Apply exchange enabled/disabled state from persisted settings
+        fee_configs = self._settings.get("fee_configs")
+        if fee_configs:
+            self._apply_enabled_exchanges(fee_configs)
+
         # Schedule restart grace period end
         if self._restart_grace:
             asyncio.get_event_loop().call_later(30.0, self._clear_restart_grace)
