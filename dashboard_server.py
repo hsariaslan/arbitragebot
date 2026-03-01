@@ -786,6 +786,7 @@ class DashboardServer:
         "reallocation_cost_horizon": (float, 0.5, 24.0),
         "demotion_cooldown_multiplier": (float, 1.0, 20.0),
         "hourly_external_transfer_cap": (float, 0, 100.0),
+        "bitfinex_reserve_pct": (float, 0.0, 0.5),
     }
 
     _SETTINGS_ENUMS: dict[str, list[str]] = {
@@ -1267,6 +1268,11 @@ class DashboardServer:
             self._optimizer._demotion_cooldown = self._optimizer._demotion_period * self._optimizer._demotion_cooldown_multiplier
         if "hourly_external_transfer_cap" in settings:
             self._balance._hourly_external_transfer_cap = float(settings["hourly_external_transfer_cap"])
+        if "bitfinex_reserve_pct" in settings:
+            self._balance._bitfinex_reserve_pct = float(settings["bitfinex_reserve_pct"])
+            self._balance._bitfinex_reserve_target = (
+                self._balance._initial_investment * self._balance._bitfinex_reserve_pct
+            )
 
         # execution_mode: persisted to settings.json but requires restart
         # (no hot-apply — executor creation happens at startup)

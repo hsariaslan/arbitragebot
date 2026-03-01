@@ -893,6 +893,22 @@ class ArbitrageMonitor:
                                         f"streak={streak}: {rebal_reason}"
                                     )
 
+                                # Emergency Bitfinex reserve draw when net_pnl_gate blocks
+                                miss_thresh = self._get_miss_threshold(buy_ex, sell_ex)
+                                if (
+                                    rebal_reason.startswith("net_pnl_gate")
+                                    and streak >= miss_thresh * 2
+                                    and self._balance
+                                ):
+                                    reserve_transfers = self._balance.emergency_reserve_draw(
+                                        buy_ex, self._trade_amount * 3
+                                    )
+                                    if reserve_transfers:
+                                        self._miss_streak[miss_key] = 0
+                                        # Mark as allowed so retry path runs
+                                        score_ok = True
+                                        rebal_ok = True
+
                             if score_ok and rebal_ok:
                                 # Retry trade after rebalancing
                                 trade_size = self._compute_trade_size(

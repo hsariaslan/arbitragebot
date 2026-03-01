@@ -306,6 +306,7 @@ REBALANCE_ROI_DIVISOR: int = 3           # ROI threshold = fee_rate / divisor (h
 REALLOCATION_COST_HORIZON: float = 2.0    # Hours of profit to justify reallocation cost
 DEMOTION_COOLDOWN_MULTIPLIER: float = 5.0 # Cooldown after demotion = period × multiplier
 HOURLY_EXTERNAL_TRANSFER_CAP: float = 2.0 # Max external withdrawal fees per hour ($), 0=disabled
+BITFINEX_RESERVE_PCT: float = 0.15        # Keep 15% of capital as USDT on Bitfinex (free withdrawals)
 
 # Execution mode: "simulation" (default), "demo" (testnet orders)
 EXECUTION_MODE: str = "simulation"

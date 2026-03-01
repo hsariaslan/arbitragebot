@@ -90,6 +90,7 @@ class BalanceTracker:
         fee_manager: "FeeManager | None" = None,
         transfer_fee_manager: "TransferFeeManager | None" = None,
         hourly_external_transfer_cap: float = 2.0,
+        bitfinex_reserve_pct: float = 0.15,
     ) -> None:
         self._fee_manager = fee_manager
         self._transfer_fee_mgr = transfer_fee_manager
@@ -157,6 +158,10 @@ class BalanceTracker:
         self._external_fee_log: deque[tuple[float, float]] = deque()  # (timestamp, fee_amount)
         self._hourly_external_transfer_cap: float = hourly_external_transfer_cap
 
+        # Bitfinex USDT reserve: keep a % of capital as emergency liquidity
+        self._bitfinex_reserve_pct: float = bitfinex_reserve_pct
+        self._bitfinex_reserve_target: float = self._initial_investment * bitfinex_reserve_pct
+
         # Initialization state
         self._initialized: bool = False
 
@@ -201,6 +206,13 @@ class BalanceTracker:
             return self._transfer_fee_mgr.get_withdrawal_fee(exchange, amount)
         return 1.0
 
+    def _available_usdt_for_rebalance(self, exchange: str) -> float:
+        """USDT available for rebalance on an exchange, protecting Bitfinex reserve."""
+        usdt = self.usdt.get(exchange, 0.0)
+        if exchange == "Bitfinex" and self._bitfinex_reserve_pct > 0:
+            return max(0.0, usdt - self._bitfinex_reserve_target)
+        return usdt
+
     def update_symbols(self, symbols: list[str]) -> None:
         """Update active symbols list and ensure crypto dicts have entries."""
         self._symbols = list(symbols)
@@ -224,6 +236,7 @@ class BalanceTracker:
             exchange_info=self._exchange_info,
             fee_manager=self._fee_manager,
             transfer_fee_manager=self._transfer_fee_mgr,
+            bitfinex_reserve_pct=self._bitfinex_reserve_pct,
         )
         logger.info("[Balance] Reset complete")
 
@@ -414,14 +427,14 @@ class BalanceTracker:
         buf = self._rebalance_buffer
         eligible = [
             ex for ex in self._exchanges
-            if ex != exchange and self.usdt[ex] >= rebal + buf
+            if ex != exchange and self._available_usdt_for_rebalance(ex) >= rebal + buf
         ]
         # Fallback: if no source covers full amount, try 1× trade_amount from cheapest source
         if not eligible:
             min_rebal = self._trade_amount
             smaller_eligible = [
                 ex for ex in self._exchanges
-                if ex != exchange and self.usdt[ex] >= min_rebal + buf
+                if ex != exchange and self._available_usdt_for_rebalance(ex) >= min_rebal + buf
             ]
             if smaller_eligible:
                 eligible = smaller_eligible
@@ -679,13 +692,13 @@ class BalanceTracker:
         ext_buy_rebal = rebal
         eligible = [
             ex for ex in self._exchanges
-            if ex != exchange and self.usdt[ex] >= rebal + self._rebalance_buffer
+            if ex != exchange and self._available_usdt_for_rebalance(ex) >= rebal + self._rebalance_buffer
         ]
         if not eligible:
             min_rebal = self._trade_amount
             eligible = [
                 ex for ex in self._exchanges
-                if ex != exchange and self.usdt[ex] >= min_rebal + self._rebalance_buffer
+                if ex != exchange and self._available_usdt_for_rebalance(ex) >= min_rebal + self._rebalance_buffer
             ]
             if eligible:
                 ext_buy_rebal = min_rebal
@@ -756,6 +769,135 @@ class BalanceTracker:
             f"crypto_sources={len(crypto_sources)}"
         )
         return None
+
+    # ── Bitfinex Reserve ─────────────────────────────────────────────────
+
+    def emergency_reserve_draw(
+        self, target_exchange: str, needed_amount: float
+    ) -> list[Transfer]:
+        """Draw USDT from Bitfinex reserve to break a capital death spiral.
+
+        Bypasses all gates (net P&L, hourly cap, transfer worthiness).
+        Only called when normal rebalancing is blocked and trading is stalled.
+        """
+        if self._bitfinex_reserve_pct <= 0:
+            return []
+        if "Bitfinex" not in self._exchanges or target_exchange == "Bitfinex":
+            return []
+
+        bitfinex_usdt = self.usdt.get("Bitfinex", 0.0)
+        min_floor = 5.0  # Never drain below $5
+        available = bitfinex_usdt - min_floor
+        if available <= 0:
+            return []
+
+        amount = min(needed_amount, available)
+        if amount < self._trade_amount:
+            return []  # Not enough for even one trade
+
+        # Withdrawal fee is $0 for Bitfinex (14/15 networks are free)
+        fee = self._get_withdrawal_fee("Bitfinex", amount)
+
+        now = time.time()
+        self.usdt["Bitfinex"] -= amount
+        self.usdt[target_exchange] = self.usdt.get(target_exchange, 0.0) + (amount - fee)
+        if fee > 0:
+            self.total_transfer_fees += fee
+            self.total_external_transfer_fees += fee
+            self._record_external_fee(fee)
+
+        transfer = Transfer(
+            timestamp=now,
+            transfer_type="reserve_draw",
+            from_exchange="Bitfinex",
+            to_exchange=target_exchange,
+            symbol="USDT",
+            amount_usd=amount,
+            fee_usd=fee,
+        )
+        self.transfers.append(transfer)
+        logger.info(
+            f"[Balance] EMERGENCY reserve draw: Bitfinex→{target_exchange} "
+            f"${amount:.2f} (fee=${fee:.4f}, reserve_remaining="
+            f"${self.usdt.get('Bitfinex', 0.0):.2f})"
+        )
+        return [transfer]
+
+    def replenish_reserve(self, prices: dict[str, float] | None = None) -> list[Transfer]:
+        """Top up Bitfinex USDT reserve from exchanges with cheap withdrawals.
+
+        Only called when net profit is positive. Respects hourly cap and cooldown.
+        """
+        if self._bitfinex_reserve_pct <= 0:
+            return []
+        if "Bitfinex" not in self._exchanges:
+            return []
+
+        current = self.usdt.get("Bitfinex", 0.0)
+        if current >= self._bitfinex_reserve_target:
+            return []
+
+        deficit = self._bitfinex_reserve_target - current
+        if deficit < self._trade_amount:
+            return []  # Not worth replenishing tiny amounts
+
+        # Find cheapest sender with surplus USDT
+        buf = self._rebalance_buffer
+        max_fee = 0.10  # Only replenish from cheap exchanges
+        candidates = []
+        for ex in self._exchanges:
+            if ex == "Bitfinex":
+                continue
+            avail = self.usdt.get(ex, 0.0) - buf
+            if avail < self._trade_amount:
+                continue
+            fee = self._get_withdrawal_fee(ex, min(deficit, avail))
+            if fee <= max_fee:
+                candidates.append((ex, avail, fee))
+
+        if not candidates:
+            return []
+
+        # Pick cheapest
+        candidates.sort(key=lambda x: x[2])
+        sender, avail, fee = candidates[0]
+
+        # Check cooldown
+        cooldown_key = f"{sender}:usdt_out"
+        now = time.time()
+        if now - self._last_rebalance.get(cooldown_key, 0) < self._rebalance_cooldown:
+            return []
+
+        # Check hourly budget
+        if not self._check_hourly_transfer_budget(fee):
+            return []
+
+        amount = min(deficit, avail)
+        self.usdt[sender] -= amount
+        self.usdt["Bitfinex"] += amount - fee
+        if fee > 0:
+            self.total_transfer_fees += fee
+            self.total_external_transfer_fees += fee
+            self._record_external_fee(fee)
+        self._last_rebalance[cooldown_key] = now
+
+        transfer = Transfer(
+            timestamp=now,
+            transfer_type="reserve_replenish",
+            from_exchange=sender,
+            to_exchange="Bitfinex",
+            symbol="USDT",
+            amount_usd=amount,
+            fee_usd=fee,
+        )
+        self.transfers.append(transfer)
+        logger.info(
+            f"[Balance] Reserve replenish: {sender}→Bitfinex "
+            f"${amount:.2f} (fee=${fee:.4f}, reserve="
+            f"${self.usdt.get('Bitfinex', 0.0):.2f}/"
+            f"${self._bitfinex_reserve_target:.2f})"
+        )
+        return [transfer]
 
     def execute_trade(
         self,

@@ -904,6 +904,17 @@ class SymbolOptimizer:
                 f"({pairs['num_exchanges']} exchanges)"
             )
 
+        # Carve out Bitfinex reserve before allocating to symbols
+        reserve_pct = self._balance._bitfinex_reserve_pct if self._balance else 0.15
+        reserve_amount = 0.0
+        if reserve_pct > 0 and "Bitfinex" in all_exchanges:
+            reserve_amount = total_capital * reserve_pct
+            logger.info(
+                f"[Optimizer] Bitfinex reserve: ${reserve_amount:.0f} "
+                f"({reserve_pct:.0%} of ${total_capital:.0f} capital)"
+            )
+        allocatable_capital = total_capital - reserve_amount
+
         # Score-weighted capital distribution across symbols
         best_scores = {sym: self._scores[sym].score for sym in best_symbols if sym in self._scores}
         total_score = sum(best_scores.values())
@@ -914,13 +925,17 @@ class SymbolOptimizer:
         for ex in all_exchanges:
             allocations[ex] = {"usdt": 0.0, "crypto": {}}
 
+        # Assign Bitfinex reserve as USDT
+        if reserve_amount > 0:
+            allocations["Bitfinex"]["usdt"] += reserve_amount
+
         for sym in best_symbols:
             # Score-weighted capital per symbol
             if total_score > 0:
                 sym_weight = max(min_weight, best_scores.get(sym, 0) / total_score)
             else:
                 sym_weight = 1.0 / len(best_symbols)
-            sym_capital = total_capital * sym_weight
+            sym_capital = allocatable_capital * sym_weight
 
             pairs = self._dominant_pairs[sym]
 
@@ -1110,15 +1125,49 @@ class SymbolOptimizer:
     def _execute_demotion(self, symbol: str) -> None:
         """Remove an underperforming symbol from the active set.
 
-        Crypto is kept in place (no sell) to avoid taker fees.
-        If the symbol returns to the active set, it can trade immediately
-        without needing to re-buy inventory.
+        Sells all held crypto to avoid market exposure risk from price drops.
         """
+        from balance import Transfer
+
         now = time.time()
+
+        # Sell all crypto of the demoted symbol on every exchange
+        prices = self._get_all_prices()
+        price = prices.get(symbol, 0.0)
+        freed_capital = 0.0
+        total_sell_fee = 0.0
+        if price > 0:
+            for ex in self._balance._exchanges:
+                qty = self._balance.crypto[ex].get(symbol, 0.0)
+                if qty > 0:
+                    fee_rate = (
+                        self._fee_manager.get_taker_fee(ex)
+                        if self._fee_manager
+                        else 0.001
+                    )
+                    gross = qty * price
+                    fee = gross * fee_rate
+                    self._balance.crypto[ex][symbol] = 0.0
+                    self._balance.usdt[ex] += gross - fee
+                    total_sell_fee += fee
+                    freed_capital += gross - fee
+                    self._balance.transfers.append(
+                        Transfer(
+                            timestamp=now,
+                            transfer_type="demotion_sell",
+                            from_exchange=ex,
+                            to_exchange=ex,
+                            symbol=symbol,
+                            amount_usd=gross,
+                            fee_usd=fee,
+                        )
+                    )
+            self._balance.total_transfer_fees += total_sell_fee
 
         logger.info(
             f"[Optimizer] DEMOTING: {symbol} (score below threshold for "
-            f"{self._demotion_period}s) — keeping crypto in place"
+            f"{self._demotion_period}s) — selling crypto "
+            f"(freed ${freed_capital:.2f}, fees ${total_sell_fee:.4f})"
         )
 
         # Update historical stats
@@ -1285,6 +1334,10 @@ class SymbolOptimizer:
 
         # Phase 3.5: Re-evaluate dominant exchange pairs for active symbols
         self._reevaluate_dominant_pairs()
+
+        # Phase 3.6: Replenish Bitfinex reserve if depleted and profitable
+        if self._rotation_budget_ok and self._balance:
+            self._balance.replenish_reserve()
 
         # Phase 4: Evaluate demotions first
         self._evaluate_demotions()
