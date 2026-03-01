@@ -36,6 +36,7 @@ const COMPONENT_OPTIONS = [
   { value: 'Settings', label: 'Settings' },
   { value: 'Fee', label: 'Fee' },
   { value: 'Transfer', label: 'Transfer' },
+  { value: 'Candidate', label: 'Candidate' },
 ];
 
 const LEVEL_STYLES: Record<string, { text: string }> = {
