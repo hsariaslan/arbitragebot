@@ -1104,12 +1104,14 @@ class SymbolOptimizer:
 
         # Update existing entries and add new ones
         cooldown_set = set(self._recently_demoted.keys())
+        removed_candidates: list[str] = []
         for sym, score_obj in self._scores.items():
             if sym in active_set or sym in cooldown_set:
                 continue
 
             if score_obj.score >= threshold and score_obj.score > 0:
-                if sym not in self._watchlist:
+                is_new = sym not in self._watchlist
+                if is_new:
                     self._watchlist[sym] = WatchlistEntry(
                         symbol=sym,
                         entered_at=now,
@@ -1143,13 +1145,51 @@ class SymbolOptimizer:
                     if stats:
                         stats.times_confirmed += 1
                     logger.info(
-                        f"[Optimizer] Watchlist CONFIRMED: {sym} "
-                        f"(avg score={sum(entry.score_samples)/len(entry.score_samples):.6f}, "
-                        f"peak={entry.peak_score:.6f}, confirm={confirm_time:.0f}s)"
+                        f"[Candidate] CONFIRMED {sym}: "
+                        f"score={score_val:.6f} avg={sum(entry.score_samples)/len(entry.score_samples):.6f} "
+                        f"peak={entry.peak_score:.6f} confirm={confirm_time:.0f}s "
+                        f"avg_net={score_obj.avg_profitable_net:.4f}% freq={score_obj.frequency:.1%} "
+                        f"ticks={score_obj.profitable_ticks}/{score_obj.total_ticks} "
+                        f"best_net={score_obj.best_net_pct:+.4f}%"
+                    )
+                elif not entry.confirmed:
+                    # Log candidate status: trend, time remaining, why not confirmed yet
+                    elapsed = now - entry.entered_at
+                    samples = entry.score_samples
+                    if len(samples) >= 2:
+                        trend = "rising" if samples[-1] > samples[-2] else "falling" if samples[-1] < samples[-2] else "flat"
+                    else:
+                        trend = "new"
+                    # Determine blocking reason
+                    if not stable:
+                        block = stability_reason
+                    elif elapsed < confirm_time:
+                        block = f"time ({elapsed:.0f}/{confirm_time:.0f}s)"
+                    else:
+                        block = "unknown"
+                    status = "NEW" if is_new else "WATCH"
+                    logger.info(
+                        f"[Candidate] {status} {sym}: "
+                        f"score={score_val:.6f} peak={entry.peak_score:.6f} "
+                        f"avg_net={score_obj.avg_profitable_net:.4f}% freq={score_obj.frequency:.1%} "
+                        f"ticks={score_obj.profitable_ticks}/{score_obj.total_ticks} "
+                        f"trend={trend} block={block}"
                     )
             else:
                 # Score dropped below threshold — remove from watchlist
+                if sym in self._watchlist:
+                    entry = self._watchlist[sym]
+                    removed_candidates.append(
+                        f"{sym}({score_obj.score:.6f}<{threshold:.6f})"
+                    )
                 self._watchlist.pop(sym, None)
+
+        if removed_candidates:
+            logger.info(
+                f"[Candidate] DROPPED {len(removed_candidates)}: "
+                + ", ".join(removed_candidates[:5])
+                + (f" +{len(removed_candidates)-5} more" if len(removed_candidates) > 5 else "")
+            )
 
     # ── Demotion ─────────────────────────────────────────────────────────
 
@@ -1524,12 +1564,36 @@ class SymbolOptimizer:
                         score_samples=[candidate.score],
                         peak_score=candidate.score,
                     )
+                    logger.info(
+                        f"[Candidate] EXPAND_TRACK {candidate.symbol}: "
+                        f"score={candidate.score:.6f} "
+                        f"avg_net={candidate.avg_profitable_net:.4f}% "
+                        f"freq={candidate.frequency:.1%} "
+                        f"ticks={candidate.profitable_ticks}/{candidate.total_ticks} "
+                        f"est_hourly=${candidate.est_hourly_profit:.4f} — "
+                        f"first seen, observing stability"
+                    )
                     continue
                 wl_entry.score_samples.append(candidate.score)
                 wl_entry.peak_score = max(wl_entry.peak_score, candidate.score)
                 stable, reason = self._is_score_stable(wl_entry, candidate.score)
                 if not stable:
+                    logger.info(
+                        f"[Candidate] EXPAND_WAIT {candidate.symbol}: "
+                        f"score={candidate.score:.6f} peak={wl_entry.peak_score:.6f} "
+                        f"avg_net={candidate.avg_profitable_net:.4f}% "
+                        f"freq={candidate.frequency:.1%} — "
+                        f"unstable: {reason}"
+                    )
                     continue
+                logger.info(
+                    f"[Candidate] EXPAND_READY {candidate.symbol}: "
+                    f"score={candidate.score:.6f} peak={wl_entry.peak_score:.6f} "
+                    f"avg_net={candidate.avg_profitable_net:.4f}% "
+                    f"freq={candidate.frequency:.1%} "
+                    f"ticks={candidate.profitable_ticks}/{candidate.total_ticks} "
+                    f"est_hourly=${candidate.est_hourly_profit:.4f} — activating"
+                )
                 self._expand_active(candidate.symbol, candidate)
                 self._watchlist.pop(candidate.symbol, None)
 
