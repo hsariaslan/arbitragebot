@@ -388,7 +388,7 @@ All snapshots are exported in the XLSX "Configurations" sheet.
 |------|---------------|
 | `monitor.py` | `_compute_trade_size()` — per-symbol adaptive sizing; `_tick()` — trade execution with threshold checks, ROI gate, miss streak tracking; `ConfigSnapshot` dataclass |
 | `balance.py` | `compute_rebalance_amount()` — adaptive rebalance; transfer worthiness check in `_rebalance_usdt()`/`_rebalance_crypto()` |
-| `optimizer.py` | `_compute_scores()` — focus tiers + trade multipliers; `_complete_discovery()` — strong-only activation + concentrated allocation; `_compute_dominant_pairs()` — per-symbol exchange detection; `_evaluate_demotions()` — strong threshold gating; `_track_candidate_transitions()` — strong/very_strong historical tracking; `_is_score_stable()` — candidate trend analysis (cliff drop, declining trend, min observation) |
+| `optimizer.py` | `_compute_scores()` — focus tiers + trade multipliers; `_complete_discovery()` — strong-only activation + dynamic buy/sell allocation; `_compute_dominant_pairs()` — per-symbol exchange detection; `_evaluate_demotions()` — strong threshold gating; `_track_candidate_transitions()` — strong/very_strong historical tracking; `_is_score_stable()` — candidate trend analysis (cliff drop, declining trend, min observation); `_update_watchlist()` — `[Candidate]` lifecycle logging |
 | `config.py` | `DEFAULT_FEE_CONFIGS`, `DEFAULT_TRANSFER_CONFIGS`, `ADAPTIVE_MODE` |
 | `fee_manager.py` | `FeeManager` — centralized fee computation, token discounts, referral cashbacks, zero-fee pairs, real mode |
 | `transfer_fee_manager.py` | `TransferFeeManager` — per-exchange per-network withdrawal fees (flat/percentage/conditional), preferred network selection |
@@ -444,6 +444,7 @@ Full authentication system for the WebSocket dashboard:
   - `[Rebalance] BLOCKED` — Why rebalancing was blocked: which gate rejected (score_gate/net_pnl_gate/roi_gate) with values. Throttled per miss_key.
   - `[Balance] Snapshot` — Every 5 min: per-exchange total value (USDT + crypto USD), portfolio total, fee breakdown (total vs external-only)
   - `[Session]` — Every 5 min: aggregate trades, pnl, transfer fees, cashback (credited/pending), net, $/hr, SIZE_ZERO count (sz0=), rebalance blocked count (rebal_blocked=)
+  - `[Candidate]` — Watchlist/expansion candidate lifecycle: NEW (entered watchlist), WATCH (each eval tick with score/trend/block reason), CONFIRMED (passed all gates), DROPPED (score fell below threshold), EXPAND_TRACK (first seen for expansion), EXPAND_WAIT (unstable), EXPAND_READY (activating). Filterable in Bot Logs tab.
 - **Disk export**: `_read_bot_logs_from_disk()` reads rotated + current log files for cross-day export ranges. `_read_auth_logs_from_disk()` reads JSONL files. Both use `asyncio.to_thread()` for non-blocking I/O.
 
 ### State Persistence
