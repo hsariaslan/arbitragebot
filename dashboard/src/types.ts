@@ -86,6 +86,8 @@ export interface Settings {
   safety_multiplier?: number;
   min_rebalance_score?: number;
   confirmation_period?: number;
+  score_stability_seconds?: number;
+  score_stability_factor?: number;
   promotion_threshold?: number;
   demotion_threshold?: number;
   demotion_period?: number;

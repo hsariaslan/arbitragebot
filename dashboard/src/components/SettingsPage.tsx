@@ -34,6 +34,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [safetyMultiplier, setSafetyMultiplier] = useState(currentSettings.safety_multiplier ?? 2.0);
   const [minRebalanceScore, setMinRebalanceScore] = useState(currentSettings.min_rebalance_score ?? 0.0001);
   const [confirmationPeriod, setConfirmationPeriod] = useState(currentSettings.confirmation_period ?? 300);
+  const [scoreStabilitySeconds, setScoreStabilitySeconds] = useState(currentSettings.score_stability_seconds ?? 120);
+  const [scoreStabilityFactor, setScoreStabilityFactor] = useState(currentSettings.score_stability_factor ?? 0.5);
   const [promotionThreshold, setPromotionThreshold] = useState(currentSettings.promotion_threshold ?? 0.0001);
   const [demotionThreshold, setDemotionThreshold] = useState(currentSettings.demotion_threshold ?? 0.0);
   const [demotionPeriod, setDemotionPeriod] = useState(currentSettings.demotion_period ?? 600);
@@ -71,6 +73,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setSafetyMultiplier(currentSettings.safety_multiplier ?? 2.0);
       setMinRebalanceScore(currentSettings.min_rebalance_score ?? 0.0001);
       setConfirmationPeriod(currentSettings.confirmation_period ?? 300);
+      setScoreStabilitySeconds(currentSettings.score_stability_seconds ?? 120);
+      setScoreStabilityFactor(currentSettings.score_stability_factor ?? 0.5);
       setPromotionThreshold(currentSettings.promotion_threshold ?? 0.0001);
       setDemotionThreshold(currentSettings.demotion_threshold ?? 0.0);
       setDemotionPeriod(currentSettings.demotion_period ?? 600);
@@ -106,6 +110,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     safety_multiplier: safetyMultiplier,
     min_rebalance_score: minRebalanceScore,
     confirmation_period: confirmationPeriod,
+    score_stability_seconds: scoreStabilitySeconds,
+    score_stability_factor: scoreStabilityFactor,
     promotion_threshold: promotionThreshold,
     demotion_threshold: demotionThreshold,
     demotion_period: demotionPeriod,
@@ -307,6 +313,22 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               <Tooltip text="How long a candidate symbol must sustain a high score before it's eligible for activation. Prevents short-lived spikes from triggering rotations. Default: 300s (5 min)" />
             </label>
             <input type="number" value={confirmationPeriod} min={0} onChange={d(setConfirmationPeriod, 300)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Score Stability (s)
+              <Tooltip text="Minimum observation time before a candidate can be confirmed. Even very strong symbols must wait this long. Tracks score trend for cliff drops and declining patterns. Set to 0 to disable. Default: 120s" />
+            </label>
+            <input type="number" value={scoreStabilitySeconds} min={0} max={3600} onChange={d(setScoreStabilitySeconds, 120)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Stability Factor
+              <Tooltip text="Reject candidate if current score drops below peak score × this factor (cliff drop detection). E.g., 0.5 means reject if score fell more than 50% from its peak. Set to 0 to disable cliff drop check. Default: 0.5" />
+            </label>
+            <input type="number" value={scoreStabilityFactor} min={0} max={1} step={0.01} onChange={d(setScoreStabilityFactor, 0.5)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
           <div>
