@@ -8,63 +8,63 @@ const DEFAULT_CONFIGS: Record<string, ExchangeFeeConfig> = {
     effective_taker_rate: 0.00075, effective_rate_after_referral: 0.00075,
     fee_mechanism: 'instant', fee_model: 'token',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 30,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [],
+    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
   },
   OKX: {
     base_taker_rate: 0.001, token_discount_enabled: false, token_discount_pct: 0,
     effective_taker_rate: 0.001, effective_rate_after_referral: 0.001,
     fee_mechanism: 'tier', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 90,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [],
+    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
   },
   Bybit: {
     base_taker_rate: 0.001, token_discount_enabled: false, token_discount_pct: 0,
     effective_taker_rate: 0.001, effective_rate_after_referral: 0.001,
     fee_mechanism: 'tier', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 720,
-    referral_paid_in: 'USDT', zero_fee_pairs: [],
+    referral_paid_in: 'USDT', zero_fee_pairs: [], enabled: true,
   },
   MEXC: {
     base_taker_rate: 0.0005, token_discount_enabled: false, token_discount_pct: 0.20,
     effective_taker_rate: 0.0005, effective_rate_after_referral: 0.0005,
     fee_mechanism: 'instant', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 720,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [],
+    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
   },
   Bitget: {
     base_taker_rate: 0.001, token_discount_enabled: true, token_discount_pct: 0.20,
     effective_taker_rate: 0.0008, effective_rate_after_referral: 0.0008,
     fee_mechanism: 'instant', fee_model: 'token',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 1080,
-    referral_paid_in: 'USDT', zero_fee_pairs: [],
+    referral_paid_in: 'USDT', zero_fee_pairs: [], enabled: true,
   },
   KuCoin: {
     base_taker_rate: 0.001, token_discount_enabled: true, token_discount_pct: 0.20,
     effective_taker_rate: 0.0008, effective_rate_after_referral: 0.0008,
     fee_mechanism: 'rebate', fee_model: 'token',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 1080,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [],
+    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
   },
   'Gate.io': {
     base_taker_rate: 0.001, token_discount_enabled: false, token_discount_pct: 0.10,
     effective_taker_rate: 0.001, effective_rate_after_referral: 0.001,
     fee_mechanism: 'instant', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 0,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: ['BTCUSDT'],
+    referral_paid_in: 'same_as_fee', zero_fee_pairs: ['BTCUSDT'], enabled: true,
   },
   Pionex: {
     base_taker_rate: 0.0005, token_discount_enabled: false, token_discount_pct: 0,
     effective_taker_rate: 0.0005, effective_rate_after_referral: 0.0005,
     fee_mechanism: 'instant', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 0,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [],
+    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
   },
   Bitfinex: {
     base_taker_rate: 0, token_discount_enabled: false, token_discount_pct: 0,
     effective_taker_rate: 0, effective_rate_after_referral: 0,
     fee_mechanism: 'instant', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 0,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [],
+    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
   },
 };
 
@@ -92,6 +92,7 @@ type EditableConfig = {
   referral_settlement_minutes: number;
   referral_paid_in: 'same_as_fee' | 'USDT';
   zero_fee_pairs: string;
+  enabled: boolean;
 };
 
 function toEditable(cfg: ExchangeFeeConfig): EditableConfig {
@@ -106,6 +107,7 @@ function toEditable(cfg: ExchangeFeeConfig): EditableConfig {
     referral_settlement_minutes: cfg.referral_settlement_minutes,
     referral_paid_in: cfg.referral_paid_in,
     zero_fee_pairs: cfg.zero_fee_pairs.join(', '),
+    enabled: cfg.enabled ?? true,
   };
 }
 
@@ -170,6 +172,7 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
         referral_settlement_minutes: cfg.referral_settlement_minutes,
         referral_paid_in: cfg.referral_paid_in,
         zero_fee_pairs: cfg.zero_fee_pairs.split(',').map(s => s.trim()).filter(Boolean),
+        enabled: cfg.enabled,
       };
     }
     onSendMessage({ type: 'save_fee_settings', fee_configs: feeData });
@@ -224,10 +227,20 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
         const tokenName = TOKEN_NAMES[exchange];
 
         return (
-          <div key={exchange} className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+          <div key={exchange} className={`rounded-lg p-3 sm:p-5 ${cfg.enabled ? 'bg-slate-800/50' : 'bg-slate-800/20 opacity-60'}`}>
             {/* Header */}
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wider">{exchange}</h2>
+              <div className="flex items-center gap-3">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={cfg.enabled}
+                    onChange={e => updateField(exchange, 'enabled', e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
+                </label>
+                <h2 className={`text-sm font-semibold uppercase tracking-wider ${cfg.enabled ? 'text-slate-200' : 'text-slate-500 line-through'}`}>{exchange}</h2>
+                {!cfg.enabled && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-red-900/40 text-red-400">Disabled</span>
+                )}
+              </div>
               <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-700 text-emerald-400">
                 Effective: {(effective * 100).toFixed(4)}%
               </span>

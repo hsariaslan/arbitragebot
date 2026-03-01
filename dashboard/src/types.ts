@@ -358,6 +358,7 @@ export interface ExchangeFeeConfig {
   referral_settlement_minutes: number;
   referral_paid_in: 'same_as_fee' | 'USDT';
   zero_fee_pairs: string[];
+  enabled: boolean;
 }
 
 export interface FeeStats {
