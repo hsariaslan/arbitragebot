@@ -226,7 +226,7 @@ The bot only trades and transfers for **strong** (score ≥ 0.1) and **very stro
 
 ### Rules
 
-- **Discovery**: Activates symbols with score ≥ 0.01. Extends discovery duration (up to 3600s) if none qualify.
+- **Discovery**: Activates symbols with score ≥ 0.01. Extends discovery duration (up to 3600s) if none qualify. At activation, symbols with unstable trajectories are rejected: last 5 scores all declining OR cliff drop (current < peak × `score_stability_factor`). Candidates are tracked in watchlist from first tick for trend analysis.
 - **Early discovery exit**: If any symbol reaches score ≥ 0.01 during discovery (after 60s minimum), discovery ends immediately and trading starts.
 - **Trading**: Normal tier (0.01–0.1) gets `trade_multiplier = 0.5–1.5×`. Weak symbols (< 0.01) get `trade_multiplier = 0`, **except active symbols** which get a 1.0× floor — score threshold controls activation/demotion, not execution for already-deployed capital.
 - **Rebalancing**: `should_allow_rebalance()` requires score ≥ 0.01 (`TRADING_SCORE_THRESHOLD`). ROI gate, net P&L gate, and transfer worthiness checks protect against unprofitable transfers.
@@ -318,8 +318,8 @@ The bot has a capital-aware adaptive trading system controlled by the **Adaptive
 
 Each active symbol gets a **trade multiplier** based on its focus tier (see Strong-Only Trading above). Active symbols always receive non-zero multipliers (1.0× floor for weak tier).
 
-- `allocated_trade_size = trade_amount × multiplier × tick_quality_factor`
-- Tick quality factor: 1.0 (net ≥ 0.10%), 0.90 (≥ 0.05%), 0.85 (< 0.05%)
+- `allocated_trade_size = trade_amount × multiplier × net_pct_multiplier`
+- **Net%-based sizing** (`net_pct_sizing_enabled`, default true): scales trade size by current tick's net profitability. Tiers: <0.03%=0.5×, 0.03–0.08%=1.0×, 0.08–0.15%=1.5×, 0.15–0.25%=2.0×, >0.25%=2.5×. Capped by `net_pct_multiplier_cap` (default 2.5). Fat spreads get bigger trades; thin margins get smaller ones.
 - **Dynamic buffer**: Trade size capped by 95% of available balance when balance < 2× min_trade (small positions), 80% otherwise. Prevents wasting $2-8 on tiny positions.
 - Minimum trade: `max($5, total_capital × 0.003)` — computed before buffer to enable dynamic sizing
 
@@ -444,7 +444,7 @@ Full authentication system for the WebSocket dashboard:
   - `[Rebalance] BLOCKED` — Why rebalancing was blocked: which gate rejected (score_gate/net_pnl_gate/roi_gate) with values. Throttled per miss_key.
   - `[Balance] Snapshot` — Every 5 min: per-exchange total value (USDT + crypto USD), portfolio total, fee breakdown (total vs external-only)
   - `[Session]` — Every 5 min: aggregate trades, pnl, transfer fees, cashback (credited/pending), net, $/hr, SIZE_ZERO count (sz0=), rebalance blocked count (rebal_blocked=)
-  - `[Candidate]` — Watchlist/expansion candidate lifecycle: NEW (entered watchlist), WATCH (each eval tick with score/trend/block reason), CONFIRMED (passed all gates), DROPPED (score fell below threshold), EXPAND_TRACK (first seen for expansion), EXPAND_WAIT (unstable), EXPAND_READY (activating). Filterable in Bot Logs tab.
+  - `[Candidate]` — Candidate lifecycle logged every tick during discovery (with `phase=discovery`, score/peak/drop%/tier/trend) and every eval cycle post-discovery. States: NEW (entered watchlist), WATCH (tracked with score/trend/block reason), CONFIRMED (passed all gates), DROPPED (score fell below threshold), REJECTED (unstable at activation — declining or cliff drop), EXPAND_TRACK (first seen for expansion), EXPAND_WAIT (unstable), EXPAND_READY (activating). Filterable in Bot Logs tab.
 - **Disk export**: `_read_bot_logs_from_disk()` reads rotated + current log files for cross-day export ranges. `_read_auth_logs_from_disk()` reads JSONL files. Both use `asyncio.to_thread()` for non-blocking I/O.
 
 ### State Persistence
@@ -799,6 +799,7 @@ Detailed reference documents in `documentations/`:
 | `documentations/EXCHANGES.md` | All 9 exchanges: fees, discounts, server locations, latencies, WebSocket details, withdrawal fees per network, geo-restrictions, dropped exchanges |
 | `documentations/VPS.md` | VPS deployment strategy: latency matrix (9 exchanges × 5 locations), geo-restriction matrix, 4 VPS options (A-D), inter-VPS communication, orchestrator architecture, phased deployment plan |
 | `documentations/BOT_DECISION_MAKING.md` | Complete decision reference: fee computation (scoring vs taker), discovery, scoring, focus tiers, pair selection, threshold, trade sizing, execution, dominant pairs, capital allocation, rebalancing (6 gates), symbol lifecycle, net profit awareness, flow diagrams |
+| `documentations/FUTURE_PLANS.md` | Net%-based dynamic trade sizing design: multiplier tiers, distributed VPS latency analysis, slippage/stale data risks, simulation vs real trading considerations |
 
 ## Technology Stack
 
