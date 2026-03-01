@@ -500,6 +500,92 @@ class SymbolOptimizer:
 
         self._compute_scores()
 
+        # Per-tick candidate tracking during discovery (after scores are fresh)
+        if self._discovery_mode and self._scores:
+            self._track_discovery_candidates()
+
+    def _track_discovery_candidates(self) -> None:
+        """Log candidate status every tick during discovery for trend visibility."""
+        now = time.time()
+        ranked = sorted(
+            self._scores.values(),
+            key=lambda s: s.score,
+            reverse=True,
+        )
+
+        active_candidates: set[str] = set()
+        for s in ranked:
+            if s.score < self._trading_threshold or s.score <= 0:
+                break  # sorted desc, no more candidates
+            active_candidates.add(s.symbol)
+
+            # Tier classification
+            if s.score >= self._very_strong_threshold:
+                tier = "very_strong"
+            elif s.score >= self._strong_threshold:
+                tier = "strong"
+            else:
+                tier = "normal"
+
+            # Create or update watchlist entry
+            is_new = s.symbol not in self._watchlist
+            if is_new:
+                self._watchlist[s.symbol] = WatchlistEntry(
+                    symbol=s.symbol,
+                    entered_at=now,
+                    confirmation_start=now,
+                )
+            wl = self._watchlist[s.symbol]
+            wl.score_samples.append(s.score)
+            wl.peak_score = max(wl.peak_score, s.score)
+
+            # Trend from score samples
+            samples = wl.score_samples
+            if len(samples) >= 3:
+                if samples[-1] > samples[-2] > samples[-3]:
+                    trend = "rising"
+                elif samples[-1] < samples[-2] < samples[-3]:
+                    trend = "declining"
+                elif samples[-1] > samples[-2]:
+                    trend = "up"
+                elif samples[-1] < samples[-2]:
+                    trend = "down"
+                else:
+                    trend = "flat"
+            elif len(samples) >= 2:
+                trend = "up" if samples[-1] > samples[-2] else "down" if samples[-1] < samples[-2] else "flat"
+            else:
+                trend = "new"
+
+            # Score change from peak
+            drop_from_peak = ((wl.peak_score - s.score) / wl.peak_score * 100) if wl.peak_score > 0 else 0.0
+
+            status = "NEW" if is_new else "WATCH"
+            logger.info(
+                f"[Candidate] {status} {s.symbol}: "
+                f"score={s.score:.6f} peak={wl.peak_score:.6f} "
+                f"drop={drop_from_peak:.0f}% tier={tier} "
+                f"avg_net={s.avg_profitable_net:.4f}% freq={s.frequency:.1%} "
+                f"ticks={s.profitable_ticks}/{s.total_ticks} "
+                f"trend={trend} phase=discovery"
+            )
+
+        # Drop watchlist entries that fell below threshold
+        dropped = []
+        for sym in list(self._watchlist.keys()):
+            if sym not in active_candidates:
+                score_obj = self._scores.get(sym)
+                dropped.append(
+                    f"{sym}({score_obj.score:.6f})" if score_obj else sym
+                )
+                del self._watchlist[sym]
+        if dropped:
+            logger.info(
+                f"[Candidate] DROPPED {len(dropped)}: "
+                + ", ".join(dropped[:5])
+                + (f" +{len(dropped)-5} more" if len(dropped) > 5 else "")
+            )
+
     def _discovery_debug_log(self, now: float) -> None:
         """Emit debug logs during discovery to diagnose low scores."""
         elapsed = now - self._discovery_start
@@ -601,59 +687,6 @@ class SymbolOptimizer:
                     f"{strong_count} strong "
                     f"({self._strong_threshold})"
                 )
-
-                # Candidate tracking during discovery
-                for s in ranked:
-                    if s.score < self._trading_threshold or s.score <= 0:
-                        break  # sorted desc, no more candidates
-                    # Tier classification
-                    if s.score >= self._very_strong_threshold:
-                        tier = "very_strong"
-                    elif s.score >= self._strong_threshold:
-                        tier = "strong"
-                    else:
-                        tier = "normal"
-                    # Trend from score samples in watchlist (if tracked)
-                    wl = self._watchlist.get(s.symbol)
-                    if wl and len(wl.score_samples) >= 2:
-                        trend = "rising" if wl.score_samples[-1] > wl.score_samples[-2] else "falling" if wl.score_samples[-1] < wl.score_samples[-2] else "flat"
-                    else:
-                        trend = "new"
-                    # Track in watchlist for trend analysis
-                    if s.symbol not in self._watchlist:
-                        self._watchlist[s.symbol] = WatchlistEntry(
-                            symbol=s.symbol,
-                            entered_at=now,
-                            confirmation_start=now,
-                        )
-                        status = "NEW"
-                    else:
-                        status = "WATCH"
-                    wl = self._watchlist[s.symbol]
-                    wl.score_samples.append(s.score)
-                    wl.peak_score = max(wl.peak_score, s.score)
-                    logger.info(
-                        f"[Candidate] {status} {s.symbol}: "
-                        f"score={s.score:.6f} peak={wl.peak_score:.6f} "
-                        f"tier={tier} avg_net={s.avg_profitable_net:.4f}% "
-                        f"freq={s.frequency:.1%} ticks={s.profitable_ticks}/{s.total_ticks} "
-                        f"best_net={s.best_net_pct:+.4f}% trend={trend} "
-                        f"phase=discovery"
-                    )
-
-                # Drop watchlist entries that fell below threshold
-                dropped = []
-                for sym in list(self._watchlist.keys()):
-                    score_obj = self._scores.get(sym)
-                    if not score_obj or score_obj.score < self._trading_threshold:
-                        dropped.append(f"{sym}({score_obj.score:.6f})" if score_obj else sym)
-                        del self._watchlist[sym]
-                if dropped:
-                    logger.info(
-                        f"[Candidate] DROPPED {len(dropped)}: "
-                        + ", ".join(dropped[:5])
-                        + (f" +{len(dropped)-5} more" if len(dropped) > 5 else "")
-                    )
 
                 # Fee floor analysis: show min combined fee for each exchange pair
                 if elapsed <= 120:  # Only in first 2 minutes
@@ -882,10 +915,44 @@ class SymbolOptimizer:
             key=lambda s: s.score,
             reverse=True,
         )
-        tradeable_symbols = [
+        tradeable_symbols_raw = [
             s.symbol for s in ranked_symbols
             if s.score >= self._trading_threshold
         ]
+
+        # Filter out symbols with declining score trajectories
+        tradeable_symbols: list[str] = []
+        rejected_declining: list[str] = []
+        for sym in tradeable_symbols_raw:
+            wl = self._watchlist.get(sym)
+            if wl and len(wl.score_samples) >= 5:
+                samples = wl.score_samples
+                # Check if consistently declining: last 5 samples all decreasing
+                last5 = samples[-5:]
+                all_declining = all(
+                    last5[i] > last5[i + 1] for i in range(len(last5) - 1)
+                )
+                # Also check cliff drop: current < peak × stability_factor
+                current = samples[-1]
+                cliff = (
+                    wl.peak_score > 0
+                    and current < wl.peak_score * self._score_stability_factor
+                )
+                if all_declining or cliff:
+                    reason = "declining" if all_declining else "cliff_drop"
+                    rejected_declining.append(
+                        f"{sym.replace('USDT', '')}("
+                        f"cur={current:.4f} peak={wl.peak_score:.4f} "
+                        f"reason={reason})"
+                    )
+                    continue
+            tradeable_symbols.append(sym)
+
+        if rejected_declining:
+            logger.info(
+                f"[Candidate] REJECTED at activation (unstable): "
+                + ", ".join(rejected_declining)
+            )
 
         if tradeable_symbols:
             # Activate tradeable symbols (cap at max_active)
