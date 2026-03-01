@@ -404,7 +404,7 @@ All pages have their own URL routes (`/#/`, `/#/rankings`, `/#/settings`, `/#/lo
 - **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist. Performance charts section (cumulative P&L, hourly P&L, exchange profit contribution) using recharts. Markdown export ("Copy MD") for sharing data with Claude. All tables horizontal-scroll on mobile.
 - **Settings** — Three sub-tabs (routed: `/settings`, `/settings/fees`, `/settings/transfers`). Each setting has a `?` tooltip icon with detailed description (hover on desktop, tap on mobile):
   - **General**: Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: "Restart Bot" button clears saved state and starts fresh with configured capital. Form grids stack single-column on mobile.
-  - **Fee Management**: Per-exchange fee configuration — base taker rate, token discount toggle+%, fee model (received/spent/token), mechanism (instant/rebate/tier), referral cashback toggle+%+settlement delay, zero-fee pairs. Shows computed effective rates with formula breakdown. Cashback stats (pending/credited). Real mode banner. Save button with 5s cooldown. Hot-applied without restart.
+  - **Fee Management**: Per-exchange fee configuration — **enable/disable checkbox** per exchange (disabled = excluded from trading/rebalancing, hot-applied), base taker rate, token discount toggle+%, fee model (received/spent/token), mechanism (instant/rebate/tier), referral cashback toggle+%+settlement delay, zero-fee pairs. Shows computed effective rates with formula breakdown. Cashback stats (pending/credited). Real mode banner. Save button with 5s cooldown. Hot-applied without restart.
   - **Transfer Fees**: Per-exchange withdrawal fee configuration — per-network fees (flat/percentage/conditional), preferred network selector (auto=cheapest), enable/disable individual networks. Shows effective fee and cheapest network per exchange. Save button with 5s cooldown. Hot-applied without restart.
 - **Logs** — Unified log viewer with two sub-tabs:
   - **Bot Logs**: Real-time terminal-style log viewer (font-mono, auto-scroll). Filters: level (INFO/WARNING/ERROR), component (Monitor/Optimizer/Balance/exchanges/Dashboard/Auth/Email/Settings/Fee), text search. Export to `.log` file.
@@ -693,13 +693,14 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 
 ### Features
 
+- **Exchange enable/disable**: Each exchange has an `enabled` checkbox in the Fee Management tab. Disabled exchanges are excluded from `_active_exchanges` (monitor/optimizer) and `_exchanges` (balance) — stops all trading and rebalancing on that exchange immediately. WebSocket fetchers still run for scoring data. Re-enabling adds the exchange back. Hot-applied without restart via `_apply_enabled_exchanges()`.
 - **Token discounts**: Per-exchange toggle with configurable %. Effective rate = base × (1 - discount%). Gate.io GT gives 10% at VIP 0. Pionex has no discount token (only volume-based VIP tiers).
 - **Referral cashbacks**: Enabled for all exchanges except Bitfinex (0% fees already). Tracked as `PendingCashback` with exchange-specific settlement times: instant (Bitget, 0 min), hourly (Binance/Pionex, 60 min), ~90 min (OKX), or daily (Bybit/MEXC/KuCoin/Gate.io, 1440 min). Credited cashback is added to USDT balance and included in net profit calculations (`net_profit = trading_pnl - transfer_fees + credited_cashback`). Displayed in Trade Profit card (credited + pending).
 - **Zero-fee pairs**: Override list per exchange (e.g., Gate.io BTC/USDT → 0% fee). Checked before all other rate computation.
 - **Fee mechanisms**: `instant` (discount applied immediately), `rebate` (KCS — credited back), `tier` (volume-based, OKX/Bybit). **Note**: Stored as metadata only — no code branches on mechanism type. All mechanisms are treated as instant rate reductions via `effective_taker_rate`.
 - **Fee models**: `received` (fee from received asset), `spent` (added to cost), `token` (from discount token balance). **Actively used** in `balance.execute_trade()` — controls how balances change per trade. The `token` model means full crypto/USDT received (fee from discount token), which compounds favorably over hundreds of trades.
 - **Sim/Real mode**: Simulation uses configured rates. Real mode overrides with API-queried rates from `DemoPortfolioFetcher`.
-- **Hot-apply**: Fee settings changed in dashboard are applied instantly without restart.
+- **Hot-apply**: Fee settings changed in dashboard are applied instantly without restart. Exchange enable/disable updates propagate to all components.
 - **State persistence**: Pending cashbacks survive restarts via `StateManager`.
 - **Scoring fee**: `get_scoring_fee()` returns time-weighted fee including referral cashback for scoring/selection/threshold decisions. Instant cashback (0 min) = 100% weight, hourly (≤120 min) = 75%, daily (>120 min) = 50%. Makes the bot prefer exchanges with fast cashback (e.g., Bitget instant at 0.064% scoring fee vs KuCoin daily at 0.072%). `get_taker_fee()` remains for actual trade execution and cashback recording (no double-counting).
 - **Profit integration**: Credited cashbacks are added to `net_profit` in `get_net_profit_stats()` and considered in rebalance gates (`_should_rebalance()`). This means cashback income offsets transfer fees in profitability calculations.
@@ -709,10 +710,10 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 
 | File | Responsibility |
 |------|---------------|
-| `fee_manager.py` | `FeeManager` class, `ExchangeFeeConfig` dataclass, `PendingCashback` tracking, settings serialization, broadcast dict |
-| `config.py` | `DEFAULT_FEE_CONFIGS` — 9 exchanges × 10 fields (base rates, discounts, mechanisms, models, referral, zero-fee) |
-| `dashboard_server.py` | `save_fee_settings` handler with validation schema, hot-apply, broadcast via `to_broadcast_dict()` |
-| `dashboard/src/components/FeeManagementTab.tsx` | Per-exchange fee config UI with computed effective rates |
+| `fee_manager.py` | `FeeManager` class, `ExchangeFeeConfig` dataclass (incl. `enabled`), `is_exchange_enabled()`, `get_enabled_exchanges()`, `PendingCashback` tracking, settings serialization, broadcast dict |
+| `config.py` | `DEFAULT_FEE_CONFIGS` — 9 exchanges × 11 fields (base rates, discounts, mechanisms, models, referral, zero-fee, enabled) |
+| `dashboard_server.py` | `save_fee_settings` handler with validation schema, `_apply_enabled_exchanges()` hot-apply, broadcast via `to_broadcast_dict()` |
+| `dashboard/src/components/FeeManagementTab.tsx` | Per-exchange fee config UI with enable/disable checkbox and computed effective rates |
 
 ## VPS Infrastructure
 
