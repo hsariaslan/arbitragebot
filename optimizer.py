@@ -594,12 +594,66 @@ class SymbolOptimizer:
                         f"best_net={s.best_net_pct:+.4f}%"
                     )
                 above = sum(1 for s in ranked if s.score >= self._trading_threshold)
+                strong_count = sum(1 for s in ranked if s.score >= self._strong_threshold)
                 logger.debug(
                     f"[Discovery]   {above} symbols above threshold "
                     f"({self._trading_threshold}), "
-                    f"{sum(1 for s in ranked if s.score >= self._strong_threshold)} strong "
+                    f"{strong_count} strong "
                     f"({self._strong_threshold})"
                 )
+
+                # Candidate tracking during discovery
+                for s in ranked:
+                    if s.score < self._trading_threshold or s.score <= 0:
+                        break  # sorted desc, no more candidates
+                    # Tier classification
+                    if s.score >= self._very_strong_threshold:
+                        tier = "very_strong"
+                    elif s.score >= self._strong_threshold:
+                        tier = "strong"
+                    else:
+                        tier = "normal"
+                    # Trend from score samples in watchlist (if tracked)
+                    wl = self._watchlist.get(s.symbol)
+                    if wl and len(wl.score_samples) >= 2:
+                        trend = "rising" if wl.score_samples[-1] > wl.score_samples[-2] else "falling" if wl.score_samples[-1] < wl.score_samples[-2] else "flat"
+                    else:
+                        trend = "new"
+                    # Track in watchlist for trend analysis
+                    if s.symbol not in self._watchlist:
+                        self._watchlist[s.symbol] = WatchlistEntry(
+                            symbol=s.symbol,
+                            entered_at=now,
+                            confirmation_start=now,
+                        )
+                        status = "NEW"
+                    else:
+                        status = "WATCH"
+                    wl = self._watchlist[s.symbol]
+                    wl.score_samples.append(s.score)
+                    wl.peak_score = max(wl.peak_score, s.score)
+                    logger.info(
+                        f"[Candidate] {status} {s.symbol}: "
+                        f"score={s.score:.6f} peak={wl.peak_score:.6f} "
+                        f"tier={tier} avg_net={s.avg_profitable_net:.4f}% "
+                        f"freq={s.frequency:.1%} ticks={s.profitable_ticks}/{s.total_ticks} "
+                        f"best_net={s.best_net_pct:+.4f}% trend={trend} "
+                        f"phase=discovery"
+                    )
+
+                # Drop watchlist entries that fell below threshold
+                dropped = []
+                for sym in list(self._watchlist.keys()):
+                    score_obj = self._scores.get(sym)
+                    if not score_obj or score_obj.score < self._trading_threshold:
+                        dropped.append(f"{sym}({score_obj.score:.6f})" if score_obj else sym)
+                        del self._watchlist[sym]
+                if dropped:
+                    logger.info(
+                        f"[Candidate] DROPPED {len(dropped)}: "
+                        + ", ".join(dropped[:5])
+                        + (f" +{len(dropped)-5} more" if len(dropped) > 5 else "")
+                    )
 
                 # Fee floor analysis: show min combined fee for each exchange pair
                 if elapsed <= 120:  # Only in first 2 minutes
