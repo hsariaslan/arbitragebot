@@ -260,6 +260,7 @@ Instead of spreading capital uniformly across all exchanges, the bot concentrate
 `_compute_dominant_pairs(symbol, max_per_direction)` analyzes rolling tick data:
 - Weights each exchange's buyer/seller score by `best_net_pct` (profitability)
 - **Fee-weighted tie-breaking**: Lower-fee exchanges get weight boost in `_select_top()`. Bitfinex (0%) gets ~2× boost vs Bybit (0.10%). Large profitability differences still dominate.
+- **Seller withdrawal-fee penalty**: Seller exchanges with withdrawal fee > $0.20 get weight reduced by up to 50%. Prevents USDT accumulation on expensive-withdrawal exchanges (e.g., Gate.io $0.50, KuCoin $0.40).
 - Selects top N exchanges per direction (buy/sell), ignoring < 2% weight
 - `max_per_direction` is tier-based: 2 for default/strong, 3 for very_strong
 - Falls back to historical `buy_exchange_counts` / `sell_exchange_counts` if insufficient rolling data
@@ -294,16 +295,18 @@ Bitfinex has $0 withdrawal fees on 14/15 networks, making it the ideal capital s
 
 1. **Carve-out at discovery**: Before allocating capital to symbols, `reserve_amount` is set aside as USDT on Bitfinex
 2. **Protection during rebalancing**: Normal rebalance source selection uses `_available_usdt_for_rebalance()` which excludes the reserve from Bitfinex's available balance
-3. **Emergency draw**: When net P&L gate blocks rebalancing AND miss streak ≥ 2× threshold, `emergency_reserve_draw()` transfers USDT from Bitfinex to the starved exchange — **bypasses all gates** (net P&L, hourly cap, transfer worthiness). Fee = $0.
-4. **Periodic replenishment**: Every evaluation cycle (when net profit is positive), `replenish_reserve()` tops up from exchanges with cheap withdrawals (fee < $0.10). Respects cooldown and hourly budget.
+3. **Protection during trading**: `available_usdt_for_trading()` prevents trades from spending Bitfinex USDT below the reserve target. Used in both `_compute_trade_size()` and `can_execute()`. Without this, Bitfinex as a buyer exchange drains the reserve through normal trading, triggering expensive replenishment cycles.
+4. **Emergency draw**: When net P&L gate blocks rebalancing AND miss streak ≥ 2× threshold, `emergency_reserve_draw()` transfers USDT from Bitfinex to the starved exchange — **bypasses all gates** (net P&L, hourly cap, transfer worthiness). Fee = $0.
+5. **Periodic replenishment**: Every evaluation cycle (when net profit is positive), `replenish_reserve()` tops up from free/near-free exchanges only (fee ≤ $0.01: MEXC, Bybit, Binance, Bitget). Minimum transfer $50 or `trade_amount × 5`. 10-minute cooldown per source. Respects hourly budget.
 
 ### Key Methods
 
 | Method | File | Purpose |
 |--------|------|---------|
-| `_available_usdt_for_rebalance(ex)` | `balance.py` | Returns USDT minus reserve if Bitfinex |
+| `available_usdt_for_trading(ex)` | `balance.py` | Returns USDT minus reserve if Bitfinex (for trade sizing/execution) |
+| `_available_usdt_for_rebalance(ex)` | `balance.py` | Returns USDT minus reserve if Bitfinex (for rebalance source selection) |
 | `emergency_reserve_draw(target, amount)` | `balance.py` | Emergency $0-fee transfer from reserve |
-| `replenish_reserve()` | `balance.py` | Top up reserve from cheap exchanges |
+| `replenish_reserve()` | `balance.py` | Top up reserve from free exchanges (fee ≤ $0.01) |
 
 ## Adaptive Trading System
 
