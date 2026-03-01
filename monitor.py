@@ -117,6 +117,8 @@ class ArbitrageMonitor:
         exchange_info: "ExchangeInfoManager | None" = None,
         fee_manager: "FeeManager | None" = None,
         min_misses_before_rebalance: int = 15,
+        net_pct_sizing_enabled: bool = True,
+        net_pct_multiplier_cap: float = 2.5,
     ) -> None:
         self._fetchers = fetchers
         self._balance = balance
@@ -132,6 +134,8 @@ class ArbitrageMonitor:
         self._rebalance_roi_horizon: int = rebalance_roi_horizon
         self._total_capital: float = total_capital
         self._adaptive_mode: bool = adaptive_mode
+        self._net_pct_sizing_enabled: bool = net_pct_sizing_enabled
+        self._net_pct_multiplier_cap: float = net_pct_multiplier_cap
 
         self._optimizer: "SymbolOptimizer | None" = None
         self._trades: list[SimulatedTrade] = []
@@ -344,15 +348,23 @@ class ArbitrageMonitor:
         crypto_buffer = 0.95 if crypto_value < min_trade * 2 else 0.80
         max_by_crypto = crypto_value * crypto_buffer
 
-        # Tick quality factor (narrow range — symbol_mult does the heavy lifting)
-        if net_pct >= 0.10:
-            tick_factor = 1.0
-        elif net_pct >= 0.05:
-            tick_factor = 0.90
+        # Net%-based trade sizing: scale trade size by current tick profitability
+        if self._net_pct_sizing_enabled:
+            if net_pct >= 0.25:
+                net_mult = 2.5
+            elif net_pct >= 0.15:
+                net_mult = 2.0
+            elif net_pct >= 0.08:
+                net_mult = 1.5
+            elif net_pct >= 0.03:
+                net_mult = 1.0
+            else:
+                net_mult = 0.5
+            net_mult = min(net_mult, self._net_pct_multiplier_cap)
         else:
-            tick_factor = 0.85
+            net_mult = 1.0
 
-        base = self._trade_amount * symbol_mult * tick_factor
+        base = self._trade_amount * symbol_mult * net_mult
         trade_size = min(max_by_usdt, max_by_crypto, base)
 
         if trade_size < min_trade:

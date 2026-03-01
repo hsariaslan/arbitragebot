@@ -101,6 +101,8 @@ export interface Settings {
   reallocation_cost_horizon?: number;
   demotion_cooldown_multiplier?: number;
   hourly_external_transfer_cap?: number;
+  net_pct_sizing_enabled?: boolean;
+  net_pct_multiplier_cap?: number;
   // Score thresholds
   trading_score_threshold?: number;
   strong_score_threshold?: number;
@@ -252,6 +254,8 @@ export interface AdaptiveConfig {
   min_net_profit_pct: number;
   estimated_profit_per_trade: number;
   total_capital: number;
+  net_pct_sizing_enabled: boolean;
+  net_pct_multiplier_cap: number;
   exchange_transfer_status: Record<string, ExchangeTransferStatus>;
 }
 

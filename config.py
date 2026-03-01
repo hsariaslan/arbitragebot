@@ -302,6 +302,8 @@ MIN_NET_PROFIT_PCT: float = 0.02         # Min net% to execute a trade (filter m
 REBALANCE_COOLDOWN_SECONDS: float = 30   # Seconds between rebalances per exchange/direction
 REBALANCE_ROI_HORIZON: int = 1800        # Max seconds to recoup rebalance cost
 ADAPTIVE_MODE: bool = True               # Enable adaptive trade sizing and smart rebalancing
+NET_PCT_SIZING_ENABLED: bool = True      # Scale trade size based on current tick net%
+NET_PCT_MULTIPLIER_CAP: float = 2.5      # Max net%-based trade size multiplier
 
 # Score thresholds (configurable via settings page)
 TRADING_SCORE_THRESHOLD: float = 0.01    # Min score to trade/rebalance

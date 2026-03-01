@@ -46,6 +46,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [reallocationCostHorizon, setReallocationCostHorizon] = useState(currentSettings.reallocation_cost_horizon ?? 2.0);
   const [demotionCooldownMultiplier, setDemotionCooldownMultiplier] = useState(currentSettings.demotion_cooldown_multiplier ?? 5.0);
   const [hourlyExternalTransferCap, setHourlyExternalTransferCap] = useState(currentSettings.hourly_external_transfer_cap ?? 2.0);
+  const [netPctSizingEnabled, setNetPctSizingEnabled] = useState(currentSettings.net_pct_sizing_enabled ?? true);
+  const [netPctMultiplierCap, setNetPctMultiplierCap] = useState(currentSettings.net_pct_multiplier_cap ?? 2.5);
   const [tradingScoreThreshold, setTradingScoreThreshold] = useState(currentSettings.trading_score_threshold ?? 0.01);
   const [strongScoreThreshold, setStrongScoreThreshold] = useState(currentSettings.strong_score_threshold ?? 0.1);
   const [veryStrongScoreThreshold, setVeryStrongScoreThreshold] = useState(currentSettings.very_strong_score_threshold ?? 0.3);
@@ -85,6 +87,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setReallocationCostHorizon(currentSettings.reallocation_cost_horizon ?? 2.0);
       setDemotionCooldownMultiplier(currentSettings.demotion_cooldown_multiplier ?? 5.0);
       setHourlyExternalTransferCap(currentSettings.hourly_external_transfer_cap ?? 2.0);
+      setNetPctSizingEnabled(currentSettings.net_pct_sizing_enabled ?? true);
+      setNetPctMultiplierCap(currentSettings.net_pct_multiplier_cap ?? 2.5);
       setTradingScoreThreshold(currentSettings.trading_score_threshold ?? 0.01);
       setStrongScoreThreshold(currentSettings.strong_score_threshold ?? 0.1);
       setVeryStrongScoreThreshold(currentSettings.very_strong_score_threshold ?? 0.3);
@@ -128,6 +132,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     reallocation_cost_horizon: reallocationCostHorizon,
     demotion_cooldown_multiplier: demotionCooldownMultiplier,
     hourly_external_transfer_cap: hourlyExternalTransferCap,
+    net_pct_sizing_enabled: netPctSizingEnabled,
+    net_pct_multiplier_cap: netPctMultiplierCap,
     adaptive_mode: adaptiveMode,
     execution_mode: executionMode,
   });
@@ -223,6 +229,24 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             <span className="text-sm text-slate-300">Enable Adaptive Mode</span>
             <Tooltip text="Dynamically adjusts trade sizes, rebalance amounts, and thresholds based on real-time market conditions and available capital. Recommended for small capital (<$5k). Default: enabled" />
           </label>
+        </div>
+        <div className="mt-4">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" checked={netPctSizingEnabled}
+              onChange={e => { setDirty(true); setNetPctSizingEnabled(e.target.checked); }}
+              className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
+            <span className="text-sm text-slate-300">Enable Net% Sizing</span>
+            <Tooltip text="Scale trade size based on current tick's net profitability. Higher net% spreads get larger trades (up to cap). Tiers: <0.03%=0.5x, 0.03-0.08%=1.0x, 0.08-0.15%=1.5x, 0.15-0.25%=2.0x, >0.25%=2.5x. Multiplies with score-based multiplier. Default: enabled" />
+          </label>
+        </div>
+        <div className="mt-4">
+          <label className="flex items-center text-xs text-slate-500 mb-1">
+            Net% Multiplier Cap
+            <Tooltip text="Maximum net%-based trade size multiplier. Caps the upside of net% scaling to prevent over-concentration on single ticks. Combined with score multiplier, final size is still limited by available balance. Range: 1.0-10.0. Default: 2.5" />
+          </label>
+          <input type="number" value={netPctMultiplierCap} min={1.0} max={10.0} step={0.1}
+            onChange={d(setNetPctMultiplierCap, 2.5)}
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
         </div>
         <div className="mt-4">
           <label className="flex items-center text-sm text-slate-300 mb-1">

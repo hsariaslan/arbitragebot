@@ -182,6 +182,8 @@ async def main() -> None:
         log_file=log_file,
         exchange_info=exchange_info,
         fee_manager=fee_manager,
+        net_pct_sizing_enabled=settings.get("net_pct_sizing_enabled", True),
+        net_pct_multiplier_cap=settings.get("net_pct_multiplier_cap", 2.5),
     )
     optimizer = SymbolOptimizer(
         fetchers=fetchers,

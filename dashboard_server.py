@@ -794,6 +794,8 @@ class DashboardServer:
         "demotion_cooldown_multiplier": (float, 1.0, 20.0),
         "hourly_external_transfer_cap": (float, 0, 100.0),
         "bitfinex_reserve_pct": (float, 0.0, 0.5),
+        "net_pct_sizing_enabled": (bool, None, None),
+        "net_pct_multiplier_cap": (float, 1.0, 10.0),
     }
 
     _SETTINGS_ENUMS: dict[str, list[str]] = {
@@ -1260,6 +1262,10 @@ class DashboardServer:
             self._monitor._net_pnl_gate_grace_seconds = int(settings["net_pnl_gate_grace_seconds"])
         if "rebalance_roi_divisor" in settings:
             self._monitor._rebalance_roi_divisor = int(settings["rebalance_roi_divisor"])
+        if "net_pct_sizing_enabled" in settings:
+            self._monitor._net_pct_sizing_enabled = settings["net_pct_sizing_enabled"]
+        if "net_pct_multiplier_cap" in settings:
+            self._monitor._net_pct_multiplier_cap = settings["net_pct_multiplier_cap"]
 
         # Adaptive mode
         if "adaptive_mode" in settings:
