@@ -1632,7 +1632,9 @@ class SymbolOptimizer:
                 "num_exchanges": min(len(all_ex), max_per_direction * 2),
             }
 
-        def _select_top(scores: dict[str, float], max_n: int) -> list[tuple[str, float]]:
+        def _select_top(
+            scores: dict[str, float], max_n: int, direction: str = "buy"
+        ) -> list[tuple[str, float]]:
             total = sum(scores.values())
             if total <= 0:
                 equal_w = 1.0 / max(len(scores), 1)
@@ -1648,6 +1650,16 @@ class SymbolOptimizer:
                     for ex, w in weighted
                 ]
 
+            # Seller penalty: USDT accumulates on sell exchanges, so penalize
+            # those with high withdrawal fees (capital gets trapped there).
+            # Exchanges with fee > $0.20 get weight reduced by up to 50%.
+            if direction == "sell" and self._balance:
+                for i, (ex, w) in enumerate(weighted):
+                    wfee = self._balance._get_withdrawal_fee(ex, 100.0)
+                    if wfee > 0.20:
+                        penalty = min(0.5, wfee)  # up to 50% penalty
+                        weighted[i] = (ex, w * (1 - penalty))
+
             weighted.sort(key=lambda x: x[1], reverse=True)
             # Take top N, ignoring < 2% weight exchanges
             selected = []
@@ -1659,8 +1671,8 @@ class SymbolOptimizer:
                 selected.append((ex, w))
             return selected if selected else weighted[:1]
 
-        buyers = _select_top(buy_scores, max_per_direction)
-        sellers = _select_top(sell_scores, max_per_direction)
+        buyers = _select_top(buy_scores, max_per_direction, "buy")
+        sellers = _select_top(sell_scores, max_per_direction, "sell")
         all_exchanges = {ex for ex, _ in buyers} | {ex for ex, _ in sellers}
 
         return {

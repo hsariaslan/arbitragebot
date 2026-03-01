@@ -333,7 +333,8 @@ class ArbitrageMonitor:
         min_trade = max(5.0, self._total_capital * 0.003)
 
         # Max by available USDT on buy exchange (dynamic buffer)
-        usdt_available = self._balance.usdt.get(buy_ex, 0.0)
+        # Protects Bitfinex reserve from being spent by trades
+        usdt_available = self._balance.available_usdt_for_trading(buy_ex)
         usdt_buffer = 0.95 if usdt_available < min_trade * 2 else 0.80
         max_by_usdt = usdt_available * usdt_buffer
 

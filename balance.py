@@ -213,6 +213,17 @@ class BalanceTracker:
             return max(0.0, usdt - self._bitfinex_reserve_target)
         return usdt
 
+    def available_usdt_for_trading(self, exchange: str) -> float:
+        """USDT available for trading on an exchange, protecting Bitfinex reserve.
+
+        Unlike _available_usdt_for_rebalance (used for transfer source selection),
+        this protects the reserve from being spent by normal trade execution.
+        """
+        usdt = self.usdt.get(exchange, 0.0)
+        if exchange == "Bitfinex" and self._bitfinex_reserve_pct > 0:
+            return max(0.0, usdt - self._bitfinex_reserve_target)
+        return usdt
+
     def update_symbols(self, symbols: list[str]) -> None:
         """Update active symbols list and ensure crypto dicts have entries."""
         self._symbols = list(symbols)
@@ -335,7 +346,7 @@ class BalanceTracker:
 
         Returns (has_usdt_to_buy, has_crypto_to_sell).
         """
-        has_usdt = self.usdt.get(buy_exchange, 0.0) >= trade_amount
+        has_usdt = self.available_usdt_for_trading(buy_exchange) >= trade_amount
         crypto_qty = self.crypto.get(sell_exchange, {}).get(symbol, 0.0)
         crypto_value = crypto_qty * sell_price
         has_crypto = crypto_value >= trade_amount
@@ -838,18 +849,19 @@ class BalanceTracker:
             return []
 
         deficit = self._bitfinex_reserve_target - current
-        if deficit < self._trade_amount:
-            return []  # Not worth replenishing tiny amounts
+        min_replenish = max(50.0, self._trade_amount * 5)
+        if deficit < min_replenish:
+            return []  # Not worth replenishing small amounts
 
-        # Find cheapest sender with surplus USDT
+        # Find cheapest sender with surplus USDT (fee <= $0.01 only)
         buf = self._rebalance_buffer
-        max_fee = 0.10  # Only replenish from cheap exchanges
+        max_fee = 0.01  # Only free/near-free: MEXC, Bybit, Binance, Bitget
         candidates = []
         for ex in self._exchanges:
             if ex == "Bitfinex":
                 continue
             avail = self.usdt.get(ex, 0.0) - buf
-            if avail < self._trade_amount:
+            if avail < min_replenish:
                 continue
             fee = self._get_withdrawal_fee(ex, min(deficit, avail))
             if fee <= max_fee:
@@ -862,10 +874,11 @@ class BalanceTracker:
         candidates.sort(key=lambda x: x[2])
         sender, avail, fee = candidates[0]
 
-        # Check cooldown
-        cooldown_key = f"{sender}:usdt_out"
+        # Check cooldown (10 min for reserve replenish to avoid fee churn)
+        cooldown_key = f"reserve_replenish:{sender}"
         now = time.time()
-        if now - self._last_rebalance.get(cooldown_key, 0) < self._rebalance_cooldown:
+        reserve_cooldown = max(self._rebalance_cooldown, 600)
+        if now - self._last_rebalance.get(cooldown_key, 0) < reserve_cooldown:
             return []
 
         # Check hourly budget
