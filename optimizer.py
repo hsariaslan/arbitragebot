@@ -927,19 +927,22 @@ class SymbolOptimizer:
             wl = self._watchlist.get(sym)
             if wl and len(wl.score_samples) >= 5:
                 samples = wl.score_samples
-                # Check if consistently declining: last 5 samples all decreasing
+                # Check if meaningfully declining: last 5 all decreasing AND
+                # total drop > 10% (filters out rolling window dilution noise)
                 last5 = samples[-5:]
                 all_declining = all(
                     last5[i] > last5[i + 1] for i in range(len(last5) - 1)
                 )
-                # Also check cliff drop: current < peak × stability_factor
                 current = samples[-1]
+                decline_pct = (last5[0] - current) / last5[0] * 100 if last5[0] > 0 else 0
+                meaningful_decline = all_declining and decline_pct > 10
+                # Also check cliff drop: current < peak × stability_factor
                 cliff = (
                     wl.peak_score > 0
                     and current < wl.peak_score * self._score_stability_factor
                 )
-                if all_declining or cliff:
-                    reason = "declining" if all_declining else "cliff_drop"
+                if meaningful_decline or cliff:
+                    reason = f"declining ({decline_pct:.1f}%)" if meaningful_decline else "cliff_drop"
                     rejected_declining.append(
                         f"{sym.replace('USDT', '')}("
                         f"cur={current:.4f} peak={wl.peak_score:.4f} "
