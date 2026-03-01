@@ -162,6 +162,7 @@ class WatchlistEntry:
     entered_at: float
     confirmation_start: float
     score_samples: list[float] = field(default_factory=list)
+    peak_score: float = 0.0
     confirmed: bool = False
 
 
@@ -202,6 +203,8 @@ class SymbolOptimizer:
         demotion_period: int = 600,
         demotion_cooldown_multiplier: float = 5.0,
         reallocation_cost_horizon: float = 2.0,
+        score_stability_seconds: int = 120,
+        score_stability_factor: float = 0.5,
     ) -> None:
         self._fetchers = fetchers
         self._monitor = monitor
@@ -239,6 +242,8 @@ class SymbolOptimizer:
         self._recently_demoted: dict[str, float] = {}  # symbol -> demotion timestamp
         self._demotion_cooldown_multiplier = demotion_cooldown_multiplier
         self._demotion_cooldown = demotion_period * demotion_cooldown_multiplier
+        self._score_stability_seconds = score_stability_seconds
+        self._score_stability_factor = score_stability_factor
 
         # Reallocation cost gate
         self._reallocation_cost_horizon = reallocation_cost_horizon
@@ -1023,6 +1028,39 @@ class SymbolOptimizer:
 
     # ── Watchlist ──────────────────────────────────────────────────────────
 
+    def _is_score_stable(
+        self, entry: WatchlistEntry, current_score: float
+    ) -> tuple[bool, str]:
+        """Check if a watchlist candidate's score trend is stable enough for activation.
+
+        Returns (is_stable, reason_string).
+        """
+        now = time.time()
+        # 1. Minimum observation period
+        if now - entry.entered_at < self._score_stability_seconds:
+            return False, "min_observation"
+        # 2. Cliff drop: current score fell below peak × stability_factor
+        if (
+            entry.peak_score > 0
+            and current_score < entry.peak_score * self._score_stability_factor
+        ):
+            return (
+                False,
+                f"cliff_drop (cur={current_score:.6f} < peak={entry.peak_score:.6f}"
+                f" × {self._score_stability_factor})",
+            )
+        # 3. Declining trend: 3+ consecutive drops
+        samples = entry.score_samples
+        if len(samples) >= 3:
+            last3 = samples[-3:]
+            if last3[0] > last3[1] > last3[2]:
+                return (
+                    False,
+                    f"declining_trend (last3="
+                    f"[{last3[0]:.6f}, {last3[1]:.6f}, {last3[2]:.6f}])",
+                )
+        return True, "stable"
+
     def _update_watchlist(self) -> None:
         """Track strong candidates and confirm after sustained performance."""
         now = time.time()
@@ -1059,6 +1097,7 @@ class SymbolOptimizer:
 
                 entry = self._watchlist[sym]
                 entry.score_samples.append(score_obj.score)
+                entry.peak_score = max(entry.peak_score, score_obj.score)
 
                 # Check confirmation (faster for strong/very_strong candidates)
                 score_val = score_obj.score if score_obj else 0.0
@@ -1068,7 +1107,12 @@ class SymbolOptimizer:
                     confirm_time = self._confirmation_period * 0.4
                 else:
                     confirm_time = self._confirmation_period
-                if not entry.confirmed and now - entry.entered_at >= confirm_time:
+
+                # Stability gate: must pass trend checks before confirmation
+                stable, stability_reason = self._is_score_stable(
+                    entry, score_obj.score
+                )
+                if not entry.confirmed and stable and now - entry.entered_at >= confirm_time:
                     entry.confirmed = True
                     stats = self._historical_stats.get(sym)
                     if stats:
@@ -1076,7 +1120,7 @@ class SymbolOptimizer:
                     logger.info(
                         f"[Optimizer] Watchlist CONFIRMED: {sym} "
                         f"(avg score={sum(entry.score_samples)/len(entry.score_samples):.6f}, "
-                        f"confirm={confirm_time:.0f}s)"
+                        f"peak={entry.peak_score:.6f}, confirm={confirm_time:.0f}s)"
                     )
             else:
                 # Score dropped below threshold — remove from watchlist
@@ -1440,9 +1484,27 @@ class SymbolOptimizer:
                 key=lambda s: s.score,
                 reverse=True,
             )
+            now = time.time()
             for candidate in expansion_candidates:
                 if len(self._active_symbols) >= self._max_active_symbols:
                     break
+                # Stability gate for expansion
+                wl_entry = self._watchlist.get(candidate.symbol)
+                if wl_entry is None:
+                    # First seen — create watchlist entry to start tracking
+                    self._watchlist[candidate.symbol] = WatchlistEntry(
+                        symbol=candidate.symbol,
+                        entered_at=now,
+                        confirmation_start=now,
+                        score_samples=[candidate.score],
+                        peak_score=candidate.score,
+                    )
+                    continue
+                wl_entry.score_samples.append(candidate.score)
+                wl_entry.peak_score = max(wl_entry.peak_score, candidate.score)
+                stable, reason = self._is_score_stable(wl_entry, candidate.score)
+                if not stable:
+                    continue
                 self._expand_active(candidate.symbol, candidate)
                 self._watchlist.pop(candidate.symbol, None)
 
@@ -2087,6 +2149,8 @@ class SymbolOptimizer:
             elapsed = now - entry.entered_at
             progress = min(100.0, elapsed / self._confirmation_period * 100) if self._confirmation_period > 0 else 100.0
             avg_score = sum(entry.score_samples) / len(entry.score_samples) if entry.score_samples else 0.0
+            current_score = entry.score_samples[-1] if entry.score_samples else 0.0
+            stable, stability_reason = self._is_score_stable(entry, current_score)
             result.append({
                 "symbol": sym,
                 "watching_since": entry.entered_at,
@@ -2094,6 +2158,9 @@ class SymbolOptimizer:
                 "progress": round(progress, 1),
                 "confirmed": entry.confirmed,
                 "avg_score": round(avg_score, 6),
+                "peak_score": round(entry.peak_score, 6),
+                "stable": stable,
+                "stability_reason": stability_reason,
             })
         result.sort(key=lambda x: x["avg_score"], reverse=True)
         return result
@@ -2214,6 +2281,7 @@ class SymbolOptimizer:
                     "entered_at": e.entered_at,
                     "confirmation_start": e.confirmation_start,
                     "score_samples": e.score_samples,
+                    "peak_score": e.peak_score,
                     "confirmed": e.confirmed,
                 }
                 for sym, e in self._watchlist.items()

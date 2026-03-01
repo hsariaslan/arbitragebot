@@ -202,6 +202,8 @@ async def main() -> None:
         max_active_symbols=settings.get("max_active_symbols", 8),
         min_rebalance_score=settings.get("min_rebalance_score", 0.0001),
         confirmation_period=settings.get("confirmation_period", 300),
+        score_stability_seconds=settings.get("score_stability_seconds", 120),
+        score_stability_factor=settings.get("score_stability_factor", 0.5),
         promotion_threshold=settings.get("promotion_threshold", 0.0001),
         demotion_threshold=settings.get("demotion_threshold", 0.0),
         demotion_period=settings.get("demotion_period", 600),

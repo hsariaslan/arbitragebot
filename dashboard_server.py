@@ -773,6 +773,8 @@ class DashboardServer:
         "discovery_duration": (int, 30, 3600),
         "min_rebalance_score": (float, 0, 1),
         "confirmation_period": (int, 0, 86400),
+        "score_stability_seconds": (int, 0, 3600),
+        "score_stability_factor": (float, 0.0, 1.0),
         "promotion_threshold": (float, 0, 1),
         "demotion_threshold": (float, 0, 1),
         "demotion_period": (int, 0, 86400),
@@ -1219,6 +1221,10 @@ class DashboardServer:
                 opt._min_rebalance_score = settings["min_rebalance_score"]
             if "confirmation_period" in settings:
                 opt._confirmation_period = settings["confirmation_period"]
+            if "score_stability_seconds" in settings:
+                opt._score_stability_seconds = settings["score_stability_seconds"]
+            if "score_stability_factor" in settings:
+                opt._score_stability_factor = settings["score_stability_factor"]
             if "promotion_threshold" in settings:
                 opt._promotion_threshold = settings["promotion_threshold"]
             if "demotion_threshold" in settings:
