@@ -679,7 +679,7 @@ class SymbolOptimizer:
 
         # Compute per-symbol trade multipliers with focus tiers for active symbols
         # Tiered system: very_strong (>=0.3), strong (>=0.1), normal (>=0.01), weak (<0.01)
-        # Symbols >= self._trading_threshold (0.01) can trade; below that get multiplier=0
+        # Symbols >= self._trading_threshold can trade; below that get multiplier=0 (unless active: 1.0x floor)
         active_set = set(self._active_symbols)
         active_with_score = [s for s in all_scores if s.symbol in active_set and s.score > 0]
         if active_with_score:
@@ -697,8 +697,8 @@ class SymbolOptimizer:
                         s.trade_multiplier = max(0.5, min(1.5, raw))
                         s.focus_tier = "normal"
                     else:
-                        # Below trading threshold: no trading allowed
-                        s.trade_multiplier = 0.0
+                        # Below trading threshold: active symbols still trade at 1.0x
+                        s.trade_multiplier = 1.0 if s.symbol in active_set else 0.0
                         s.focus_tier = "weak"
                     # Recompute est_hourly_profit with multiplied trade amount
                     ticks_per_hour = s.frequency * 3600
@@ -944,19 +944,44 @@ class SymbolOptimizer:
 
             pairs = self._dominant_pairs[sym]
 
+            # Dynamic buy/sell ratio based on exchange concentration per side.
+            # The side with fewer exchanges is more concentrated — each exchange
+            # there handles a larger share of trades and depletes faster.
+            # Over-allocating to the concentrated side delays depletion and
+            # reduces expensive rebalancing cycles.
+            # Equal exchanges → 50/50. 2 buyers + 1 seller → 40/60 (sell gets more).
+            num_buyers = len(pairs["buyers"])
+            num_sellers = len(pairs["sellers"])
+            if num_buyers > 0 and num_sellers > 0:
+                sell_pct = num_buyers / (num_buyers + num_sellers)
+                sell_pct = max(0.35, min(0.65, sell_pct))
+            else:
+                sell_pct = 0.5
+            buy_pct = 1.0 - sell_pct
+
             # USDT → buyer exchanges (proportional to buyer weight)
             total_buy_w = sum(w for _, w in pairs["buyers"])
             for ex, w in pairs["buyers"]:
-                usdt_share = sym_capital * 0.5 * (w / total_buy_w) if total_buy_w > 0 else 0
+                usdt_share = sym_capital * buy_pct * (w / total_buy_w) if total_buy_w > 0 else 0
                 allocations[ex]["usdt"] += usdt_share
 
             # Crypto → seller exchanges (proportional to seller weight)
             total_sell_w = sum(w for _, w in pairs["sellers"])
             for ex, w in pairs["sellers"]:
-                crypto_share = sym_capital * 0.5 * (w / total_sell_w) if total_sell_w > 0 else 0
+                crypto_share = sym_capital * sell_pct * (w / total_sell_w) if total_sell_w > 0 else 0
                 if sym not in allocations[ex]["crypto"]:
                     allocations[ex]["crypto"][sym] = 0.0
                 allocations[ex]["crypto"][sym] += crypto_share
+
+            if buy_pct != 0.5:
+                buyers_str = "+".join(ex for ex, _ in pairs["buyers"])
+                sellers_str = "+".join(ex for ex, _ in pairs["sellers"])
+                logger.info(
+                    f"[Optimizer]   {sym.replace('USDT', '')}: "
+                    f"buy/sell={buy_pct:.0%}/{sell_pct:.0%} "
+                    f"({buyers_str} → {sellers_str}), "
+                    f"capital=${sym_capital:.0f}"
+                )
 
         # Round allocations
         for ex in all_exchanges:
