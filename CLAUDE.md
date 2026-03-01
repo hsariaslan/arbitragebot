@@ -228,7 +228,7 @@ The bot only trades and transfers for **strong** (score ≥ 0.1) and **very stro
 
 - **Discovery**: Activates symbols with score ≥ 0.01. Extends discovery duration (up to 3600s) if none qualify.
 - **Early discovery exit**: If any symbol reaches score ≥ 0.01 during discovery (after 60s minimum), discovery ends immediately and trading starts.
-- **Trading**: Normal tier (0.01–0.1) gets `trade_multiplier = 0.5–1.5×`. Weak symbols (< 0.01) get `trade_multiplier = 0`.
+- **Trading**: Normal tier (0.01–0.1) gets `trade_multiplier = 0.5–1.5×`. Weak symbols (< 0.01) get `trade_multiplier = 0`, **except active symbols** which get a 1.0× floor — score threshold controls activation/demotion, not execution for already-deployed capital.
 - **Rebalancing**: `should_allow_rebalance()` requires score ≥ 0.01 (`TRADING_SCORE_THRESHOLD`). ROI gate, net P&L gate, and transfer worthiness checks protect against unprofitable transfers.
 - **Expansion/Rotation**: Only strong/very_strong candidates can be activated or replace existing symbols.
 - **Faster activation**: Watchlist confirmation period is score-dependent: very strong (≥0.3) confirmed in `confirmation_period × 0.1` (30s default), strong (≥0.1) in `× 0.4` (120s), normal in full period (300s). Strong candidates shouldn't sit idle. All candidates must also pass **score stability checks** before confirmation (see below).
@@ -243,7 +243,8 @@ The bot only trades and transfers for **strong** (score ≥ 0.1) and **very stro
 | Very Strong | ≥ 0.3 | 3.0×–4.0× | Up to 3 per direction (6 max) |
 | Strong | ≥ 0.1 | 2.0×–3.0× | Up to 2 per direction (4 max) |
 | Normal | 0.01–0.1 | 0.5×–1.5× | Up to 2 per direction (4 max) |
-| Weak | < 0.01 | 0× (no trading) | — |
+| Weak (active) | < 0.01 | 1.0× (floor) | Keeps trading until demoted |
+| Weak (inactive) | < 0.01 | 0× (no trading) | — |
 
 ### Historical Tracking
 
@@ -272,7 +273,7 @@ After discovery, capital is allocated per-symbol to dominant exchanges:
 - **Bitfinex reserve carved out first**: `total_capital × bitfinex_reserve_pct` (default 15%) kept as USDT on Bitfinex before symbol allocation
 - Remaining capital: USDT → buyer exchanges (proportional to buyer weight)
 - Crypto → seller exchanges (proportional to seller weight)
-- 50/50 split between buy side and sell side per symbol
+- **Dynamic buy/sell ratio** per symbol based on exchange concentration: the side with fewer exchanges gets proportionally more capital to delay per-exchange depletion (e.g., 2 buyers + 1 seller → 35%/65% buy/sell). Clamped to [35%, 65%]. Equal exchange counts stay at 50/50.
 - Score-weighted across symbols: higher-scoring symbols get more capital
 
 ### Dynamic Re-evaluation
@@ -315,7 +316,7 @@ The bot has a capital-aware adaptive trading system controlled by the **Adaptive
 
 ### Per-Symbol Trade Sizing
 
-Each active symbol gets a **trade multiplier** based on its focus tier (see Strong-Only Trading above). Only strong/very_strong symbols receive non-zero multipliers.
+Each active symbol gets a **trade multiplier** based on its focus tier (see Strong-Only Trading above). Active symbols always receive non-zero multipliers (1.0× floor for weak tier).
 
 - `allocated_trade_size = trade_amount × multiplier × tick_quality_factor`
 - Tick quality factor: 1.0 (net ≥ 0.10%), 0.90 (≥ 0.05%), 0.85 (< 0.05%)
