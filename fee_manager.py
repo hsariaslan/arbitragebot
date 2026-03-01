@@ -31,6 +31,7 @@ class ExchangeFeeConfig:
     referral_settlement_minutes: float  # avg delay until cashback credited
     referral_paid_in: str  # "same_as_fee" | "USDT"
     zero_fee_pairs: list[str] = field(default_factory=list)
+    enabled: bool = True  # Whether this exchange is active for trading
 
     @property
     def effective_taker_rate(self) -> float:
@@ -63,6 +64,7 @@ class ExchangeFeeConfig:
             "referral_settlement_minutes": self.referral_settlement_minutes,
             "referral_paid_in": self.referral_paid_in,
             "zero_fee_pairs": list(self.zero_fee_pairs),
+            "enabled": self.enabled,
         }
 
     @classmethod
@@ -81,6 +83,7 @@ class ExchangeFeeConfig:
             ),
             referral_paid_in=str(data.get("referral_paid_in", "same_as_fee")),
             zero_fee_pairs=list(data.get("zero_fee_pairs", [])),
+            enabled=bool(data.get("enabled", True)),
         )
 
 
@@ -177,6 +180,17 @@ class FeeManager:
             rate *= 1.0 - cfg.referral_cashback_pct * weight
 
         return rate
+
+    def is_exchange_enabled(self, exchange: str) -> bool:
+        """Check if an exchange is enabled for trading."""
+        cfg = self._configs.get(exchange)
+        if cfg is None:
+            return True  # unknown exchange = allow by default
+        return cfg.enabled
+
+    def get_enabled_exchanges(self) -> list[str]:
+        """Return list of all enabled exchange names."""
+        return [ex for ex, cfg in self._configs.items() if cfg.enabled]
 
     def get_fee_model(self, exchange: str) -> str:
         """Get fee deduction model for an exchange.
@@ -355,6 +369,7 @@ class FeeManager:
                 cfg.effective_rate_after_referral, 8
             )
             d["scoring_fee"] = round(self.get_scoring_fee(ex), 8)
+            d["enabled"] = cfg.enabled
             configs_out[ex] = d
 
         return {

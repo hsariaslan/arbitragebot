@@ -164,6 +164,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_settlement_minutes": 60,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
+        "enabled": True,
     },
     "OKX": {
         "base_taker_rate": 0.001,
@@ -176,6 +177,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_settlement_minutes": 90,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
+        "enabled": True,
     },
     "Bybit": {
         "base_taker_rate": 0.001,
@@ -188,6 +190,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_settlement_minutes": 1440,
         "referral_paid_in": "USDT",
         "zero_fee_pairs": [],
+        "enabled": True,
     },
     "MEXC": {
         "base_taker_rate": 0.0005,
@@ -200,6 +203,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_settlement_minutes": 1440,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
+        "enabled": True,
     },
     "Bitget": {
         "base_taker_rate": 0.001,
@@ -212,6 +216,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_settlement_minutes": 0,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
+        "enabled": True,
     },
     "KuCoin": {
         "base_taker_rate": 0.001,
@@ -224,6 +229,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_settlement_minutes": 1440,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
+        "enabled": True,
     },
     "Gate.io": {
         "base_taker_rate": 0.001,
@@ -236,6 +242,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_settlement_minutes": 1440,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": ["BTCUSDT"],
+        "enabled": True,
     },
     "Pionex": {
         "base_taker_rate": 0.0005,  # 0.05% base (VIP tiers exist but volume-gated)
@@ -248,6 +255,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_settlement_minutes": 60,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
+        "enabled": True,
     },
     "Bitfinex": {
         "base_taker_rate": 0.0,  # 0.00% permanent since Dec 17, 2025
@@ -260,6 +268,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_settlement_minutes": 0,
         "referral_paid_in": "same_as_fee",
         "zero_fee_pairs": [],
+        "enabled": True,
     },
 }
 

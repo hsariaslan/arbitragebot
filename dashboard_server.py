@@ -829,6 +829,7 @@ class DashboardServer:
         "referral_settlement_minutes": (float, 0, 10080),
         "referral_paid_in": (str, None, None),
         "zero_fee_pairs": (list, None, None),
+        "enabled": (bool, None, None),
     }
     _FEE_ENUMS: dict[str, list[str]] = {
         "fee_mechanism": ["instant", "rebate", "tier"],
@@ -1035,6 +1036,8 @@ class DashboardServer:
                 self._fee_manager.update_from_settings(fee_data)
                 if fee_real_mode is not None:
                     self._fee_manager.real_mode = bool(fee_real_mode)
+            # Hot-apply enabled/disabled exchanges to components
+            self._apply_enabled_exchanges(fee_data)
             await ws.send(json.dumps({"type": "fee_settings_saved", "ok": True}))
             logger.info("[Fee] Fee settings saved and applied")
 
@@ -1282,6 +1285,7 @@ class DashboardServer:
             fee_configs = settings.get("fee_configs")
             if fee_configs:
                 self._fee_manager.update_from_settings(fee_configs)
+                self._apply_enabled_exchanges(fee_configs)
             fee_real_mode = settings.get("fee_real_mode")
             if fee_real_mode is not None:
                 self._fee_manager.real_mode = bool(fee_real_mode)
@@ -1294,6 +1298,43 @@ class DashboardServer:
 
         # Record config snapshot
         self._monitor.record_config_snapshot("settings_applied")
+
+    def _apply_enabled_exchanges(self, fee_data: dict) -> None:
+        """Hot-apply exchange enabled/disabled state to monitor/optimizer/balance.
+
+        Handles both disabling (remove from active sets) and re-enabling
+        (add back if a fetcher exists for that exchange).
+        """
+        enabled = {ex for ex, cfg in fee_data.items() if cfg.get("enabled", True)}
+        disabled = {ex for ex in fee_data if ex not in enabled}
+
+        # Get the set of exchanges that have fetchers (the full possible set)
+        fetcher_exchanges = set()
+        if self._monitor:
+            fetcher_exchanges = {f.exchange_name for f in self._monitor._fetchers}
+
+        # Only enable exchanges that actually have fetchers
+        target_active = enabled & fetcher_exchanges
+
+        # Update monitor active exchanges
+        if self._monitor:
+            self._monitor._active_exchanges = target_active.copy()
+
+        # Update optimizer active exchanges
+        if self._optimizer:
+            self._optimizer._active_exchanges = target_active.copy()
+
+        # Update balance exchanges (list, preserve order)
+        if self._balance:
+            self._balance._exchanges = [
+                ex for ex in fetcher_exchanges if ex in target_active
+            ]
+
+        logger.info(
+            f"[Settings] Exchange state updated — "
+            f"active: {sorted(target_active)}"
+            + (f", disabled: {sorted(disabled)}" if disabled else "")
+        )
 
     def _build_optimizer_state(self) -> dict[str, Any]:
         """Collect optimizer state for dashboard broadcast."""
