@@ -84,6 +84,7 @@ export interface Settings {
   scoring_window?: number;
   evaluation_interval?: number;
   safety_multiplier?: number;
+  discovery_duration?: number;
   min_rebalance_score?: number;
   confirmation_period?: number;
   score_stability_seconds?: number;
@@ -101,6 +102,8 @@ export interface Settings {
   reallocation_cost_horizon?: number;
   demotion_cooldown_multiplier?: number;
   hourly_external_transfer_cap?: number;
+  bitfinex_reserve_pct?: number;
+  bitfinex_reserve_hard_floor?: number;
   net_pct_sizing_enabled?: boolean;
   net_pct_multiplier_cap?: number;
   // Score thresholds

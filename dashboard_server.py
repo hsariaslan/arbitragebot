@@ -119,6 +119,7 @@ class DashboardServer:
 
         # Auth state
         self._sessions: dict[str, dict] = {}  # token -> {ip, last_seen, remember}
+        self._sessions_file = Path("logs/auth/sessions.json")
         self._failed_attempts: dict[str, list[float]] = {}  # IP -> failure timestamps
         self._blocked_ips: dict[str, float] = {}  # IP -> block_expires_at
         self._rate_limit_file = Path("logs/auth/rate_limits.json")
@@ -130,6 +131,7 @@ class DashboardServer:
         self._remember_expiry = 2592000.0  # 30 days absolute max for remember-me
         self._last_cleanup = 0.0
         self._captcha_threshold = 3  # require CAPTCHA after this many failures
+        self._load_sessions()
 
         # Restart grace period — suppress login email after bot restart
         self._restart_grace = False
@@ -262,6 +264,45 @@ class DashboardServer:
         except Exception as e:
             logger.warning(f"[Auth] Failed to persist rate limits: {e}")
 
+    def _load_sessions(self) -> None:
+        """Load persisted sessions from disk on startup."""
+        if not self._sessions_file.exists():
+            return
+        try:
+            with open(self._sessions_file) as f:
+                data = json.load(f)
+            now = time.time()
+            loaded = 0
+            for token, session in data.items():
+                if not isinstance(session, dict):
+                    continue
+                created = session.get("created_at", 0)
+                last_seen = session.get("last_seen", 0)
+                remember = session.get("remember", False)
+                # Prune expired sessions on load
+                if remember:
+                    if now - created > self._remember_expiry:
+                        continue
+                else:
+                    if (now - last_seen > self._session_expiry
+                            or now - created > self._session_absolute_max):
+                        continue
+                self._sessions[token] = session
+                loaded += 1
+            if loaded:
+                logger.info(f"[Auth] Loaded {loaded} persisted session(s)")
+        except Exception as e:
+            logger.warning(f"[Auth] Failed to load sessions: {e}")
+
+    def _persist_sessions(self) -> None:
+        """Save sessions to disk so they survive restarts."""
+        try:
+            self._sessions_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._sessions_file, "w") as f:
+                json.dump(self._sessions, f)
+        except Exception as e:
+            logger.warning(f"[Auth] Failed to persist sessions: {e}")
+
     def _check_rate_limit(self, ip: str) -> tuple[bool, int, int]:
         """Check if IP is rate limited. Returns (blocked, remaining, retry_after_s)."""
         now = time.time()
@@ -307,6 +348,7 @@ class DashboardServer:
             "last_seen": time.time(),
             "remember": remember,
         }
+        self._persist_sessions()
         return token
 
     def _validate_session(self, token: str) -> bool:
@@ -337,6 +379,7 @@ class DashboardServer:
     def _invalidate_session(self, token: str) -> None:
         """Remove a session token (logout)."""
         self._sessions.pop(token, None)
+        self._persist_sessions()
 
     def _cleanup_auth(self) -> None:
         """Prune expired sessions and stale rate limit entries."""
@@ -359,6 +402,8 @@ class DashboardServer:
                     expired_sessions.append(t)
         for t in expired_sessions:
             del self._sessions[t]
+        if expired_sessions:
+            self._persist_sessions()
 
     # --- IP whitelist ---
 
@@ -480,6 +525,14 @@ class DashboardServer:
 
     def stop(self) -> None:
         self._running = False
+        self._persist_sessions()
+        # Write restart marker so next startup suppresses emails (safety net)
+        try:
+            marker = Path("state/restart_marker")
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(time.time()))
+        except OSError:
+            pass
 
     def set_demo_fetcher(self, demo_fetcher: "DemoPortfolioFetcher") -> None:
         """Attach the demo portfolio fetcher for comparison data."""
@@ -794,6 +847,7 @@ class DashboardServer:
         "demotion_cooldown_multiplier": (float, 1.0, 20.0),
         "hourly_external_transfer_cap": (float, 0, 100.0),
         "bitfinex_reserve_pct": (float, 0.0, 0.5),
+        "bitfinex_reserve_hard_floor": (float, 0.0, 0.20),
         "net_pct_sizing_enabled": (bool, None, None),
         "net_pct_multiplier_cap": (float, 1.0, 10.0),
     }
@@ -1239,6 +1293,8 @@ class DashboardServer:
                 opt._strong_threshold = settings["strong_score_threshold"]
             if "very_strong_score_threshold" in settings:
                 opt._very_strong_threshold = settings["very_strong_score_threshold"]
+            if "discovery_duration" in settings:
+                opt._discovery_duration = int(settings["discovery_duration"])
             opt.reset(
                 trade_amount=trade_amount,
                 num_active_symbols=settings.get("num_active_symbols"),
@@ -1292,6 +1348,11 @@ class DashboardServer:
             self._balance._bitfinex_reserve_pct = float(settings["bitfinex_reserve_pct"])
             self._balance._bitfinex_reserve_target = (
                 self._balance._initial_investment * self._balance._bitfinex_reserve_pct
+            )
+        if "bitfinex_reserve_hard_floor" in settings:
+            self._balance._bitfinex_reserve_hard_floor = float(settings["bitfinex_reserve_hard_floor"])
+            self._balance._bitfinex_reserve_hard_floor_amount = (
+                self._balance._initial_investment * self._balance._bitfinex_reserve_hard_floor
             )
 
         # execution_mode: persisted to settings.json but requires restart

@@ -32,6 +32,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [scoringWindow, setScoringWindow] = useState(currentSettings.scoring_window ?? 1800);
   const [evaluationInterval, setEvaluationInterval] = useState(currentSettings.evaluation_interval ?? 300);
   const [safetyMultiplier, setSafetyMultiplier] = useState(currentSettings.safety_multiplier ?? 2.0);
+  const [discoveryDuration, setDiscoveryDuration] = useState(currentSettings.discovery_duration ?? 300);
   const [minRebalanceScore, setMinRebalanceScore] = useState(currentSettings.min_rebalance_score ?? 0.0001);
   const [confirmationPeriod, setConfirmationPeriod] = useState(currentSettings.confirmation_period ?? 300);
   const [scoreStabilitySeconds, setScoreStabilitySeconds] = useState(currentSettings.score_stability_seconds ?? 120);
@@ -46,6 +47,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [reallocationCostHorizon, setReallocationCostHorizon] = useState(currentSettings.reallocation_cost_horizon ?? 2.0);
   const [demotionCooldownMultiplier, setDemotionCooldownMultiplier] = useState(currentSettings.demotion_cooldown_multiplier ?? 5.0);
   const [hourlyExternalTransferCap, setHourlyExternalTransferCap] = useState(currentSettings.hourly_external_transfer_cap ?? 2.0);
+  const [bitfinexReservePct, setBitfinexReservePct] = useState(currentSettings.bitfinex_reserve_pct ?? 0.15);
+  const [bitfinexReserveHardFloor, setBitfinexReserveHardFloor] = useState(currentSettings.bitfinex_reserve_hard_floor ?? 0.05);
   const [netPctSizingEnabled, setNetPctSizingEnabled] = useState(currentSettings.net_pct_sizing_enabled ?? true);
   const [netPctMultiplierCap, setNetPctMultiplierCap] = useState(currentSettings.net_pct_multiplier_cap ?? 2.5);
   const [tradingScoreThreshold, setTradingScoreThreshold] = useState(currentSettings.trading_score_threshold ?? 0.01);
@@ -73,6 +76,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setScoringWindow(currentSettings.scoring_window ?? 1800);
       setEvaluationInterval(currentSettings.evaluation_interval ?? 300);
       setSafetyMultiplier(currentSettings.safety_multiplier ?? 2.0);
+      setDiscoveryDuration(currentSettings.discovery_duration ?? 300);
       setMinRebalanceScore(currentSettings.min_rebalance_score ?? 0.0001);
       setConfirmationPeriod(currentSettings.confirmation_period ?? 300);
       setScoreStabilitySeconds(currentSettings.score_stability_seconds ?? 120);
@@ -87,6 +91,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setReallocationCostHorizon(currentSettings.reallocation_cost_horizon ?? 2.0);
       setDemotionCooldownMultiplier(currentSettings.demotion_cooldown_multiplier ?? 5.0);
       setHourlyExternalTransferCap(currentSettings.hourly_external_transfer_cap ?? 2.0);
+      setBitfinexReservePct(currentSettings.bitfinex_reserve_pct ?? 0.15);
+      setBitfinexReserveHardFloor(currentSettings.bitfinex_reserve_hard_floor ?? 0.05);
       setNetPctSizingEnabled(currentSettings.net_pct_sizing_enabled ?? true);
       setNetPctMultiplierCap(currentSettings.net_pct_multiplier_cap ?? 2.5);
       setTradingScoreThreshold(currentSettings.trading_score_threshold ?? 0.01);
@@ -112,6 +118,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     scoring_window: scoringWindow,
     evaluation_interval: evaluationInterval,
     safety_multiplier: safetyMultiplier,
+    discovery_duration: discoveryDuration,
     min_rebalance_score: minRebalanceScore,
     confirmation_period: confirmationPeriod,
     score_stability_seconds: scoreStabilitySeconds,
@@ -132,6 +139,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     reallocation_cost_horizon: reallocationCostHorizon,
     demotion_cooldown_multiplier: demotionCooldownMultiplier,
     hourly_external_transfer_cap: hourlyExternalTransferCap,
+    bitfinex_reserve_pct: bitfinexReservePct,
+    bitfinex_reserve_hard_floor: bitfinexReserveHardFloor,
     net_pct_sizing_enabled: netPctSizingEnabled,
     net_pct_multiplier_cap: netPctMultiplierCap,
     adaptive_mode: adaptiveMode,
@@ -197,7 +206,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Total Capital ($)
-              <Tooltip text="Total USD capital distributed across all exchanges. Used for per-symbol allocation and adaptive trade sizing. Default: $1800" />
+              <Tooltip text="Total USD capital distributed across all exchanges. Used for per-symbol allocation and adaptive trade sizing. Default: $1800. Config key: total_capital" />
             </label>
             <input type="number" value={totalCapital} min={100} onChange={d(setTotalCapital, 1800)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -205,7 +214,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Trade Amount ($)
-              <Tooltip text="Base USD amount per trade before multipliers. With adaptive mode: actual size = trade_amount x symbol_multiplier x tick_quality_factor. Lower values ($10-20) work better with limited capital. Default: $20" />
+              <Tooltip text="Base USD amount per trade before multipliers. With adaptive mode: actual size = trade_amount x symbol_multiplier x tick_quality_factor. Lower values ($10-20) work better with limited capital. Default: $20. Config key: trade_amount_usd" />
             </label>
             <div className="flex items-center gap-2">
               {[10, 50, 100, 200].map(amt => (
@@ -227,7 +236,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               onChange={e => { setDirty(true); setAdaptiveMode(e.target.checked); }}
               className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
             <span className="text-sm text-slate-300">Enable Adaptive Mode</span>
-            <Tooltip text="Dynamically adjusts trade sizes, rebalance amounts, and thresholds based on real-time market conditions and available capital. Recommended for small capital (<$5k). Default: enabled" />
+            <Tooltip text="Dynamically adjusts trade sizes, rebalance amounts, and thresholds based on real-time market conditions and available capital. Recommended for small capital (<$5k). Default: enabled. Config key: adaptive_mode" />
           </label>
         </div>
         <div className="mt-4">
@@ -236,13 +245,13 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               onChange={e => { setDirty(true); setNetPctSizingEnabled(e.target.checked); }}
               className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
             <span className="text-sm text-slate-300">Enable Net% Sizing</span>
-            <Tooltip text="Scale trade size based on current tick's net profitability. Higher net% spreads get larger trades (up to cap). Tiers: <0.03%=0.5x, 0.03-0.08%=1.0x, 0.08-0.15%=1.5x, 0.15-0.25%=2.0x, >0.25%=2.5x. Multiplies with score-based multiplier. Default: enabled" />
+            <Tooltip text="Scale trade size based on current tick's net profitability. Higher net% spreads get larger trades (up to cap). Tiers: <0.03%=0.5x, 0.03-0.08%=1.0x, 0.08-0.15%=1.5x, 0.15-0.25%=2.0x, >0.25%=2.5x. Multiplies with score-based multiplier. Default: enabled. Config key: net_pct_sizing_enabled" />
           </label>
         </div>
         <div className="mt-4">
           <label className="flex items-center text-xs text-slate-500 mb-1">
             Net% Multiplier Cap
-            <Tooltip text="Maximum net%-based trade size multiplier. Caps the upside of net% scaling to prevent over-concentration on single ticks. Combined with score multiplier, final size is still limited by available balance. Range: 1.0-10.0. Default: 2.5" />
+            <Tooltip text="Maximum net%-based trade size multiplier. Caps the upside of net% scaling to prevent over-concentration on single ticks. Combined with score multiplier, final size is still limited by available balance. Range: 1.0-10.0. Default: 2.5. Config key: net_pct_multiplier_cap" />
           </label>
           <input type="number" value={netPctMultiplierCap} min={1.0} max={10.0} step={0.1}
             onChange={d(setNetPctMultiplierCap, 2.5)}
@@ -251,7 +260,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         <div className="mt-4">
           <label className="flex items-center text-sm text-slate-300 mb-1">
             Execution Mode
-            <Tooltip text="Simulation: no real orders (default). Demo: places real orders on exchange testnets alongside simulation. Requires API keys in .env. Restart required to take effect." />
+            <Tooltip text="Simulation: no real orders (default). Demo: places real orders on exchange testnets alongside simulation. Requires API keys in .env. Restart required to take effect. Config key: execution_mode" />
           </label>
           <select value={executionMode}
             onChange={e => { setDirty(true); setExecutionMode(e.target.value); }}
@@ -271,13 +280,13 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               onChange={e => { setDirty(true); setAutoRotate(e.target.checked); }}
               className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
             <span className="text-sm text-slate-300">Enable automatic symbol rotation</span>
-            <Tooltip text="When enabled, the optimizer automatically swaps underperforming symbols for better candidates. When disabled, only the initial symbol set is traded. Default: enabled" />
+            <Tooltip text="When enabled, the optimizer automatically swaps underperforming symbols for better candidates. When disabled, only the initial symbol set is traded. Default: enabled. Config key: auto_rotate" />
           </label>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className="flex items-center text-xs text-slate-500 mb-1">
                 Min Active Symbols
-                <Tooltip text="Starting number of active symbols after discovery. More symbols spread capital thinner but increase diversification. Default: 3" />
+                <Tooltip text="Starting number of active symbols after discovery. More symbols spread capital thinner but increase diversification. Default: 3. Config key: num_active_symbols" />
               </label>
               <input type="number" value={numActiveSymbols} min={1} max={20} onChange={d(setNumActiveSymbols, 3)}
                 className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -285,7 +294,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             <div>
               <label className="flex items-center text-xs text-slate-500 mb-1">
                 Max Active Symbols
-                <Tooltip text="Maximum symbols that can be active simultaneously. Expansion happens when strong candidates appear. Higher values need more capital. Default: 8" />
+                <Tooltip text="Maximum symbols that can be active simultaneously. Expansion happens when strong candidates appear. Higher values need more capital. Default: 8. Config key: max_active_symbols" />
               </label>
               <input type="number" value={maxActiveSymbols} min={1} max={30} onChange={d(setMaxActiveSymbols, 8)}
                 className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -293,7 +302,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             <div>
               <label className="flex items-center text-xs text-slate-500 mb-1">
                 Scoring Window (s)
-                <Tooltip text="Rolling time window (in seconds) for scoring symbol profitability. Longer windows are more stable but slower to react. Default: 1800s (30 min)" />
+                <Tooltip text="Rolling time window (in seconds) for scoring symbol profitability. Longer windows are more stable but slower to react. Default: 1800s (30 min). Config key: scoring_window" />
               </label>
               <input type="number" value={scoringWindow} min={60} onChange={d(setScoringWindow, 1800)}
                 className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -301,9 +310,19 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             <div>
               <label className="flex items-center text-xs text-slate-500 mb-1">
                 Eval Interval (s)
-                <Tooltip text="How often the optimizer evaluates rotations, expansions, and demotions. Shorter intervals react faster but cause more churn. Default: 300s (5 min)" />
+                <Tooltip text="How often the optimizer evaluates rotations, expansions, and demotions. Shorter intervals react faster but cause more churn. Default: 300s (5 min). Config key: evaluation_interval" />
               </label>
               <input type="number" value={evaluationInterval} min={30} onChange={d(setEvaluationInterval, 300)}
+                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="flex items-center text-xs text-slate-500 mb-1">
+                Discovery Duration (s)
+                <Tooltip text="Base duration of the discovery phase where the bot scans all symbols for opportunities before activating. Auto-extends up to 3600s if no symbols qualify. Early exit after 60s if any symbol reaches trading threshold. Default: 300s (5 min). Config key: discovery_duration" />
+              </label>
+              <input type="number" value={discoveryDuration} min={30} max={3600} onChange={d(setDiscoveryDuration, 300)}
                 className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
             </div>
           </div>
@@ -317,7 +336,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Safety Multiplier
-              <Tooltip text="For rotation: estimated hourly gain of new symbol must exceed safety_multiplier x switching cost. Higher values prevent frequent rotations. Default: 2.0" />
+              <Tooltip text="For rotation: estimated hourly gain of new symbol must exceed safety_multiplier x switching cost. Higher values prevent frequent rotations. Default: 2.0. Config key: safety_multiplier" />
             </label>
             <input type="number" value={safetyMultiplier} min={1} step={0.5} onChange={d(setSafetyMultiplier, 2.0)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -325,7 +344,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Min Rebalance Score
-              <Tooltip text="Symbols below this score won't trigger rebalancing. Prevents wasting transfer fees on low-performing symbols. Default: 0.0001" />
+              <Tooltip text="Symbols below this score won't trigger rebalancing. Prevents wasting transfer fees on low-performing symbols. Default: 0.0001. Config key: min_rebalance_score" />
             </label>
             <input type="number" value={minRebalanceScore} min={0} step={0.0001}
               onChange={d(setMinRebalanceScore, 0.0001)}
@@ -334,7 +353,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Confirmation Period (s)
-              <Tooltip text="How long a candidate symbol must sustain a high score before it's eligible for activation. Prevents short-lived spikes from triggering rotations. Default: 300s (5 min)" />
+              <Tooltip text="How long a candidate symbol must sustain a high score before it's eligible for activation. Prevents short-lived spikes from triggering rotations. Default: 300s (5 min). Config key: confirmation_period" />
             </label>
             <input type="number" value={confirmationPeriod} min={0} onChange={d(setConfirmationPeriod, 300)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -342,7 +361,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Score Stability (s)
-              <Tooltip text="Minimum observation time before a candidate can be confirmed. Even very strong symbols must wait this long. Tracks score trend for cliff drops and declining patterns. Set to 0 to disable. Default: 120s" />
+              <Tooltip text="Minimum observation time before a candidate can be confirmed. Even very strong symbols must wait this long. Tracks score trend for cliff drops and declining patterns. Set to 0 to disable. Default: 120s. Config key: score_stability_seconds" />
             </label>
             <input type="number" value={scoreStabilitySeconds} min={0} max={3600} onChange={d(setScoreStabilitySeconds, 120)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -350,7 +369,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Stability Factor
-              <Tooltip text="Reject candidate if current score drops below peak score × this factor (cliff drop detection). E.g., 0.5 means reject if score fell more than 50% from its peak. Set to 0 to disable cliff drop check. Default: 0.5" />
+              <Tooltip text="Reject candidate if current score drops below peak score x this factor (cliff drop detection). E.g., 0.5 means reject if score fell more than 50% from its peak. Set to 0 to disable cliff drop check. Default: 0.5. Config key: score_stability_factor" />
             </label>
             <input type="number" value={scoreStabilityFactor} min={0} max={1} step={0.01} onChange={d(setScoreStabilityFactor, 0.5)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -358,7 +377,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Promotion Threshold
-              <Tooltip text="Minimum score for a symbol to enter the watchlist as a candidate. Symbols below this are ignored for promotion. Default: 0.0001" />
+              <Tooltip text="Minimum score for a symbol to enter the watchlist as a candidate. Symbols below this are ignored for promotion. Default: 0.0001. Config key: promotion_threshold" />
             </label>
             <input type="number" value={promotionThreshold} min={0} step={0.0001}
               onChange={d(setPromotionThreshold, 0.0001)}
@@ -367,7 +386,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Demotion Threshold
-              <Tooltip text="Score below which the demotion timer starts. A symbol must stay below this for the full demotion period to be removed. Set to 0 to only demote at exactly zero. Default: 0.0" />
+              <Tooltip text="Score below which the demotion timer starts. A symbol must stay below this for the full demotion period to be removed. Set to 0 to only demote at exactly zero. Default: 0.0. Config key: demotion_threshold" />
             </label>
             <input type="number" value={demotionThreshold} min={0} step={0.0001}
               onChange={d(setDemotionThreshold, 0.0)}
@@ -376,7 +395,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Demotion Period (s)
-              <Tooltip text="How long a symbol must stay below demotion threshold before being deactivated. Tiered: weaker scores are demoted faster. Default: 600s (10 min)" />
+              <Tooltip text="How long a symbol must stay below demotion threshold before being deactivated. Tiered: weaker scores are demoted faster. Default: 600s (10 min). Config key: demotion_period" />
             </label>
             <input type="number" value={demotionPeriod} min={0} onChange={d(setDemotionPeriod, 600)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -384,7 +403,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Min Net Profit %
-              <Tooltip text="Minimum net spread (after fees) required to execute a trade. Higher values skip marginal opportunities. Set lower for high-frequency, low-spread strategies. Default: 0.02%" />
+              <Tooltip text="Minimum net spread (after fees) required to execute a trade. Higher values skip marginal opportunities. Set lower for high-frequency, low-spread strategies. Default: 0.02%. Config key: min_net_profit_pct" />
             </label>
             <input type="number" value={minNetProfitPct} min={0} step={0.01}
               onChange={d(setMinNetProfitPct, 0.02)}
@@ -393,7 +412,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Rebalance Cooldown (s)
-              <Tooltip text="Minimum seconds between rebalances for the same exchange/direction pair. Prevents rapid-fire transfers. Default: 30s" />
+              <Tooltip text="Minimum seconds between rebalances for the same exchange/direction pair. Prevents rapid-fire transfers. Default: 30s. Config key: rebalance_cooldown" />
             </label>
             <input type="number" value={rebalanceCooldown} min={0} onChange={d(setRebalanceCooldown, 30)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -401,7 +420,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Miss Streak Before Rebalance
-              <Tooltip text="Consecutive missed trades (due to insufficient balance) before triggering a rebalance. Dynamic in adaptive mode: adjusts 10-30 based on trade frequency. Default: 15" />
+              <Tooltip text="Consecutive missed trades (due to insufficient balance) before triggering a rebalance. Dynamic in adaptive mode: adjusts 10-30 based on trade frequency. Default: 15. Config key: min_misses_before_rebalance" />
             </label>
             <input type="number" value={minMissesBeforeRebalance} min={1} max={100} step={1}
               onChange={d(setMinMissesBeforeRebalance, 15)}
@@ -410,7 +429,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Rebalance ROI Horizon (s)
-              <Tooltip text="Maximum time to recoup the cost of a rebalance transfer. If estimated recovery time exceeds this, the rebalance is blocked. Default: 1800s (30 min)" />
+              <Tooltip text="Maximum time to recoup the cost of a rebalance transfer. If estimated recovery time exceeds this, the rebalance is blocked. Default: 1800s (30 min). Config key: rebalance_roi_horizon" />
             </label>
             <input type="number" value={rebalanceRoiHorizon} min={0} onChange={d(setRebalanceRoiHorizon, 1800)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
@@ -423,7 +442,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Trading Threshold
-              <Tooltip text="Minimum score to allow trading and rebalancing for a symbol. Below this, the symbol gets trade_multiplier = 0 (no trading). Default: 0.01" />
+              <Tooltip text="Minimum score to allow trading and rebalancing for a symbol. Below this, the symbol gets trade_multiplier = 0 (no trading). Default: 0.01. Config key: trading_score_threshold" />
             </label>
             <input type="number" value={tradingScoreThreshold} min={0.001} max={0.5} step={0.001}
               onChange={d(setTradingScoreThreshold, 0.01)}
@@ -432,7 +451,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Strong Threshold
-              <Tooltip text="Score for the Strong tier. Strong symbols get 2-3x trade multiplier and up to 2 exchanges per direction. Default: 0.1" />
+              <Tooltip text="Score for the Strong tier. Strong symbols get 2-3x trade multiplier and up to 2 exchanges per direction. Default: 0.1. Config key: strong_score_threshold" />
             </label>
             <input type="number" value={strongScoreThreshold} min={0.01} max={1.0} step={0.01}
               onChange={d(setStrongScoreThreshold, 0.1)}
@@ -441,7 +460,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Very Strong Threshold
-              <Tooltip text="Score for the Very Strong tier. Very Strong symbols get 3-4x trade multiplier and up to 3 exchanges per direction. Default: 0.3" />
+              <Tooltip text="Score for the Very Strong tier. Very Strong symbols get 3-4x trade multiplier and up to 3 exchanges per direction. Default: 0.3. Config key: very_strong_score_threshold" />
             </label>
             <input type="number" value={veryStrongScoreThreshold} min={0.05} max={2.0} step={0.05}
               onChange={d(setVeryStrongScoreThreshold, 0.3)}
@@ -455,7 +474,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Warmup Trades
-              <Tooltip text="Number of trades before the net P&L gate activates. During warmup, rebalancing is always allowed. Prevents premature blocking from a few early bad trades. Default: 10" />
+              <Tooltip text="Number of trades before the net P&L gate activates. During warmup, rebalancing is always allowed. Prevents premature blocking from a few early bad trades. Default: 10. Config key: net_pnl_gate_warmup_trades" />
             </label>
             <input type="number" value={netPnlGateWarmupTrades} min={1} max={200} step={1}
               onChange={d(setNetPnlGateWarmupTrades, 10)}
@@ -464,7 +483,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Grace Period (s)
-              <Tooltip text="Time after bot start before the net P&L gate activates. During grace period, rebalancing is always allowed regardless of profitability. Default: 1800s (30 min)" />
+              <Tooltip text="Time after bot start before the net P&L gate activates. During grace period, rebalancing is always allowed regardless of profitability. Default: 1800s (30 min). Config key: net_pnl_gate_grace_seconds" />
             </label>
             <input type="number" value={netPnlGateGraceSeconds} min={60} max={7200} step={60}
               onChange={d(setNetPnlGateGraceSeconds, 1800)}
@@ -473,7 +492,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               ROI Gate Divisor
-              <Tooltip text="Controls rebalancing sensitivity. ROI threshold = fee_rate / divisor. Higher values (5-10) allow rebalancing at lower expected profit, good for small capital. Default: 3" />
+              <Tooltip text="Controls rebalancing sensitivity. ROI threshold = fee_rate / divisor. Higher values (5-10) allow rebalancing at lower expected profit, good for small capital. Default: 3. Config key: rebalance_roi_divisor" />
             </label>
             <input type="number" value={rebalanceRoiDivisor} min={2} max={20} step={1}
               onChange={d(setRebalanceRoiDivisor, 3)}
@@ -487,7 +506,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Reallocation Cost Horizon (h)
-              <Tooltip text="Hours of estimated profit a symbol must generate to justify the cost of switching its dominant exchange pair. Higher values prevent expensive re-allocations for marginal improvements. Default: 2.0" />
+              <Tooltip text="Hours of estimated profit a symbol must generate to justify the cost of switching its dominant exchange pair. Higher values prevent expensive re-allocations for marginal improvements. Default: 2.0. Config key: reallocation_cost_horizon" />
             </label>
             <input type="number" value={reallocationCostHorizon} min={0.5} max={24} step={0.5}
               onChange={d(setReallocationCostHorizon, 2.0)}
@@ -496,7 +515,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Demotion Cooldown Multiplier
-              <Tooltip text="Cooldown after demotion = demotion_period × this multiplier. Higher values prevent symbols from churning in and out. With default 5.0 and 600s period: 50 min cooldown. Default: 5.0" />
+              <Tooltip text="Cooldown after demotion = demotion_period x this multiplier. Higher values prevent symbols from churning in and out. With default 5.0 and 600s period: 50 min cooldown. Default: 5.0. Config key: demotion_cooldown_multiplier" />
             </label>
             <input type="number" value={demotionCooldownMultiplier} min={1} max={20} step={0.5}
               onChange={d(setDemotionCooldownMultiplier, 5.0)}
@@ -505,10 +524,33 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Hourly External Transfer Cap ($)
-              <Tooltip text="Maximum USD spent on external withdrawal fees per rolling hour. Internal rebalances (crypto sell/buy on same exchange) are not limited. Set to 0 to disable. Default: $2.00" />
+              <Tooltip text="Maximum USD spent on external withdrawal fees per rolling hour. Internal rebalances (crypto sell/buy on same exchange) are not limited. Set to 0 to disable. Default: $2.00. Config key: hourly_external_transfer_cap" />
             </label>
             <input type="number" value={hourlyExternalTransferCap} min={0} max={100} step={0.5}
               onChange={d(setHourlyExternalTransferCap, 2.0)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+        </div>
+
+        {/* Bitfinex Hub */}
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-3">Bitfinex Capital Hub</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Bitfinex Reserve %
+              <Tooltip text="Percentage of total capital to keep as USDT on Bitfinex. Bitfinex has $0 withdrawal fees, making it ideal as a capital hub. Capital is consolidated here during idle time and distributed for free. Set to 0 to disable. Default: 15%. Config key: bitfinex_reserve_pct" />
+            </label>
+            <input type="number" value={bitfinexReservePct} min={0} max={0.5} step={0.01}
+              onChange={d(setBitfinexReservePct, 0.15)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Reserve Hard Floor %
+              <Tooltip text="Minimum Bitfinex reserve that emergency draws cannot drain below. For $3000 capital with 5% floor = $150 minimum remaining. Prevents complete depletion during capital death spirals. Default: 5%. Config key: bitfinex_reserve_hard_floor" />
+            </label>
+            <input type="number" value={bitfinexReserveHardFloor} min={0} max={0.20} step={0.01}
+              onChange={d(setBitfinexReserveHardFloor, 0.05)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
         </div>
@@ -523,13 +565,13 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               onChange={e => setIpWhitelistEnabled(e.target.checked)}
               className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
             <span className="text-sm text-slate-300">Enable IP Whitelist</span>
-            <Tooltip text="Restrict dashboard access to specific IP addresses. When enabled, connections from non-whitelisted IPs are immediately denied. Leave the list empty to allow all." />
+            <Tooltip text="Restrict dashboard access to specific IP addresses. When enabled, connections from non-whitelisted IPs are immediately denied. Leave the list empty to allow all. Config key: ip_whitelist_enabled" />
           </label>
           {ipWhitelistEnabled && (
             <div>
               <label className="flex items-center text-xs text-slate-500 mb-1">
                 Allowed IPs (comma-separated)
-                <Tooltip text="Enter IPv4 or IPv6 addresses separated by commas. Changes take effect immediately after saving. Example: 212.253.218.204, 10.0.0.1" />
+                <Tooltip text="Enter IPv4 or IPv6 addresses separated by commas. Changes take effect immediately after saving. Example: 212.253.218.204, 10.0.0.1. Config key: ip_whitelist" />
               </label>
               <input type="text" value={ipWhitelist}
                 onChange={e => setIpWhitelist(e.target.value)}
