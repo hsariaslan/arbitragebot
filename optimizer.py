@@ -537,7 +537,10 @@ class SymbolOptimizer:
                 )
             wl = self._watchlist[s.symbol]
             wl.score_samples.append(s.score)
-            wl.peak_score = max(wl.peak_score, s.score)
+            # Only track peak after 10 samples — early scores are inflated
+            # by tiny sample sizes (100% frequency on 1-2 ticks)
+            if len(wl.score_samples) >= 10:
+                wl.peak_score = max(wl.peak_score, s.score)
 
             # Trend from score samples
             samples = wl.score_samples
@@ -1248,7 +1251,8 @@ class SymbolOptimizer:
 
                 entry = self._watchlist[sym]
                 entry.score_samples.append(score_obj.score)
-                entry.peak_score = max(entry.peak_score, score_obj.score)
+                if len(entry.score_samples) >= 10:
+                    entry.peak_score = max(entry.peak_score, score_obj.score)
 
                 # Check confirmation (faster for strong/very_strong candidates)
                 score_val = score_obj.score if score_obj else 0.0
@@ -1699,7 +1703,8 @@ class SymbolOptimizer:
                     )
                     continue
                 wl_entry.score_samples.append(candidate.score)
-                wl_entry.peak_score = max(wl_entry.peak_score, candidate.score)
+                if len(wl_entry.score_samples) >= 10:
+                    wl_entry.peak_score = max(wl_entry.peak_score, candidate.score)
                 stable, reason = self._is_score_stable(wl_entry, candidate.score)
                 if not stable:
                     logger.info(
