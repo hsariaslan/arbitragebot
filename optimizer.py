@@ -1411,7 +1411,7 @@ class SymbolOptimizer:
             for fetcher in self._fetchers:
                 if fetcher.exchange_name == "Bitfinex":
                     ps = fetcher.get_state().get(symbol)
-                    if ps and ps.bid and ps.bid > 0:
+                    if ps and ps.bid and float(ps.bid) > 0:
                         bitfinex_available = True
                         bitfinex_bid = float(ps.bid)
                     break
@@ -1594,7 +1594,7 @@ class SymbolOptimizer:
                 state = fetcher.get_state()
                 for symbol in self._active_symbols:
                     ps = state.get(symbol)
-                    if ps and ps.bid and ps.bid > 0:
+                    if ps and ps.bid and float(ps.bid) > 0:
                         bitfinex_bids[symbol] = float(ps.bid)
                 break
 
