@@ -284,13 +284,14 @@ After discovery, capital is allocated per-symbol to dominant exchanges:
 
 The "Exchanges" column in Symbol Rankings shows dominant pairs as `BIN→KUC` (buyer→seller). The Buy-Sell Distribution sheet in XLSX shows per-exchange tick counts.
 
-## Bitfinex USDT Reserve
+## Bitfinex Capital Hub
 
-Bitfinex has $0 withdrawal fees on 14/15 networks, making it the ideal capital safety net. The reserve prevents "death spirals" where the net P&L gate blocks rebalancing, capital gets stuck on wrong exchanges, and trading stalls.
+Bitfinex has $0 withdrawal fees on 14/15 networks and 0% taker fees, making it the ideal capital hub. The system prevents "death spirals" where the net P&L gate blocks rebalancing, capital gets stuck on wrong exchanges, and trading stalls.
 
 ### Configuration
 
 - `BITFINEX_RESERVE_PCT` (default 0.15 = 15%) in `config.py`, configurable via Settings
+- `BITFINEX_RESERVE_HARD_FLOOR` (default 0.05 = 5%) — emergency draws cannot drain below this. For $3000 capital: hard floor = $150.
 - Reserve target = `total_capital × reserve_pct` (e.g., $270 for $1800 capital)
 
 ### How It Works
@@ -298,8 +299,12 @@ Bitfinex has $0 withdrawal fees on 14/15 networks, making it the ideal capital s
 1. **Carve-out at discovery**: Before allocating capital to symbols, `reserve_amount` is set aside as USDT on Bitfinex
 2. **Protection during rebalancing**: Normal rebalance source selection uses `_available_usdt_for_rebalance()` which excludes the reserve from Bitfinex's available balance
 3. **Protection during trading**: `available_usdt_for_trading()` prevents trades from spending Bitfinex USDT below the reserve target. Used in both `_compute_trade_size()` and `can_execute()`. Without this, Bitfinex as a buyer exchange drains the reserve through normal trading, triggering expensive replenishment cycles.
-4. **Emergency draw**: When net P&L gate blocks rebalancing AND miss streak ≥ 2× threshold, `emergency_reserve_draw()` transfers USDT from Bitfinex to the starved exchange — **bypasses all gates** (net P&L, hourly cap, transfer worthiness). Fee = $0.
-5. **Periodic replenishment**: Every evaluation cycle (when net profit is positive), `replenish_reserve()` tops up from free/near-free exchanges only (fee ≤ $0.01: MEXC, Bybit, Binance, Bitget). Minimum transfer $50 or `trade_amount × 5`. 10-minute cooldown per source. Respects hourly budget.
+4. **Emergency draw**: When net P&L gate blocks rebalancing AND miss streak ≥ 2× threshold, `emergency_reserve_draw()` transfers USDT from Bitfinex to the starved exchange — **bypasses all gates** (net P&L, hourly cap, transfer worthiness). Fee = $0. Hard floor enforced: draw cannot reduce Bitfinex below `total_capital × hard_floor`.
+5. **Periodic replenishment**: Every evaluation cycle, `replenish_reserve()` tops up from ALL exchanges sorted by withdrawal fee (cheapest first). Not gated by net profit — reserve replenishment is always beneficial. Minimum transfer `max($20, trade_amount × 2)`. 10-minute cooldown per source. Respects hourly budget.
+6. **USDT consolidation**: `consolidate_to_bitfinex()` moves idle capital to Bitfinex hub. Active buyer exchanges keep a buffer unless idle for 10+ minutes (based on `last_trade_time`). Non-active exchanges are fully consolidated. Runs during eval cycles and discovery.
+7. **Idle seller crypto consolidation**: `_consolidate_idle_seller_crypto()` transfers crypto from seller exchanges idle 15+ minutes directly to Bitfinex, selling at 0% taker. Only for symbols available on Bitfinex (~40-50 of 60). Uses USDT withdrawal fees as proxy for crypto transfer fees.
+8. **Demotion sell via Bitfinex**: On demotion, crypto is transferred directly to Bitfinex and sold at 0% taker (saves source exchange taker fee). Falls back to local sell for symbols not available on Bitfinex. Post-demotion USDT consolidation runs automatically.
+9. **Withdrawal fee preference**: `_rebalance_usdt()` prefers cheap rebalance sources (fee ≤ $0.10) before falling back to expensive ones. Avoids KuCoin ($0.40) and Gate.io ($0.50) when cheaper alternatives exist.
 
 ### Key Methods
 
@@ -307,8 +312,12 @@ Bitfinex has $0 withdrawal fees on 14/15 networks, making it the ideal capital s
 |--------|------|---------|
 | `available_usdt_for_trading(ex)` | `balance.py` | Returns USDT minus reserve if Bitfinex (for trade sizing/execution) |
 | `_available_usdt_for_rebalance(ex)` | `balance.py` | Returns USDT minus reserve if Bitfinex (for rebalance source selection) |
-| `emergency_reserve_draw(target, amount)` | `balance.py` | Emergency $0-fee transfer from reserve |
-| `replenish_reserve()` | `balance.py` | Top up reserve from free exchanges (fee ≤ $0.01) |
+| `emergency_reserve_draw(target, amount)` | `balance.py` | Emergency $0-fee transfer from reserve (hard floor enforced) |
+| `replenish_reserve()` | `balance.py` | Top up reserve from all exchanges (sorted by fee) |
+| `consolidate_to_bitfinex(active_buyers, idle_threshold)` | `balance.py` | Move idle USDT to Bitfinex hub |
+| `sell_crypto_via_bitfinex(source, symbol, qty, bid)` | `balance.py` | Transfer crypto to Bitfinex + sell at 0% |
+| `_consolidate_idle_seller_crypto(idle_threshold)` | `optimizer.py` | Consolidate crypto from idle seller exchanges |
+| `_execute_demotion()` | `optimizer.py` | Demotion with Bitfinex-first crypto transfer |
 
 ## Adaptive Trading System
 
@@ -418,7 +427,7 @@ All pages have their own URL routes (`/#/`, `/#/rankings`, `/#/settings`, `/#/lo
 Full authentication system for the WebSocket dashboard:
 
 - **Login**: Username + bcrypt-hashed password. Set `DASHBOARD_PASSWORD_HASH` in `.env` (preferred) or legacy `DASHBOARD_PASSWORD` (auto-hashed at runtime with deprecation warning). Default password `changeme` is rejected at startup.
-- **Sessions**: Token-based with remember-me support. Remember-me → localStorage (30-day absolute expiry). Non-remember → sessionStorage (24h idle / 48h absolute expiry). All sessions have `created_at` for absolute lifetime enforcement.
+- **Sessions**: Token-based with remember-me support. Remember-me → localStorage (30-day absolute expiry). Non-remember → sessionStorage (24h idle / 48h absolute expiry). All sessions have `created_at` for absolute lifetime enforcement. Sessions persisted to `logs/auth/sessions.json` — survive restarts (deploy and "Restart Bot"). On restart, client reconnects with stored token → no re-login, no email notification.
 - **Rate limiting**: 10 attempts per IP, 1-hour block after exhaustion. State persisted to `logs/auth/rate_limits.json` (survives restarts). CAPTCHA failures also count toward rate limit.
 - **IP whitelist**: Optional, configurable from Settings page. Validated with `ipaddress` module.
 - **reCAPTCHA v2**: "I'm not a robot" checkbox appears after 3 failed attempts (requires Google reCAPTCHA v2 keys in `.env`). Warning logged at startup if keys not configured.
