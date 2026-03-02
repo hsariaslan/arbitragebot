@@ -528,7 +528,7 @@ class BalanceTracker:
             )
             self.transfers.append(transfer)
             self._last_rebalance[cooldown_key] = now
-            logger.debug(
+            logger.info(
                 f"[Balance] External USDT: ${amt:.2f} {external_source}→{exchange} "
                 f"(fee: ${external_cost:.4f}, internal would be ${internal_cost:.4f})"
             )
@@ -552,7 +552,7 @@ class BalanceTracker:
             )
             self.transfers.append(transfer)
             self._last_rebalance[cooldown_key] = now
-            logger.debug(
+            logger.info(
                 f"[Balance] Internal sell: {internal_sym} on {exchange}, "
                 f"${rebal:.2f} → USDT (fee: ${fee_usd:.4f}, external would be ${external_cost:.4f})"
             )
@@ -667,7 +667,7 @@ class BalanceTracker:
                 )
                 self.transfers.append(transfer)
                 self._last_rebalance[cooldown_key] = now
-                logger.debug(
+                logger.info(
                     f"[Balance] External crypto: {symbol} {best_source}→{exchange}, "
                     f"${rebal:.2f} worth (fee: ${external_crypto_cost:.4f})"
                 )
@@ -693,7 +693,7 @@ class BalanceTracker:
             )
             self.transfers.append(transfer)
             self._last_rebalance[cooldown_key] = now
-            logger.debug(
+            logger.info(
                 f"[Balance] Internal buy: {symbol} on {exchange}, "
                 f"${rebal:.2f} USDT → crypto (fee: ${fee_usd:.4f})"
             )
@@ -760,7 +760,7 @@ class BalanceTracker:
             )
             self.transfers.append(transfer)
             self._last_rebalance[cooldown_key] = now
-            logger.debug(
+            logger.info(
                 f"[Balance] External+buy: ${rebal:.2f} USDT {richest_ex}→{exchange}, "
                 f"buy {symbol} (total fee: ${total_fee:.4f})"
             )
