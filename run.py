@@ -216,11 +216,11 @@ async def main() -> None:
     )
     # Apply configurable score thresholds and gate params from settings
     if "trading_score_threshold" in settings:
-        optimizer._trading_threshold = settings["trading_score_threshold"]
+        optimizer._trading_threshold = float(settings["trading_score_threshold"])
     if "strong_score_threshold" in settings:
-        optimizer._strong_threshold = settings["strong_score_threshold"]
+        optimizer._strong_threshold = float(settings["strong_score_threshold"])
     if "very_strong_score_threshold" in settings:
-        optimizer._very_strong_threshold = settings["very_strong_score_threshold"]
+        optimizer._very_strong_threshold = float(settings["very_strong_score_threshold"])
     if "net_pnl_gate_warmup_trades" in settings:
         monitor._net_pnl_gate_warmup_trades = int(settings["net_pnl_gate_warmup_trades"])
     if "net_pnl_gate_grace_seconds" in settings:
@@ -365,7 +365,8 @@ async def main() -> None:
     try:
         await asyncio.gather(*tasks)
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        import traceback
+        logger.error(f"Fatal error: {e}\n{traceback.format_exc()}")
         state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None, fee_manager=fee_manager)
         for fetcher in fetchers:
             fetcher.stop()

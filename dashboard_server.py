@@ -1272,27 +1272,27 @@ class DashboardServer:
             opt._total_capital = total_capital
             # Update Phase 2-4 parameters directly (not in reset())
             if "max_active_symbols" in settings:
-                opt._max_active_symbols = max(settings["max_active_symbols"], settings.get("num_active_symbols", opt._min_active_symbols))
+                opt._max_active_symbols = max(int(settings["max_active_symbols"]), int(settings.get("num_active_symbols", opt._min_active_symbols)))
             if "min_rebalance_score" in settings:
-                opt._min_rebalance_score = settings["min_rebalance_score"]
+                opt._min_rebalance_score = float(settings["min_rebalance_score"])
             if "confirmation_period" in settings:
-                opt._confirmation_period = settings["confirmation_period"]
+                opt._confirmation_period = int(settings["confirmation_period"])
             if "score_stability_seconds" in settings:
-                opt._score_stability_seconds = settings["score_stability_seconds"]
+                opt._score_stability_seconds = int(settings["score_stability_seconds"])
             if "score_stability_factor" in settings:
-                opt._score_stability_factor = settings["score_stability_factor"]
+                opt._score_stability_factor = float(settings["score_stability_factor"])
             if "promotion_threshold" in settings:
-                opt._promotion_threshold = settings["promotion_threshold"]
+                opt._promotion_threshold = float(settings["promotion_threshold"])
             if "demotion_threshold" in settings:
-                opt._demotion_threshold = settings["demotion_threshold"]
+                opt._demotion_threshold = float(settings["demotion_threshold"])
             if "demotion_period" in settings:
-                opt._demotion_period = settings["demotion_period"]
+                opt._demotion_period = int(settings["demotion_period"])
             if "trading_score_threshold" in settings:
-                opt._trading_threshold = settings["trading_score_threshold"]
+                opt._trading_threshold = float(settings["trading_score_threshold"])
             if "strong_score_threshold" in settings:
-                opt._strong_threshold = settings["strong_score_threshold"]
+                opt._strong_threshold = float(settings["strong_score_threshold"])
             if "very_strong_score_threshold" in settings:
-                opt._very_strong_threshold = settings["very_strong_score_threshold"]
+                opt._very_strong_threshold = float(settings["very_strong_score_threshold"])
             if "discovery_duration" in settings:
                 opt._discovery_duration = int(settings["discovery_duration"])
             opt.reset(
@@ -1306,9 +1306,9 @@ class DashboardServer:
 
         # Update monitor thresholds
         if "min_net_profit_pct" in settings:
-            self._monitor._min_net_profit_pct = settings["min_net_profit_pct"]
+            self._monitor._min_net_profit_pct = float(settings["min_net_profit_pct"])
         if "rebalance_roi_horizon" in settings:
-            self._monitor._rebalance_roi_horizon = settings["rebalance_roi_horizon"]
+            self._monitor._rebalance_roi_horizon = int(settings["rebalance_roi_horizon"])
         self._monitor._total_capital = total_capital
 
         # Net P&L gate params
@@ -1321,7 +1321,7 @@ class DashboardServer:
         if "net_pct_sizing_enabled" in settings:
             self._monitor._net_pct_sizing_enabled = settings["net_pct_sizing_enabled"]
         if "net_pct_multiplier_cap" in settings:
-            self._monitor._net_pct_multiplier_cap = settings["net_pct_multiplier_cap"]
+            self._monitor._net_pct_multiplier_cap = float(settings["net_pct_multiplier_cap"])
 
         # Adaptive mode
         if "adaptive_mode" in settings:
@@ -1330,7 +1330,7 @@ class DashboardServer:
 
         # Update balance cooldown and trade amount
         if "rebalance_cooldown" in settings:
-            self._balance._rebalance_cooldown = settings["rebalance_cooldown"]
+            self._balance._rebalance_cooldown = int(settings["rebalance_cooldown"])
         if "min_misses_before_rebalance" in settings:
             self._monitor._min_misses_before_rebalance = int(settings["min_misses_before_rebalance"])
         self._balance._trade_amount = trade_amount

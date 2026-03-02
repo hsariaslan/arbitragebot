@@ -110,6 +110,30 @@ def load_settings() -> dict:
                     for sub_key, sub_val in default.items():
                         if sub_key not in settings[key]:
                             settings[key][sub_key] = sub_val
+            # Enforce types: coerce numeric settings that may have been
+            # saved as strings (e.g. from manual edits or older code)
+            for key, default in DEFAULT_SETTINGS.items():
+                if key not in settings:
+                    continue
+                val = settings[key]
+                if isinstance(default, int) and not isinstance(default, bool):
+                    if not isinstance(val, int) or isinstance(val, bool):
+                        try:
+                            settings[key] = int(val)
+                            logger.warning(f"[Settings] Coerced {key} from {type(val).__name__} to int")
+                        except (ValueError, TypeError):
+                            settings[key] = default
+                elif isinstance(default, float):
+                    if not isinstance(val, (int, float)) or isinstance(val, bool):
+                        try:
+                            settings[key] = float(val)
+                            logger.warning(f"[Settings] Coerced {key} from {type(val).__name__} to float")
+                        except (ValueError, TypeError):
+                            settings[key] = default
+                elif isinstance(default, bool):
+                    if not isinstance(val, bool):
+                        settings[key] = default
+                        logger.warning(f"[Settings] Reset {key} to default (was {type(val).__name__})")
             return settings
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"[Settings] Failed to load {SETTINGS_FILE}: {e}, using defaults")
