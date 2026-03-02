@@ -185,6 +185,8 @@ class BalanceTracker:
         """Return True if external transfer is within hourly budget."""
         if self._hourly_external_transfer_cap <= 0:
             return True  # Disabled
+        if proposed_fee <= 0.01:
+            return True  # Zero/near-zero fee transfers always allowed
         now = time.time()
         # Evict entries older than 1 hour
         while self._external_fee_log and self._external_fee_log[0][0] < now - 3600:
