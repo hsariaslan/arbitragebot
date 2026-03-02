@@ -167,6 +167,7 @@ async def main() -> None:
         transfer_fee_manager=transfer_fee_manager,
         hourly_external_transfer_cap=settings.get("hourly_external_transfer_cap", 2.0),
         bitfinex_reserve_pct=settings.get("bitfinex_reserve_pct", 0.15),
+        bitfinex_reserve_hard_floor=settings.get("bitfinex_reserve_hard_floor", 0.05),
     )
     monitor = ArbitrageMonitor(
         fetchers,

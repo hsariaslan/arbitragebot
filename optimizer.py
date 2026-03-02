@@ -395,6 +395,17 @@ class SymbolOptimizer:
                     elif elapsed >= self._discovery_duration:
                         # Duration elapsed, none found — extend discovery
                         self._complete_discovery()
+
+                    # During discovery, consolidate idle capital to Bitfinex
+                    if (
+                        now - self._last_evaluation >= self._evaluation_interval
+                        and self._balance
+                        and "Bitfinex" in self._balance._exchanges
+                    ):
+                        self._balance.consolidate_to_bitfinex(None)
+                        self._balance.replenish_reserve()
+                        self._last_evaluation = now
+
             elif (
                 self._auto_rotate
                 and not self._discovery_mode
@@ -1386,20 +1397,78 @@ class SymbolOptimizer:
         """Remove an underperforming symbol from the active set.
 
         Sells all held crypto to avoid market exposure risk from price drops.
+        When Bitfinex has the symbol, transfers crypto there first and sells
+        at 0% taker fee instead of selling locally (saves source taker fee).
         """
         from balance import Transfer
 
         now = time.time()
+
+        # Check if symbol has live price data on Bitfinex (0% taker fee)
+        bitfinex_bid = 0.0
+        bitfinex_available = False
+        if "Bitfinex" in self._balance._exchanges:
+            for fetcher in self._fetchers:
+                if fetcher.exchange_name == "Bitfinex":
+                    ps = fetcher.get_state().get(symbol)
+                    if ps and ps.bid and ps.bid > 0:
+                        bitfinex_available = True
+                        bitfinex_bid = float(ps.bid)
+                    break
 
         # Sell all crypto of the demoted symbol on every exchange
         prices = self._get_all_prices()
         price = prices.get(symbol, 0.0)
         freed_capital = 0.0
         total_sell_fee = 0.0
+        via_bitfinex_count = 0
+        via_bitfinex_saved = 0.0
         if price > 0:
             for ex in self._balance._exchanges:
                 qty = self._balance.crypto[ex].get(symbol, 0.0)
-                if qty > 0:
+                if qty <= 0:
+                    continue
+
+                if bitfinex_available and ex != "Bitfinex":
+                    # Transfer crypto to Bitfinex, sell at 0% taker fee
+                    withdrawal_fee = self._balance._get_withdrawal_fee(ex)
+                    gross = qty * bitfinex_bid
+                    # 0% taker fee on Bitfinex — no fee deduction
+                    self._balance.crypto[ex][symbol] = 0.0
+                    self._balance.usdt["Bitfinex"] += gross
+                    self._balance.total_transfer_fees += withdrawal_fee
+                    self._balance.total_external_transfer_fees += withdrawal_fee
+                    if withdrawal_fee > 0:
+                        self._balance._record_external_fee(withdrawal_fee)
+                    total_sell_fee += withdrawal_fee
+                    freed_capital += gross
+                    via_bitfinex_count += 1
+                    # Compute savings vs local sell
+                    local_fee_rate = (
+                        self._fee_manager.get_taker_fee(ex)
+                        if self._fee_manager
+                        else 0.001
+                    )
+                    via_bitfinex_saved += gross * local_fee_rate
+                    self._balance.transfers.append(
+                        Transfer(
+                            timestamp=now,
+                            transfer_type="demotion_sell_via_bitfinex",
+                            from_exchange=ex,
+                            to_exchange="Bitfinex",
+                            symbol=symbol,
+                            amount_usd=gross,
+                            fee_usd=withdrawal_fee,
+                        )
+                    )
+                    logger.info(
+                        f"[Optimizer] Demotion sell via Bitfinex: "
+                        f"{symbol} {ex}→Bitfinex, ${gross:.2f} "
+                        f"(saved {local_fee_rate*100:.3f}% taker, "
+                        f"withdrawal ${withdrawal_fee:.4f})"
+                    )
+                else:
+                    # Sell locally (Bitfinex doesn't have symbol, or crypto on Bitfinex)
                     fee_rate = (
                         self._fee_manager.get_taker_fee(ex)
                         if self._fee_manager
@@ -1422,13 +1491,33 @@ class SymbolOptimizer:
                             fee_usd=fee,
                         )
                     )
-            self._balance.total_transfer_fees += total_sell_fee
+                    self._balance.total_transfer_fees += fee
 
+        saved_msg = ""
+        if via_bitfinex_count > 0:
+            saved_msg = f", {via_bitfinex_count} via Bitfinex (saved ${via_bitfinex_saved:.4f} taker)"
         logger.info(
             f"[Optimizer] DEMOTING: {symbol} (score below threshold for "
             f"{self._demotion_period}s) — selling crypto "
-            f"(freed ${freed_capital:.2f}, fees ${total_sell_fee:.4f})"
+            f"(freed ${freed_capital:.2f}, fees ${total_sell_fee:.4f}{saved_msg})"
         )
+
+        # Consolidate freed USDT from local sells to Bitfinex hub
+        if self._balance and "Bitfinex" in self._balance._exchanges:
+            active_buyers = set()
+            for sym in self._active_symbols:
+                pairs = self._dominant_pairs.get(sym, {})
+                for ex_name, _ in pairs.get("buyers", []):
+                    active_buyers.add(ex_name)
+            transfers = self._balance.consolidate_to_bitfinex(active_buyers)
+            if transfers:
+                hub_fee = sum(t.fee_usd for t in transfers)
+                hub_amt = sum(t.amount_usd for t in transfers)
+                logger.info(
+                    f"[Optimizer] Post-demotion consolidation: "
+                    f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
+                    f"(fees: ${hub_fee:.4f})"
+                )
 
         # Update historical stats
         stats = self._historical_stats.get(symbol)
@@ -1481,6 +1570,70 @@ class SymbolOptimizer:
                 f"{result:.3f} (demoted {stats.times_demoted} times)"
             )
         return result
+
+    def _consolidate_idle_seller_crypto(self, idle_threshold: float = 900.0) -> None:
+        """Transfer crypto from idle seller exchanges to Bitfinex and sell at 0%.
+
+        Seller exchanges hold crypto for active symbols. If a seller hasn't
+        had a trade in idle_threshold seconds, its crypto is unproductive.
+        Transfer to Bitfinex (0% taker) frees it as USDT for redistribution.
+
+        Uses a longer threshold than USDT consolidation (15 min vs 10 min)
+        since restoring crypto costs a taker fee on the destination exchange.
+        """
+        if not self._balance or "Bitfinex" not in self._balance._exchanges:
+            return
+
+        now = time.time()
+        prices = self._get_all_prices()
+
+        # Build Bitfinex bid prices for available symbols
+        bitfinex_bids: dict[str, float] = {}
+        for fetcher in self._fetchers:
+            if fetcher.exchange_name == "Bitfinex":
+                state = fetcher.get_state()
+                for symbol in self._active_symbols:
+                    ps = state.get(symbol)
+                    if ps and ps.bid and ps.bid > 0:
+                        bitfinex_bids[symbol] = float(ps.bid)
+                break
+
+        if not bitfinex_bids:
+            return
+
+        # Collect active seller exchanges per symbol
+        for symbol in list(self._active_symbols):
+            if symbol not in bitfinex_bids:
+                continue  # Bitfinex doesn't have this symbol
+
+            pairs = self._dominant_pairs.get(symbol, {})
+            for ex, _ in pairs.get("sellers", []):
+                if ex == "Bitfinex":
+                    continue
+
+                # Check if this seller exchange is idle
+                last_trade = self._balance.last_trade_time.get(ex, 0.0)
+                idle_seconds = now - last_trade if last_trade > 0 else float("inf")
+                if idle_seconds < idle_threshold:
+                    continue  # Recently active, keep crypto
+
+                # Check if exchange has meaningful crypto of this symbol
+                qty = self._balance.crypto[ex].get(symbol, 0.0)
+                if qty <= 0:
+                    continue
+
+                transfer = self._balance.sell_crypto_via_bitfinex(
+                    source_exchange=ex,
+                    symbol=symbol,
+                    qty=qty,
+                    bitfinex_bid=bitfinex_bids[symbol],
+                )
+                if transfer:
+                    logger.info(
+                        f"[Optimizer] Idle seller consolidation: "
+                        f"{symbol} on {ex} idle {idle_seconds:.0f}s, "
+                        f"${transfer.amount_usd:.2f} to Bitfinex"
+                    )
 
     # ── Expansion ────────────────────────────────────────────────────────
 
@@ -1649,6 +1802,17 @@ class SymbolOptimizer:
             # Still run demotions to remove truly dead symbols
             self._update_watchlist()
             self._evaluate_demotions()
+            # Consolidate to Bitfinex hub even when in deficit (not gated by PnL)
+            if self._balance and "Bitfinex" in self._balance._exchanges:
+                active_buyers = set()
+                for sym in self._active_symbols:
+                    pairs = self._dominant_pairs.get(sym, {})
+                    for ex_name, _ in pairs.get("buyers", []):
+                        active_buyers.add(ex_name)
+                buyer_set = active_buyers if self._active_symbols else None
+                self._balance.consolidate_to_bitfinex(buyer_set)
+                self._consolidate_idle_seller_crypto(idle_threshold=900.0)
+                self._balance.replenish_reserve()
             return
 
         # Clean up expired demotion cooldowns
@@ -1666,12 +1830,33 @@ class SymbolOptimizer:
         # Phase 3.5: Re-evaluate dominant exchange pairs for active symbols
         self._reevaluate_dominant_pairs()
 
-        # Phase 3.6: Replenish Bitfinex reserve if depleted and profitable
-        if self._rotation_budget_ok and self._balance:
+        # Phase 3.6: Replenish Bitfinex reserve (always beneficial, not gated by profit)
+        if self._balance:
             self._balance.replenish_reserve()
 
         # Phase 4: Evaluate demotions first
         self._evaluate_demotions()
+
+        # Phase 4.5: Consolidate idle capital to Bitfinex hub
+        if self._balance and "Bitfinex" in self._balance._exchanges:
+            active_buyers = set()
+            for sym in self._active_symbols:
+                pairs = self._dominant_pairs.get(sym, {})
+                for ex_name, _ in pairs.get("buyers", []):
+                    active_buyers.add(ex_name)
+            # Full consolidation if no active symbols, partial otherwise
+            buyer_set = active_buyers if self._active_symbols else None
+            transfers = self._balance.consolidate_to_bitfinex(buyer_set)
+            if transfers:
+                hub_fee = sum(t.fee_usd for t in transfers)
+                hub_amt = sum(t.amount_usd for t in transfers)
+                logger.info(
+                    f"[Optimizer] Idle consolidation: "
+                    f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
+                    f"(fees: ${hub_fee:.4f})"
+                )
+            # Also consolidate crypto from idle seller exchanges (15 min threshold)
+            self._consolidate_idle_seller_crypto(idle_threshold=900.0)
 
         active_scores = [
             self._scores[s]

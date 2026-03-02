@@ -91,6 +91,7 @@ class BalanceTracker:
         transfer_fee_manager: "TransferFeeManager | None" = None,
         hourly_external_transfer_cap: float = 2.0,
         bitfinex_reserve_pct: float = 0.15,
+        bitfinex_reserve_hard_floor: float = 0.05,
     ) -> None:
         self._fee_manager = fee_manager
         self._transfer_fee_mgr = transfer_fee_manager
@@ -161,6 +162,8 @@ class BalanceTracker:
         # Bitfinex USDT reserve: keep a % of capital as emergency liquidity
         self._bitfinex_reserve_pct: float = bitfinex_reserve_pct
         self._bitfinex_reserve_target: float = self._initial_investment * bitfinex_reserve_pct
+        self._bitfinex_reserve_hard_floor: float = bitfinex_reserve_hard_floor
+        self._bitfinex_reserve_hard_floor_amount: float = self._initial_investment * bitfinex_reserve_hard_floor
 
         # Initialization state
         self._initialized: bool = False
@@ -248,6 +251,7 @@ class BalanceTracker:
             fee_manager=self._fee_manager,
             transfer_fee_manager=self._transfer_fee_mgr,
             bitfinex_reserve_pct=self._bitfinex_reserve_pct,
+            bitfinex_reserve_hard_floor=self._bitfinex_reserve_hard_floor,
         )
         logger.info("[Balance] Reset complete")
 
@@ -451,10 +455,12 @@ class BalanceTracker:
                 eligible = smaller_eligible
                 external_rebal = min_rebal
         if eligible:
-            external_source = min(
-                eligible,
-                key=lambda ex: self._get_withdrawal_fee(ex),
-            )
+            # Prefer cheap sources (fee <= $0.10), expensive as last resort
+            cheap_eligible = [ex for ex in eligible if self._get_withdrawal_fee(ex) <= 0.10]
+            if cheap_eligible:
+                external_source = min(cheap_eligible, key=lambda ex: self._get_withdrawal_fee(ex))
+            else:
+                external_source = min(eligible, key=lambda ex: self._get_withdrawal_fee(ex))
             external_cost = self._get_withdrawal_fee(external_source)
 
             # Transfer worthiness check (adaptive mode only)
@@ -797,12 +803,22 @@ class BalanceTracker:
             return []
 
         bitfinex_usdt = self.usdt.get("Bitfinex", 0.0)
-        min_floor = 5.0  # Never drain below $5
-        available = bitfinex_usdt - min_floor
+        hard_floor = max(5.0, self._bitfinex_reserve_hard_floor_amount)
+        available = bitfinex_usdt - hard_floor
         if available <= 0:
+            logger.info(
+                f"[Balance] Emergency draw blocked by hard floor: "
+                f"Bitfinex=${bitfinex_usdt:.2f}, floor=${hard_floor:.2f}"
+            )
             return []
 
         amount = min(needed_amount, available)
+        if amount < needed_amount:
+            logger.info(
+                f"[Balance] Emergency draw limited by hard floor: "
+                f"requested=${needed_amount:.2f}, available=${amount:.2f} "
+                f"(floor=${hard_floor:.2f})"
+            )
         if amount < self._trade_amount:
             return []  # Not enough for even one trade
 
@@ -835,9 +851,10 @@ class BalanceTracker:
         return [transfer]
 
     def replenish_reserve(self, prices: dict[str, float] | None = None) -> list[Transfer]:
-        """Top up Bitfinex USDT reserve from exchanges with cheap withdrawals.
+        """Top up Bitfinex USDT reserve from all exchanges, sorted by withdrawal fee.
 
-        Only called when net profit is positive. Respects hourly cap and cooldown.
+        Not gated by net profit — reserve replenishment is always beneficial.
+        Respects hourly cap and per-source cooldown.
         """
         if self._bitfinex_reserve_pct <= 0:
             return []
@@ -849,13 +866,12 @@ class BalanceTracker:
             return []
 
         deficit = self._bitfinex_reserve_target - current
-        min_replenish = max(50.0, self._trade_amount * 5)
+        min_replenish = max(20.0, self._trade_amount * 2)
         if deficit < min_replenish:
             return []  # Not worth replenishing small amounts
 
-        # Find cheapest sender with surplus USDT (fee <= $0.01 only)
+        # Find all senders with surplus USDT, sorted by withdrawal fee (cheapest first)
         buf = self._rebalance_buffer
-        max_fee = 0.01  # Only free/near-free: MEXC, Bybit, Binance, Bitget
         candidates = []
         for ex in self._exchanges:
             if ex == "Bitfinex":
@@ -864,53 +880,218 @@ class BalanceTracker:
             if avail < min_replenish:
                 continue
             fee = self._get_withdrawal_fee(ex, min(deficit, avail))
-            if fee <= max_fee:
-                candidates.append((ex, avail, fee))
+            candidates.append((ex, avail, fee))
 
         if not candidates:
             return []
 
-        # Pick cheapest
+        # Sort by fee (cheapest first)
         candidates.sort(key=lambda x: x[2])
-        sender, avail, fee = candidates[0]
 
-        # Check cooldown (10 min for reserve replenish to avoid fee churn)
-        cooldown_key = f"reserve_replenish:{sender}"
         now = time.time()
         reserve_cooldown = max(self._rebalance_cooldown, 600)
-        if now - self._last_rebalance.get(cooldown_key, 0) < reserve_cooldown:
+        transfers = []
+        remaining_deficit = deficit
+
+        for sender, avail, fee in candidates:
+            if remaining_deficit < min_replenish:
+                break
+
+            # Check cooldown (10 min per source to avoid fee churn)
+            cooldown_key = f"reserve_replenish:{sender}"
+            if now - self._last_rebalance.get(cooldown_key, 0) < reserve_cooldown:
+                continue
+
+            # Check hourly budget
+            if not self._check_hourly_transfer_budget(fee):
+                continue
+
+            amount = min(remaining_deficit, avail)
+            self.usdt[sender] -= amount
+            self.usdt["Bitfinex"] += amount - fee
+            if fee > 0:
+                self.total_transfer_fees += fee
+                self.total_external_transfer_fees += fee
+                self._record_external_fee(fee)
+            self._last_rebalance[cooldown_key] = now
+
+            transfer = Transfer(
+                timestamp=now,
+                transfer_type="reserve_replenish",
+                from_exchange=sender,
+                to_exchange="Bitfinex",
+                symbol="USDT",
+                amount_usd=amount,
+                fee_usd=fee,
+            )
+            self.transfers.append(transfer)
+            transfers.append(transfer)
+            remaining_deficit -= amount
+            logger.info(
+                f"[Balance] Reserve replenish: {sender}→Bitfinex "
+                f"${amount:.2f} (fee=${fee:.4f}, reserve="
+                f"${self.usdt.get('Bitfinex', 0.0):.2f}/"
+                f"${self._bitfinex_reserve_target:.2f})"
+            )
+
+        return transfers
+
+    def consolidate_to_bitfinex(
+        self,
+        active_buyer_exchanges: set[str] | None = None,
+        idle_threshold: float = 600.0,
+    ) -> list[Transfer]:
+        """Consolidate USDT from non-essential exchanges to Bitfinex hub.
+
+        Bitfinex has $0 withdrawal fees, making it the ideal capital hub.
+        Capital on Bitfinex can be redistributed to any exchange for free.
+
+        Active buyer exchanges that have been idle (no trades) for longer than
+        idle_threshold are treated as non-essential and consolidated too.
+
+        Not gated by net PnL — consolidation is always beneficial.
+        Respects hourly budget cap and per-source cooldown.
+
+        Args:
+            active_buyer_exchanges: Exchanges still needed for trading.
+                Keep trade_amount×3 buffer on recently-active ones.
+                None = consolidate everything.
+            idle_threshold: Seconds since last trade before an active buyer
+                is considered idle and its capital consolidated. Default 600s (10 min).
+        """
+        if self._bitfinex_reserve_pct <= 0:
+            return []
+        if "Bitfinex" not in self._exchanges:
             return []
 
-        # Check hourly budget
-        if not self._check_hourly_transfer_budget(fee):
-            return []
+        now = time.time()
+        consolidation_cooldown = max(self._rebalance_cooldown, 600)  # 10 min
+        min_transfer = max(20.0, self._trade_amount * 2)
+        transfers = []
 
-        amount = min(deficit, avail)
-        self.usdt[sender] -= amount
-        self.usdt["Bitfinex"] += amount - fee
-        if fee > 0:
-            self.total_transfer_fees += fee
-            self.total_external_transfer_fees += fee
-            self._record_external_fee(fee)
+        # Sort non-Bitfinex exchanges by withdrawal fee (cheapest first)
+        sources = sorted(
+            (ex for ex in self._exchanges if ex != "Bitfinex"),
+            key=lambda ex: self._get_withdrawal_fee(ex),
+        )
+
+        for ex in sources:
+            # Compute available USDT based on exchange activity
+            usdt = self.usdt.get(ex, 0.0)
+            if active_buyer_exchanges and ex in active_buyer_exchanges:
+                # Check if this active buyer is actually idle
+                last_trade = self.last_trade_time.get(ex, 0.0)
+                idle_seconds = now - last_trade if last_trade > 0 else float("inf")
+                if idle_seconds < idle_threshold:
+                    # Recently active — keep buffer for upcoming trades
+                    keep = self._trade_amount * 3
+                else:
+                    # Active buyer but idle for too long — consolidate
+                    keep = 0.0
+            else:
+                # Not an active buyer — transfer everything
+                keep = 0.0
+            available = usdt - keep
+            if available < min_transfer:
+                continue
+
+            # Check cooldown
+            cooldown_key = f"{ex}:consolidate"
+            if now - self._last_rebalance.get(cooldown_key, 0) < consolidation_cooldown:
+                continue
+
+            fee = self._get_withdrawal_fee(ex, available)
+
+            # Check hourly budget
+            if not self._check_hourly_transfer_budget(fee):
+                continue
+
+            # Execute consolidation
+            self.usdt[ex] -= available
+            self.usdt["Bitfinex"] += available - fee
+            if fee > 0:
+                self.total_transfer_fees += fee
+                self.total_external_transfer_fees += fee
+                self._record_external_fee(fee)
+            self._last_rebalance[cooldown_key] = now
+
+            transfer = Transfer(
+                timestamp=now,
+                transfer_type="hub_consolidation",
+                from_exchange=ex,
+                to_exchange="Bitfinex",
+                symbol="USDT",
+                amount_usd=available,
+                fee_usd=fee,
+            )
+            self.transfers.append(transfer)
+            transfers.append(transfer)
+            logger.info(
+                f"[Balance] Hub consolidation: {ex}→Bitfinex "
+                f"${available:.2f} (fee=${fee:.4f})"
+            )
+
+        return transfers
+
+    def sell_crypto_via_bitfinex(
+        self,
+        source_exchange: str,
+        symbol: str,
+        qty: float,
+        bitfinex_bid: float,
+    ) -> Transfer | None:
+        """Transfer crypto from source exchange to Bitfinex and sell at 0% taker.
+
+        Used for idle seller consolidation — frees crypto capital as USDT on
+        Bitfinex where it can be redistributed for free.
+
+        Returns the transfer record, or None if blocked by budget/cooldown.
+        """
+        if qty <= 0 or bitfinex_bid <= 0:
+            return None
+        if "Bitfinex" not in self._exchanges:
+            return None
+
+        gross = qty * bitfinex_bid
+        min_transfer = max(20.0, self._trade_amount * 2)
+        if gross < min_transfer:
+            return None
+
+        now = time.time()
+        cooldown_key = f"{source_exchange}:crypto_consolidate"
+        consolidation_cooldown = max(self._rebalance_cooldown, 600)
+        if now - self._last_rebalance.get(cooldown_key, 0) < consolidation_cooldown:
+            return None
+
+        withdrawal_fee = self._get_withdrawal_fee(source_exchange)
+        if not self._check_hourly_transfer_budget(withdrawal_fee):
+            return None
+
+        # Execute: move crypto out, sell at 0% on Bitfinex, credit USDT
+        self.crypto[source_exchange][symbol] -= qty
+        self.usdt["Bitfinex"] += gross  # 0% taker on Bitfinex
+        if withdrawal_fee > 0:
+            self.total_transfer_fees += withdrawal_fee
+            self.total_external_transfer_fees += withdrawal_fee
+            self._record_external_fee(withdrawal_fee)
         self._last_rebalance[cooldown_key] = now
 
         transfer = Transfer(
             timestamp=now,
-            transfer_type="reserve_replenish",
-            from_exchange=sender,
+            transfer_type="idle_crypto_consolidation",
+            from_exchange=source_exchange,
             to_exchange="Bitfinex",
-            symbol="USDT",
-            amount_usd=amount,
-            fee_usd=fee,
+            symbol=symbol,
+            amount_usd=gross,
+            fee_usd=withdrawal_fee,
         )
         self.transfers.append(transfer)
         logger.info(
-            f"[Balance] Reserve replenish: {sender}→Bitfinex "
-            f"${amount:.2f} (fee=${fee:.4f}, reserve="
-            f"${self.usdt.get('Bitfinex', 0.0):.2f}/"
-            f"${self._bitfinex_reserve_target:.2f})"
+            f"[Balance] Idle crypto consolidation: {symbol} "
+            f"{source_exchange}→Bitfinex, ${gross:.2f} "
+            f"(withdrawal ${withdrawal_fee:.4f})"
         )
-        return [transfer]
+        return transfer
 
     def execute_trade(
         self,
@@ -1089,6 +1270,7 @@ class BalanceTracker:
             "_in_transit": [asdict(f) for f in self._in_transit],
             "_execution_mode": self._execution_mode,
             "_external_fee_log": list(self._external_fee_log),
+            "_bitfinex_reserve_hard_floor": self._bitfinex_reserve_hard_floor,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -1131,3 +1313,8 @@ class BalanceTracker:
         self._external_fee_log = deque(
             tuple(x) for x in data.get("_external_fee_log", [])
         )
+        if "_bitfinex_reserve_hard_floor" in data:
+            self._bitfinex_reserve_hard_floor = data["_bitfinex_reserve_hard_floor"]
+            self._bitfinex_reserve_hard_floor_amount = (
+                self._initial_investment * self._bitfinex_reserve_hard_floor
+            )

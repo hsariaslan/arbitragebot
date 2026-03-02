@@ -320,6 +320,7 @@ REALLOCATION_COST_HORIZON: float = 2.0    # Hours of profit to justify reallocat
 DEMOTION_COOLDOWN_MULTIPLIER: float = 5.0 # Cooldown after demotion = period × multiplier
 HOURLY_EXTERNAL_TRANSFER_CAP: float = 2.0 # Max external withdrawal fees per hour ($), 0=disabled
 BITFINEX_RESERVE_PCT: float = 0.15        # Keep 15% of capital as USDT on Bitfinex (free withdrawals)
+BITFINEX_RESERVE_HARD_FLOOR: float = 0.05 # Never drain below 5% in emergency draws
 
 # Execution mode: "simulation" (default), "demo" (testnet orders)
 EXECUTION_MODE: str = "simulation"
