@@ -923,10 +923,33 @@ class SymbolOptimizer:
             if s.score >= self._trading_threshold
         ]
 
-        # Filter out symbols with declining score trajectories
+        # Filter out symbols with declining scores or fading profitable frequency
         tradeable_symbols: list[str] = []
         rejected_declining: list[str] = []
+        now = time.time()
         for sym in tradeable_symbols_raw:
+            # Check 1: Recent profitable frequency — are ticks STILL profitable?
+            # Look at the last 15 seconds of tick data. If frequency dropped to
+            # near-zero, the opportunity was transient and has already closed.
+            ticks = self._ticks.get(sym, [])
+            if len(ticks) >= 15:
+                recent_cutoff = now - 15.0
+                recent_ticks = [t for t in ticks if t.timestamp >= recent_cutoff]
+                if len(recent_ticks) >= 10:
+                    recent_profitable = sum(1 for t in recent_ticks if t.best_net_pct > 0)
+                    recent_freq = recent_profitable / len(recent_ticks)
+                    if recent_freq < 0.05:
+                        score_obj = self._scores.get(sym)
+                        overall_freq = score_obj.frequency if score_obj else 0.0
+                        rejected_declining.append(
+                            f"{sym.replace('USDT', '')}("
+                            f"recent_freq={recent_freq:.1%} "
+                            f"overall_freq={overall_freq:.1%} "
+                            f"reason=fading)"
+                        )
+                        continue
+
+            # Check 2: Declining score trajectory
             wl = self._watchlist.get(sym)
             if wl and len(wl.score_samples) >= 5:
                 samples = wl.score_samples
@@ -1461,6 +1484,77 @@ class SymbolOptimizer:
 
     # ── Expansion ────────────────────────────────────────────────────────
 
+    def _estimate_expansion_cost(self, symbol: str, score: SymbolScore) -> float:
+        """Estimate the total fee of setting up capital for a new symbol.
+
+        Considers current balance state: if buyer/seller exchanges have no
+        capital, includes the cheapest rebalance cost (internal sell taker fee
+        or external transfer withdrawal fee) for each exchange that needs funding.
+        Also includes eventual demotion sell cost (taker fee on seller capital).
+        """
+        if not self._balance or not self._fee_manager:
+            return 0.0
+
+        # Compute what dominant pairs would look like
+        if score.score >= self._very_strong_threshold:
+            max_dir = 3
+        elif score.score >= self._strong_threshold:
+            max_dir = 2
+        else:
+            max_dir = 2
+        pairs = self._compute_dominant_pairs(symbol, max_per_direction=max_dir)
+
+        total_cost = 0.0
+        needed_per_exchange = self._trade_amount * 3  # 3× trade amount needed
+
+        # Cost to get USDT on buyer exchanges (for buying)
+        for ex, _ in pairs["buyers"]:
+            usdt_avail = self._balance.available_usdt_for_trading(ex)
+            if usdt_avail >= needed_per_exchange:
+                continue  # already funded
+            # Estimate cheapest way to get USDT here
+            internal_fee = needed_per_exchange * self._fee_manager.get_taker_fee(ex)
+            external_fee = self._balance._get_withdrawal_fee(ex)  # cheapest source fee
+            # Find actual cheapest source
+            cheapest_ext = float("inf")
+            for src in self._balance._exchanges:
+                if src == ex:
+                    continue
+                src_avail = self._balance._available_usdt_for_rebalance(src)
+                if src_avail >= needed_per_exchange:
+                    cheapest_ext = min(cheapest_ext, self._balance._get_withdrawal_fee(src))
+            if cheapest_ext < float("inf"):
+                total_cost += min(internal_fee, cheapest_ext)
+            else:
+                total_cost += internal_fee  # internal sell is the only option
+
+        # Cost to get crypto on seller exchanges (for selling)
+        for ex, _ in pairs["sellers"]:
+            usdt_avail = self._balance.usdt.get(ex, 0.0)
+            if usdt_avail >= needed_per_exchange:
+                # Can buy crypto directly — taker fee
+                total_cost += needed_per_exchange * self._fee_manager.get_taker_fee(ex)
+            else:
+                # Need USDT transferred + buy fee
+                internal_fee = needed_per_exchange * self._fee_manager.get_taker_fee(ex)
+                cheapest_ext = float("inf")
+                for src in self._balance._exchanges:
+                    if src == ex:
+                        continue
+                    src_avail = self._balance._available_usdt_for_rebalance(src)
+                    if src_avail >= needed_per_exchange:
+                        cheapest_ext = min(cheapest_ext, self._balance._get_withdrawal_fee(src))
+                if cheapest_ext < float("inf"):
+                    total_cost += cheapest_ext + internal_fee  # transfer + buy
+                else:
+                    total_cost += internal_fee * 2  # sell existing + buy new
+
+        # Eventual demotion sell cost (taker fee on all seller positions)
+        for ex, _ in pairs["sellers"]:
+            total_cost += needed_per_exchange * self._fee_manager.get_taker_fee(ex)
+
+        return total_cost
+
     def _expand_active(self, symbol: str, score: SymbolScore) -> None:
         """Add a new confirmed symbol to the active set."""
         from balance import Transfer
@@ -1715,13 +1809,26 @@ class SymbolOptimizer:
                         f"unstable: {reason}"
                     )
                     continue
+                # Expansion cost gate: estimate setup cost vs expected profit
+                est_cost = self._estimate_expansion_cost(candidate.symbol, candidate)
+                est_benefit = candidate.est_hourly_profit * self._reallocation_cost_horizon
+                if est_cost > 0 and est_benefit > 0 and est_cost > est_benefit:
+                    logger.info(
+                        f"[Candidate] EXPAND_BLOCKED {candidate.symbol}: "
+                        f"setup_cost=${est_cost:.4f} > "
+                        f"est_benefit=${est_benefit:.4f} "
+                        f"(hourly=${candidate.est_hourly_profit:.4f} × "
+                        f"{self._reallocation_cost_horizon}h)"
+                    )
+                    continue
                 logger.info(
                     f"[Candidate] EXPAND_READY {candidate.symbol}: "
                     f"score={candidate.score:.6f} peak={wl_entry.peak_score:.6f} "
                     f"avg_net={candidate.avg_profitable_net:.4f}% "
                     f"freq={candidate.frequency:.1%} "
                     f"ticks={candidate.profitable_ticks}/{candidate.total_ticks} "
-                    f"est_hourly=${candidate.est_hourly_profit:.4f} — activating"
+                    f"est_hourly=${candidate.est_hourly_profit:.4f} "
+                    f"setup_cost=${est_cost:.2f} — activating"
                 )
                 self._expand_active(candidate.symbol, candidate)
                 self._watchlist.pop(candidate.symbol, None)
