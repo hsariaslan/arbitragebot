@@ -1541,6 +1541,10 @@ class SymbolOptimizer:
             f"cooldown={self._demotion_cooldown}s, active: {self._active_symbols}"
         )
 
+        # Redistribute freed capital to starved buyer exchanges
+        if self._active_symbols:
+            self._redistribute_post_demotion()
+
         # Re-enter discovery if no active symbols remain
         if not self._active_symbols:
             logger.warning(
@@ -1552,6 +1556,76 @@ class SymbolOptimizer:
             # Reset to initial discovery duration
             self._discovery_duration = self._initial_discovery_duration
             self._monitor._paused = True
+
+    # ── Post-demotion redistribution ────────────────────────────────────
+
+    def _redistribute_post_demotion(self) -> None:
+        """Push freed capital from Bitfinex to starved buyer exchanges.
+
+        After a demotion, capital consolidates on Bitfinex via demotion sells.
+        Instead of waiting for miss-streaks, proactively redistribute to
+        buyer exchanges that need USDT. Bitfinex $0-fee transfers pass the
+        hourly cap (Fix 1).
+        """
+        from balance import Transfer
+
+        if "Bitfinex" not in self._balance._exchanges:
+            return
+        available = self._balance._available_usdt_for_rebalance("Bitfinex")
+        if available < self._trade_amount * 2:
+            return  # Nothing meaningful to redistribute
+
+        # Collect buyer exchanges from remaining active symbols' dominant pairs
+        buyer_needs: dict[str, float] = {}
+        for sym in self._active_symbols:
+            pairs = self._dominant_pairs.get(sym)
+            if not pairs:
+                continue
+            for ex, _w in pairs.get("buyers", []):
+                if ex == "Bitfinex":
+                    continue
+                bal = self._balance.usdt.get(ex, 0.0)
+                if bal < self._trade_amount * 2:
+                    shortfall = self._trade_amount * 3 - bal
+                    buyer_needs[ex] = max(buyer_needs.get(ex, 0), shortfall)
+
+        if not buyer_needs:
+            return
+
+        # Sort by largest shortfall first
+        sorted_needs = sorted(buyer_needs.items(), key=lambda x: x[1], reverse=True)
+        total_sent = 0.0
+        now = time.time()
+        for ex, need in sorted_needs:
+            amount = min(need, available - total_sent)
+            if amount < self._trade_amount:
+                continue
+            fee = self._balance._get_withdrawal_fee("Bitfinex", amount)
+            if not self._balance._check_hourly_transfer_budget(fee):
+                continue
+            self._balance._record_external_fee(fee)
+            self._balance.usdt["Bitfinex"] -= amount
+            self._balance.usdt[ex] = self._balance.usdt.get(ex, 0.0) + amount
+            self._balance.total_transfer_fees += fee
+            self._balance.total_external_transfer_fees += fee
+            total_sent += amount
+            self._balance.transfers.append(
+                Transfer(
+                    timestamp=now,
+                    transfer_type="post_demotion_redistribute",
+                    from_exchange="Bitfinex",
+                    to_exchange=ex,
+                    symbol="USDT",
+                    amount_usd=amount,
+                    fee_usd=fee,
+                )
+            )
+            logger.info(
+                f"[Balance] Post-demotion redistribute: Bitfinex→{ex} "
+                f"${amount:.2f} (fee=${fee:.2f})"
+            )
+            if total_sent >= available * 0.8:
+                break  # Keep 20% buffer on Bitfinex
 
     # ── Activation threshold ─────────────────────────────────────────────
 
@@ -1570,6 +1644,16 @@ class SymbolOptimizer:
                 f"{result:.3f} (demoted {stats.times_demoted} times)"
             )
         return result
+
+    def _is_symbol_on_bitfinex(self, symbol: str) -> bool:
+        """Check if symbol has a live Bitfinex price."""
+        if "Bitfinex" not in self._balance._exchanges:
+            return False
+        for fetcher in self._fetchers:
+            if fetcher.exchange_name == "Bitfinex":
+                ps = fetcher.get_state().get(symbol)
+                return bool(ps and ps.bid and float(ps.bid) > 0)
+        return False
 
     def _consolidate_idle_seller_crypto(self, idle_threshold: float = 900.0) -> None:
         """Transfer crypto from idle seller exchanges to Bitfinex and sell at 0%.
@@ -1953,7 +2037,7 @@ class SymbolOptimizer:
                     and s.total_ticks >= 30  # minimum data points
                     and s.est_hourly_profit > expansion_cost * self._safety_multiplier
                 ],
-                key=lambda s: s.score,
+                key=lambda s: s.score * (1.0 if self._is_symbol_on_bitfinex(s.symbol) else 0.7),
                 reverse=True,
             )
             now = time.time()
@@ -2013,7 +2097,9 @@ class SymbolOptimizer:
                     f"freq={candidate.frequency:.1%} "
                     f"ticks={candidate.profitable_ticks}/{candidate.total_ticks} "
                     f"est_hourly=${candidate.est_hourly_profit:.4f} "
-                    f"setup_cost=${est_cost:.2f} — activating"
+                    f"setup_cost=${est_cost:.2f} "
+                    f"bfx={'yes' if self._is_symbol_on_bitfinex(candidate.symbol) else 'no'} "
+                    f"— activating"
                 )
                 self._expand_active(candidate.symbol, candidate)
                 self._watchlist.pop(candidate.symbol, None)
