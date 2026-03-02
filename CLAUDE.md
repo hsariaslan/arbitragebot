@@ -436,7 +436,7 @@ Full authentication system for the WebSocket dashboard:
 - **Dedicated auth logger**: Human-readable log at `logs/auth/auth.log`
 - **X-Forwarded-For**: Only trusted from IPs in `TRUSTED_PROXIES` (default: `127.0.0.1,::1`). Prevents IP spoofing to bypass rate limits/whitelist.
 - **Origin validation**: When `ALLOWED_ORIGINS` is set, WebSocket connections from unknown origins are rejected (CSRF protection).
-- **Settings validation**: All settings validated against schema (type, min/max ranges). Unknown keys rejected. IP whitelist entries validated. 5s cooldown between settings saves.
+- **Settings validation**: All settings validated against schema (type, min/max ranges). Unknown keys rejected. IP whitelist entries validated. 5s cooldown between settings saves. Type enforcement on load: `load_settings()` coerces mistyped values (e.g. string `"300"` → int `300`) with warning log, falls back to default on failure. Hot-apply uses explicit `int()`/`float()` casts for all numeric settings.
 - **Bind host**: Default `127.0.0.1` (behind nginx). Override with `DASHBOARD_BIND_HOST=0.0.0.0` for direct access.
 - **IP denied priority**: Denied IPs see nothing rendered (blank screen) until `auth_denied` arrives, then immediately the "You are not allowed here" page. No spinner, no loading text — `wsInitialized` gate ensures zero UI leakage.
 
@@ -454,6 +454,7 @@ Full authentication system for the WebSocket dashboard:
   - `[Balance] Snapshot` — Every 5 min: per-exchange total value (USDT + crypto USD), portfolio total, fee breakdown (total vs external-only)
   - `[Session]` — Every 5 min: aggregate trades, pnl, transfer fees, cashback (credited/pending), net, $/hr, SIZE_ZERO count (sz0=), rebalance blocked count (rebal_blocked=)
   - `[Candidate]` — Candidate lifecycle logged every tick during discovery (with `phase=discovery`, score/peak/drop%/tier/trend) and every eval cycle post-discovery. States: NEW (entered watchlist), WATCH (tracked with score/trend/block reason), CONFIRMED (passed all gates), DROPPED (score fell below threshold), REJECTED (unstable at activation — declining, cliff drop, or fading), EXPAND_TRACK (first seen for expansion), EXPAND_WAIT (unstable), EXPAND_BLOCKED (setup cost exceeds benefit), EXPAND_READY (activating). Filterable in Bot Logs tab.
+- **Fatal error traceback**: `run.py` logs full `traceback.format_exc()` on fatal errors (not just the exception message), enabling root-cause analysis from systemd journal logs.
 - **Disk export**: `_read_bot_logs_from_disk()` reads rotated + current log files for cross-day export ranges. `_read_auth_logs_from_disk()` reads JSONL files. Both use `asyncio.to_thread()` for non-blocking I/O.
 
 ### State Persistence
