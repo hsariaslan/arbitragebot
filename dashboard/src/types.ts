@@ -16,6 +16,29 @@ export interface PriceEntry {
   age: number;
 }
 
+export interface DowntimeEvent {
+  start: number;
+  end: number;
+  duration: number;
+}
+
+export interface UptimeInfo {
+  first_start: number;
+  true_uptime_seconds: number;
+  total_downtime: number;
+  restart_count: number;
+  downtimes: DowntimeEvent[];
+}
+
+export interface ProxyUptimeInfo {
+  is_connected: boolean;
+  first_connected: number;
+  true_uptime_seconds: number;
+  total_downtime: number;
+  outage_count: number;
+  downtimes: DowntimeEvent[];
+}
+
 export interface Portfolio {
   total_value: number;
   initial_investment: number;
@@ -49,6 +72,8 @@ export interface Trade {
   net_pct: number;
   profit_usd: number;
   trade_amount: number;
+  // Simulated slippage (from order book depth)
+  sim_slippage_pct?: number;
   // Demo execution results (Phase 2, present when execution_mode=demo)
   demo_buy_price?: number;
   demo_sell_price?: number;
@@ -77,6 +102,7 @@ export interface AllocationEntry {
 
 export interface Settings {
   trade_amount_usd: number;
+  trade_amount_pct?: number;
   total_capital?: number;
   auto_rotate?: boolean;
   num_active_symbols?: number;
@@ -398,11 +424,31 @@ export interface ExchangeTransferConfig {
   cheapest_fee: number;
 }
 
+// ── P&L History (persisted) ──────────────────────────────────────────
+
+export interface HourlyPnlEntry {
+  hour: string;     // "YYYY-MM-DD_HH"
+  pnl: number;      // trading P&L
+  fees: number;     // transfer fees
+  net: number;      // pnl - fees
+  trades: number;
+}
+
+export interface DailyPnlEntry {
+  date: string;     // "YYYY-MM-DD"
+  pnl: number;
+  fees: number;
+  net: number;
+  trades: number;
+}
+
 // ── Main Dashboard State ────────────────────────────────────────────
 
 export interface DashboardState {
   timestamp: number;
   uptime_seconds: number;
+  uptime_info?: UptimeInfo;
+  proxy_uptime_info?: ProxyUptimeInfo;
   connected_exchanges: number;
   total_exchanges: number;
   portfolio: Portfolio;
@@ -413,6 +459,8 @@ export interface DashboardState {
   recent_transfers: Transfer[];
   all_trades: Trade[];
   all_transfers: Transfer[];
+  hourly_pnl: HourlyPnlEntry[];
+  daily_pnl: DailyPnlEntry[];
   settings: Settings;
   all_exchanges: string[];
   all_symbols: string[];

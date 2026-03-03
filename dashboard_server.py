@@ -116,6 +116,17 @@ class DashboardServer:
         self._running = False
         self._clients: set[Any] = set()
         self._start_time = 0.0
+        self._uptime_data: dict = {}
+        self._uptime_file = Path("state/uptime.json")
+        self._last_heartbeat_save = 0.0
+
+        # Proxy (Zurich VPS) uptime tracking
+        self._proxy_uptime_data: dict = {}
+        self._proxy_uptime_file = Path("state/proxy_uptime.json")
+        self._proxy_last_heartbeat_save = 0.0
+        self._proxy_was_connected: bool | None = None
+        self._proxy_disconnect_start: float = 0.0
+        self._bitfinex_fetcher: Any = None
 
         # Auth state
         self._sessions: dict[str, dict] = {}  # token -> {ip, last_seen, remember}
@@ -564,6 +575,13 @@ class DashboardServer:
         """Start WebSocket server and broadcast state every second."""
         self._running = True
         self._start_time = time.time()
+        self._load_uptime_data()
+
+        # Proxy (Zurich VPS) tracking
+        self._bitfinex_fetcher = next(
+            (f for f in self._fetchers if f.exchange_name == "Bitfinex"), None
+        )
+        self._load_proxy_uptime_data()
 
         # Apply exchange enabled/disabled state from persisted settings
         fee_configs = self._settings.get("fee_configs")
@@ -601,6 +619,10 @@ class DashboardServer:
                         except Exception:
                             dead.add(ws)
                     self._clients -= dead
+                # Periodic uptime heartbeat (~every 60s)
+                self._save_uptime_heartbeat()
+                # Track proxy (Zurich VPS) connection state
+                self._track_proxy_state()
                 # Periodic auth cleanup (~every 5 min)
                 now = time.time()
                 if now - self._last_cleanup > 300:
@@ -816,6 +838,7 @@ class DashboardServer:
 
     _SETTINGS_SCHEMA: dict[str, tuple[type, float | None, float | None]] = {
         "trade_amount_usd": (float, 1, 100000),
+        "trade_amount_pct": (float, 0.0, 0.50),
         "total_capital": (float, 1, 10000000),
         "auto_rotate": (bool, None, None),
         "num_active_symbols": (int, 1, 60),
@@ -1156,6 +1179,13 @@ class DashboardServer:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(str(time.time()))
 
+        # Clear uptime data — intentional restart starts fresh
+        try:
+            Path("state/uptime.json").unlink(missing_ok=True)
+            Path("state/proxy_uptime.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+
         logger.info("[Dashboard] Restarting process via execv...")
         _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
 
@@ -1179,6 +1209,221 @@ class DashboardServer:
         """Called ~30s after startup to re-enable login email notifications."""
         self._restart_grace = False
         logger.info("[Dashboard] Restart grace period ended, login emails re-enabled")
+
+    # --- Uptime tracking ---
+
+    _DOWNTIME_THRESHOLD = 90.0  # seconds — gaps shorter than this are ignored
+
+    def _load_uptime_data(self) -> None:
+        """Load uptime data from state/uptime.json. Detect downtime gaps."""
+        now = time.time()
+
+        # Intentional restart → start fresh
+        if self._restart_grace:
+            try:
+                self._uptime_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._uptime_data = {
+                "first_start": now,
+                "last_heartbeat": now,
+                "downtimes": [],
+            }
+            self._save_uptime_heartbeat(force=True)
+            logger.info("[Uptime] Fresh start (intentional restart)")
+            return
+
+        # Try to load existing data
+        if self._uptime_file.exists():
+            try:
+                with open(self._uptime_file) as f:
+                    data = json.load(f)
+                last_hb = data.get("last_heartbeat", now)
+                gap = now - last_hb
+                downtimes = data.get("downtimes", [])
+
+                if gap > self._DOWNTIME_THRESHOLD:
+                    downtimes.append({
+                        "start": last_hb,
+                        "end": now,
+                        "duration": round(gap, 1),
+                    })
+                    logger.info(
+                        f"[Uptime] Downtime detected: {gap:.0f}s "
+                        f"({time.strftime('%H:%M:%S', time.gmtime(last_hb))} → "
+                        f"{time.strftime('%H:%M:%S', time.gmtime(now))} UTC)"
+                    )
+
+                self._uptime_data = {
+                    "first_start": data.get("first_start", now),
+                    "last_heartbeat": now,
+                    "downtimes": downtimes[-50:],  # keep last 50
+                }
+                self._save_uptime_heartbeat(force=True)
+                total_down = sum(d["duration"] for d in downtimes)
+                logger.info(
+                    f"[Uptime] Resumed: {len(downtimes)} previous downtimes, "
+                    f"{total_down:.0f}s total downtime"
+                )
+                return
+            except (json.JSONDecodeError, OSError, KeyError) as e:
+                logger.warning(f"[Uptime] Failed to load {self._uptime_file}: {e}")
+
+        # First ever start
+        self._uptime_data = {
+            "first_start": now,
+            "last_heartbeat": now,
+            "downtimes": [],
+        }
+        self._save_uptime_heartbeat(force=True)
+        logger.info("[Uptime] First start — tracking begins")
+
+    def _save_uptime_heartbeat(self, force: bool = False) -> None:
+        """Update last_heartbeat and write to disk. Called every 60s."""
+        now = time.time()
+        if not force and now - self._last_heartbeat_save < 60:
+            return
+        self._last_heartbeat_save = now
+        self._uptime_data["last_heartbeat"] = now
+        try:
+            self._uptime_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._uptime_file, "w") as f:
+                json.dump(self._uptime_data, f)
+        except OSError as e:
+            logger.warning(f"[Uptime] Failed to save heartbeat: {e}")
+
+    def _get_uptime_info(self) -> dict:
+        """Compute true uptime and return broadcast-ready dict."""
+        now = time.time()
+        if not self._uptime_data:
+            return {
+                "true_uptime_seconds": round(now - self._start_time, 0),
+                "first_start": self._start_time,
+                "total_downtime": 0,
+                "restart_count": 0,
+                "downtimes": [],
+            }
+        first = self._uptime_data.get("first_start", self._start_time)
+        downtimes = self._uptime_data.get("downtimes", [])
+        total_down = sum(d["duration"] for d in downtimes)
+        true_uptime = (now - first) - total_down
+        return {
+            "true_uptime_seconds": round(max(0, true_uptime), 0),
+            "first_start": first,
+            "total_downtime": round(total_down, 0),
+            "restart_count": len(downtimes),
+            "downtimes": downtimes[-20:],
+        }
+
+    # --- Proxy (Zurich VPS) uptime tracking ---
+
+    _PROXY_DOWNTIME_THRESHOLD = 30.0  # seconds — brief reconnections ignored
+
+    def _load_proxy_uptime_data(self) -> None:
+        """Load proxy uptime data from state/proxy_uptime.json."""
+        if self._restart_grace:
+            try:
+                self._proxy_uptime_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._proxy_uptime_data = {"first_connected": 0.0, "last_heartbeat": 0.0, "downtimes": []}
+            logger.info("[Uptime] Proxy tracking reset (intentional restart)")
+            return
+
+        if self._proxy_uptime_file.exists():
+            try:
+                with open(self._proxy_uptime_file) as f:
+                    data = json.load(f)
+                self._proxy_uptime_data = {
+                    "first_connected": data.get("first_connected", 0.0),
+                    "last_heartbeat": data.get("last_heartbeat", 0.0),
+                    "downtimes": data.get("downtimes", [])[-50:],
+                }
+                n = len(self._proxy_uptime_data["downtimes"])
+                logger.info(f"[Uptime] Proxy tracking loaded ({n} past outages)")
+                return
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(f"[Uptime] Failed to load proxy uptime: {e}")
+
+        self._proxy_uptime_data = {"first_connected": 0.0, "last_heartbeat": 0.0, "downtimes": []}
+        logger.info("[Uptime] Proxy tracking initialized")
+
+    def _track_proxy_state(self) -> None:
+        """Track Bitfinex fetcher connection state transitions."""
+        if not self._bitfinex_fetcher:
+            return
+        is_connected = self._bitfinex_fetcher._ws_connected
+        now = time.time()
+
+        if self._proxy_was_connected is None:
+            # First check after startup
+            if is_connected:
+                if self._proxy_uptime_data.get("first_connected", 0.0) == 0.0:
+                    self._proxy_uptime_data["first_connected"] = now
+                self._proxy_was_connected = True
+            # If not connected, stay None — don't start tracking until first connection
+            return
+
+        if self._proxy_was_connected and not is_connected:
+            # Connected → disconnected
+            self._proxy_disconnect_start = now
+            self._proxy_was_connected = False
+            logger.warning("[Uptime] Zurich proxy disconnected")
+
+        elif not self._proxy_was_connected and is_connected:
+            # Disconnected → connected
+            duration = now - self._proxy_disconnect_start
+            if duration >= self._PROXY_DOWNTIME_THRESHOLD:
+                self._proxy_uptime_data.setdefault("downtimes", []).append({
+                    "start": self._proxy_disconnect_start,
+                    "end": now,
+                    "duration": round(duration, 1),
+                })
+                # Keep last 50
+                self._proxy_uptime_data["downtimes"] = self._proxy_uptime_data["downtimes"][-50:]
+                logger.info(
+                    f"[Uptime] Zurich proxy recovered after {duration:.0f}s downtime"
+                )
+            self._proxy_was_connected = True
+
+        # Periodic heartbeat save (~60s)
+        if now - self._proxy_last_heartbeat_save >= 60:
+            self._proxy_last_heartbeat_save = now
+            self._proxy_uptime_data["last_heartbeat"] = now
+            try:
+                self._proxy_uptime_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(self._proxy_uptime_file, "w") as f:
+                    json.dump(self._proxy_uptime_data, f)
+            except OSError as e:
+                logger.warning(f"[Uptime] Failed to save proxy heartbeat: {e}")
+
+    def _get_proxy_uptime_info(self) -> dict:
+        """Return proxy uptime info for dashboard broadcast."""
+        is_connected = (
+            self._bitfinex_fetcher._ws_connected if self._bitfinex_fetcher else False
+        )
+        now = time.time()
+        first = self._proxy_uptime_data.get("first_connected", 0.0)
+        downtimes = self._proxy_uptime_data.get("downtimes", [])
+        total_down = sum(d["duration"] for d in downtimes)
+
+        # Include ongoing downtime if currently disconnected
+        if not is_connected and self._proxy_was_connected is not None and self._proxy_disconnect_start > 0:
+            total_down += now - self._proxy_disconnect_start
+
+        if first > 0:
+            true_uptime = (now - first) - total_down
+        else:
+            true_uptime = 0
+
+        return {
+            "is_connected": is_connected,
+            "first_connected": first,
+            "true_uptime_seconds": round(max(0, true_uptime), 0),
+            "total_downtime": round(total_down, 0),
+            "outage_count": len(downtimes),
+            "downtimes": downtimes[-20:],
+        }
 
     # --- Log export from disk ---
 
@@ -1263,8 +1508,16 @@ class DashboardServer:
 
     def _apply_settings(self, settings: dict) -> None:
         """Apply new settings: restart discovery with updated parameters."""
-        trade_amount = settings.get("trade_amount_usd", self._monitor._trade_amount)
+        trade_amount_pct = float(settings.get("trade_amount_pct", 0.0))
         total_capital = settings.get("total_capital", 1800.0)
+        if trade_amount_pct > 0:
+            trade_amount = round(total_capital * trade_amount_pct, 2)
+            logger.info(
+                f"[Settings] Auto trade amount: ${trade_amount} "
+                f"({trade_amount_pct * 100:.1f}% of ${total_capital})"
+            )
+        else:
+            trade_amount = settings.get("trade_amount_usd", self._monitor._trade_amount)
 
         # Reset optimizer if present — triggers new discovery
         if self._optimizer:
@@ -1559,6 +1812,7 @@ class DashboardServer:
                 "net_pct": round(t.net_pct, 4),
                 "profit_usd": round(t.profit_usd, 6),
                 "trade_amount": round(t.trade_amount, 2),
+                "sim_slippage_pct": round(t.sim_slippage_pct, 4),
             }
             # Include demo fields when present (Phase 2)
             if t.demo_status:
@@ -1596,9 +1850,13 @@ class DashboardServer:
         min_trade_size = min(trade_sizes) if trade_sizes else 0
         max_trade_size = max(trade_sizes) if trade_sizes else 0
 
+        uptime_info = self._get_uptime_info()
+
         return {
             "timestamp": now,
-            "uptime_seconds": round(now - self._start_time, 0),
+            "uptime_seconds": uptime_info["true_uptime_seconds"],
+            "uptime_info": uptime_info,
+            "proxy_uptime_info": self._get_proxy_uptime_info(),
             "connected_exchanges": connected,
             "total_exchanges": len(active_exchanges),
             "portfolio": {
@@ -1637,6 +1895,7 @@ class DashboardServer:
                     "net_pct": round(t.net_pct, 4),
                     "profit_usd": round(t.profit_usd, 6),
                     "trade_amount": round(t.trade_amount, 2),
+                    "sim_slippage_pct": round(t.sim_slippage_pct, 4),
                     **({"demo_buy_price": round(t.demo_buy_price, 6),
                         "demo_sell_price": round(t.demo_sell_price, 6),
                         "demo_profit_usd": round(t.demo_profit_usd, 6),
@@ -1659,6 +1918,8 @@ class DashboardServer:
                 }
                 for tr in self._balance.transfers
             ],
+            "hourly_pnl": self._build_hourly_pnl(),
+            "daily_pnl": self._build_daily_pnl(),
             "settings": self._settings,
             "execution_mode": self._monitor._execution_mode,
             "all_exchanges": ALL_EXCHANGES,
@@ -1690,6 +1951,69 @@ class DashboardServer:
             **(self._fee_manager.to_broadcast_dict() if self._fee_manager else {}),
             **(self._transfer_fee_mgr.to_broadcast_dict() if self._transfer_fee_mgr else {}),
         }
+
+    def _build_hourly_pnl(self) -> list[dict[str, Any]]:
+        """Build hourly P&L data for dashboard charts (last 48 hours)."""
+        from datetime import datetime, timedelta, timezone
+
+        hourly = self._monitor._hourly_pnl
+        # Compute transfer fees per hour from transfers
+        hourly_fees: dict[str, float] = {}
+        for tr in self._balance.transfers:
+            if tr.fee_usd > 0:
+                dt = datetime.fromtimestamp(tr.timestamp, tz=timezone.utc)
+                key = dt.strftime("%Y-%m-%d_%H")
+                hourly_fees[key] = hourly_fees.get(key, 0.0) + tr.fee_usd
+
+        now = datetime.now(timezone.utc)
+        result = []
+        for i in range(48):
+            dt = now - timedelta(hours=47 - i)
+            key = dt.strftime("%Y-%m-%d_%H")
+            bucket = hourly.get(key, {})
+            pnl = bucket.get("pnl", 0.0)
+            trades = bucket.get("trades", 0)
+            fees = hourly_fees.get(key, 0.0)
+            if pnl != 0 or trades > 0 or fees > 0:
+                result.append({
+                    "hour": key,
+                    "pnl": round(pnl, 6),
+                    "fees": round(fees, 6),
+                    "net": round(pnl - fees, 6),
+                    "trades": trades,
+                })
+        return result
+
+    def _build_daily_pnl(self) -> list[dict[str, Any]]:
+        """Build daily P&L data for dashboard charts (last 7 days)."""
+        from datetime import datetime, timedelta, timezone
+
+        daily = self._monitor._daily_pnl
+        # Compute transfer fees per day from transfers
+        daily_fees: dict[str, float] = {}
+        for tr in self._balance.transfers:
+            if tr.fee_usd > 0:
+                dt = datetime.fromtimestamp(tr.timestamp, tz=timezone.utc)
+                key = dt.strftime("%Y-%m-%d")
+                daily_fees[key] = daily_fees.get(key, 0.0) + tr.fee_usd
+
+        now = datetime.now(timezone.utc)
+        result = []
+        for i in range(7):
+            dt = now - timedelta(days=6 - i)
+            key = dt.strftime("%Y-%m-%d")
+            bucket = daily.get(key, {})
+            pnl = bucket.get("pnl", 0.0)
+            trades = bucket.get("trades", 0)
+            fees = daily_fees.get(key, 0.0)
+            result.append({
+                "date": key,
+                "pnl": round(pnl, 6),
+                "fees": round(fees, 6),
+                "net": round(pnl - fees, 6),
+                "trades": trades,
+            })
+        return result
 
     def _build_demo_state(self) -> dict[str, Any]:
         """Build demo comparison state for dashboard broadcast."""

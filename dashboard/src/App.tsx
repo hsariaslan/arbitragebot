@@ -175,8 +175,10 @@ export default function App() {
         <Header
           connected={connected}
           uptimeSeconds={state.uptime_seconds}
+          uptimeInfo={state.uptime_info}
           connectedExchanges={state.connected_exchanges}
           totalExchanges={state.total_exchanges}
+          proxyUptimeInfo={state.proxy_uptime_info}
           portfolio={state.portfolio}
           simulation={state.simulation}
           profitStats={state.profit_stats ?? null}
@@ -201,6 +203,8 @@ export default function App() {
                 feeConfigs={state.fee_configs}
                 transferConfigs={state.transfer_configs}
                 profitStats={state.profit_stats}
+                hourlyPnl={state.hourly_pnl}
+                dailyPnl={state.daily_pnl}
               />
             } />
             <Route path="/rankings/historical" element={
@@ -216,6 +220,8 @@ export default function App() {
                 feeConfigs={state.fee_configs}
                 transferConfigs={state.transfer_configs}
                 profitStats={state.profit_stats}
+                hourlyPnl={state.hourly_pnl}
+                dailyPnl={state.daily_pnl}
                 defaultView="historical"
               />
             } />

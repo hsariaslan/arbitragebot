@@ -1,11 +1,13 @@
 import { NavLink } from 'react-router-dom';
-import type { Portfolio, Simulation, ProfitStats } from '../types';
+import type { Portfolio, Simulation, ProfitStats, UptimeInfo, ProxyUptimeInfo } from '../types';
 
 interface HeaderProps {
   connected: boolean;
   uptimeSeconds: number;
+  uptimeInfo?: UptimeInfo;
   connectedExchanges: number;
   totalExchanges: number;
+  proxyUptimeInfo?: ProxyUptimeInfo;
   portfolio: Portfolio | null;
   simulation: Simulation | null;
   profitStats: ProfitStats | null;
@@ -19,6 +21,21 @@ function formatUptime(seconds: number): string {
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+function formatDateUTC(ts: number): string {
+  const d = new Date(ts * 1000);
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')} UTC`;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
 }
 
 function PnlText({ value, prefix = '$' }: { value: number; prefix?: string }) {
@@ -39,13 +56,16 @@ const mobileNavClass = ({ isActive }: { isActive: boolean }) =>
     isActive ? 'bg-slate-700 text-white' : 'text-slate-500'
   }`;
 
-export default function Header({ connected, uptimeSeconds, connectedExchanges, totalExchanges, portfolio, simulation, profitStats, onLogout }: HeaderProps) {
+export default function Header({ connected, uptimeSeconds, uptimeInfo, connectedExchanges, totalExchanges, proxyUptimeInfo, portfolio, simulation, profitStats, onLogout }: HeaderProps) {
   // Connection state: connected, reconnecting (disconnected but was authed), or disconnected
-  const connectionDot = connected
-    ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]'
-    : 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)] animate-pulse';
-  const connectionText = connected ? 'Connected' : 'Reconnecting...';
-  const connectionColor = connected ? 'text-emerald-400' : 'text-amber-400';
+  const proxyDown = connected && proxyUptimeInfo && !proxyUptimeInfo.is_connected;
+  const connectionDot = !connected
+    ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)] animate-pulse'
+    : proxyDown
+      ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)] animate-pulse'
+      : 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]';
+  const connectionText = !connected ? 'Reconnecting...' : proxyDown ? 'Disconnected (Zurich)' : 'Connected';
+  const connectionColor = !connected ? 'text-amber-400' : proxyDown ? 'text-amber-400' : 'text-emerald-400';
 
   return (
     <>
@@ -62,11 +82,74 @@ export default function Header({ connected, uptimeSeconds, connectedExchanges, t
           </nav>
         </div>
         <div className="flex items-center gap-3 sm:gap-6 text-sm">
-          <span className="text-slate-400 hidden sm:inline">
+          <span className="text-slate-400 hidden sm:inline relative group/ex cursor-default">
             Exchanges: <span className="text-white font-medium">{connectedExchanges}/{totalExchanges}</span>
+            {proxyUptimeInfo && (
+              <div className="absolute left-0 top-full mt-2 w-72 bg-slate-800 border border-slate-600 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/ex:opacity-100 group-hover/ex:visible transition-all duration-150 z-50">
+                <div className="mb-2 flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${proxyUptimeInfo.is_connected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
+                  <span className="text-slate-500">Zurich Proxy:</span>{' '}
+                  <span className={proxyUptimeInfo.is_connected ? 'text-emerald-400' : 'text-amber-400'}>
+                    {proxyUptimeInfo.is_connected ? 'Connected' : 'Disconnected'}
+                  </span>
+                </div>
+                {proxyUptimeInfo.first_connected > 0 && (
+                  <div className="mb-2">
+                    <span className="text-slate-500">Running since:</span>{' '}
+                    <span className="text-white">{formatDateUTC(proxyUptimeInfo.first_connected)}</span>
+                  </div>
+                )}
+                <div className="mb-2">
+                  <span className="text-slate-500">Total downtime:</span>{' '}
+                  {proxyUptimeInfo.total_downtime > 0 ? (
+                    <span className="text-amber-400">{formatDuration(proxyUptimeInfo.total_downtime)} ({proxyUptimeInfo.outage_count} outage{proxyUptimeInfo.outage_count !== 1 ? 's' : ''})</span>
+                  ) : (
+                    <span className="text-emerald-400">None</span>
+                  )}
+                </div>
+                {proxyUptimeInfo.downtimes.length > 0 && (
+                  <div className="border-t border-slate-700 pt-2 mt-2 space-y-1 max-h-40 overflow-y-auto">
+                    <div className="text-slate-500 font-medium mb-1">Outage log:</div>
+                    {[...proxyUptimeInfo.downtimes].reverse().map((d, i) => (
+                      <div key={i} className="flex justify-between">
+                        <span className="text-slate-400">{formatDateUTC(d.start)}</span>
+                        <span className="text-amber-400">{formatDuration(d.duration)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </span>
-          <span className="text-slate-400 hidden sm:inline">
+          <span className="text-slate-400 hidden sm:inline relative group cursor-default">
             Uptime: <span className="text-white font-medium">{formatUptime(uptimeSeconds)}</span>
+            {uptimeInfo && (
+              <div className="absolute right-0 top-full mt-2 w-72 bg-slate-800 border border-slate-600 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 z-50">
+                <div className="mb-2">
+                  <span className="text-slate-500">Running since:</span>{' '}
+                  <span className="text-white">{formatDateUTC(uptimeInfo.first_start)}</span>
+                </div>
+                <div className="mb-2">
+                  <span className="text-slate-500">Total downtime:</span>{' '}
+                  {uptimeInfo.total_downtime > 0 ? (
+                    <span className="text-amber-400">{formatDuration(uptimeInfo.total_downtime)} ({uptimeInfo.restart_count} restart{uptimeInfo.restart_count !== 1 ? 's' : ''})</span>
+                  ) : (
+                    <span className="text-emerald-400">None</span>
+                  )}
+                </div>
+                {uptimeInfo.downtimes.length > 0 && (
+                  <div className="border-t border-slate-700 pt-2 mt-2 space-y-1 max-h-40 overflow-y-auto">
+                    <div className="text-slate-500 font-medium mb-1">Downtime log:</div>
+                    {[...uptimeInfo.downtimes].reverse().map((d, i) => (
+                      <div key={i} className="flex justify-between">
+                        <span className="text-slate-400">{formatDateUTC(d.start)}</span>
+                        <span className="text-amber-400">{formatDuration(d.duration)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </span>
           <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${connectionDot}`} />
