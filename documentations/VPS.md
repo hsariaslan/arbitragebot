@@ -64,9 +64,9 @@ Exchanges blocked from each VPS location (X = blocked, ! = risky):
 | 1 | **Bangkok** | LightNode | $7.70/mo | 1 vCPU, 2 GB RAM, 50 GB NVMe | Ongoing (hourly billing) |
 | 2 | **Tokyo** | Kamatera | $0 (trial) | 2 vCPU, 2 GB RAM, 30 GB NVMe | ~30 days from creation |
 | 3 | **Singapore** | Vultr | $5 credit | Not yet deployed | $5 credit available |
-| 4 | **Zurich** | Oracle Cloud | $0 (always free) | 4 ARM OCPUs, 24 GB RAM | Never (always free tier) |
+| 4 | **Zurich** | Oracle Cloud | $0 (always free) | 1/8 OCPU AMD, 1 GB RAM (E2.1.Micro) | Never (always free tier) |
 
-**Status**: Bangkok VPS active. Tokyo VPS on free trial. Vultr Singapore paid ($5) but not deployed. Oracle Zurich pending account setup.
+**Status**: Bangkok VPS active (production). Oracle Zurich **deployed** (WebSocket proxy for Bitfinex, 0.7ms latency). Tokyo VPS on free trial. Vultr Singapore paid ($5) but not deployed.
 
 ### VPS Provider Notes
 
@@ -88,11 +88,13 @@ Exchanges blocked from each VPS location (X = blocked, ! = risky):
 - Does NOT have Bangkok datacenter (only Tokyo, Osaka, Seoul, Singapore, Mumbai, Bangalore, Delhi in Asia)
 - Cheapest plan: $5/mo (1 vCPU, 1 GB RAM, 25 GB SSD, 1 TB bandwidth)
 
-**Oracle Cloud (Zurich)**:
-- Always Free tier: 2x AMD Micro VMs (1 OCPU, 1 GB each) + 4x ARM A1 Flex (total 4 OCPUs, 24 GB RAM)
-- Only one free account per person (email, phone, credit card checked)
-- Zurich datacenter: <1ms to Bitfinex in Zug (~30km)
-- Note: Account signup has aggressive rate limiting — may need to wait and retry
+**Oracle Cloud (Zurich)** — **DEPLOYED**:
+- Shape: VM.Standard.E2.1.Micro (AMD, 1/8 OCPU, 1 GB RAM, 47 GB boot volume)
+- ARM shapes (A1.Flex) had capacity issues; AMD Micro works fine for WS proxy
+- Runs `proxy/ws_proxy.py` as systemd service on port 9000
+- Measured latency: **0.71ms avg** to api.bitfinex.com (vs ~1,200ms from Bangkok)
+- Port 9000 restricted to Bangkok VPS IP via Oracle Security List + iptables
+- Ubuntu 24.04, Python 3.12
 
 ### Bangkok VPS Provider Comparison
 
@@ -310,14 +312,14 @@ Deploy the monolithic bot to Bangkok. Measure actual latencies and data freshnes
 
 **Immediate goal**: Get 24/7 uptime. Replace running from local PC.
 
-### Phase 2: Add Bitfinex Node — $7.70/mo + free
+### Phase 2: Add Bitfinex Node — $7.70/mo + free (**DEPLOYED**)
 
 | VPS | Location | Provider | Exchanges | Purpose |
 |-----|----------|----------|-----------|---------|
 | 1 | **Bangkok** | LightNode | 8 exchanges + Orchestrator | Main bot |
-| 2 | **Zurich** | Oracle Cloud (free) | Bitfinex (<1ms) | Bitfinex fetcher + executor |
+| 2 | **Zurich** | Oracle Cloud (free) | Bitfinex (<1ms) | WebSocket proxy (`proxy/ws_proxy.py`) |
 
-Set up Oracle Cloud Zurich (always free). Run Bitfinex fetcher there. Requires implementing the relay protocol. Bitfinex connection quality improves dramatically (<1ms vs 250ms).
+**Deployed 2026-03-03.** Uses transparent WebSocket proxy (Option A) instead of remote fetcher. Bangkok's BitfinexFetcher connects to `ws://zurich-ip:9000` which relays to `wss://api-pub.bitfinex.com/ws/2`. Bitfinex data latency: ~200ms total (was ~1,200ms direct).
 
 ### Phase 3: Distribute to Singapore — $12.70/mo + free
 

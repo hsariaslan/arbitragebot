@@ -75,26 +75,15 @@ All well within the 1–10 second opportunity window for typical arbitrage sprea
 
 ### Real Trading Concerns
 
-#### Slippage Risk
+#### Slippage Risk (Implemented)
 
-Wide spreads often correlate with thin order books. A $150 market order eats deeper into the book than a $30 order:
+**Order book depth-based slippage simulation is now active.** All 9 exchange fetchers collect multi-level order book data (up to 5 levels). `slippage.py` walks the book to compute volume-weighted average fill prices. Both scoring (`optimizer.py`) and execution (`monitor.py`) deduct slippage from net profit.
 
-```
-Order book (ask side):
-  $100.00 × 0.5 units ($50)
-  $100.05 × 1.0 units ($100)
-  $100.15 × 2.0 units ($200)
-
-$30 order → fills at $100.00 (no slippage)
-$150 order → fills across $100.00 + $100.05 + partial $100.15 (slippage ~0.07%)
-```
-
-**Mitigation strategies for real trading:**
+**Remaining considerations for real trading:**
 1. Cap maximum net% multiplier at 2.0x or 2.5x (not higher)
-2. Add order book depth check before sizing up — use `bid_qty`/`ask_qty` from WebSocket data
-3. Set absolute max trade size cap (e.g., `trade_amount × 3` regardless of multipliers)
-4. Use limit orders at the detected price instead of market orders for large sizes
-5. Monitor actual slippage in demo mode, adjust multiplier tiers based on real fill data
+2. Set absolute max trade size cap (e.g., `trade_amount × 3` regardless of multipliers)
+3. Use limit orders at the detected price instead of market orders for large sizes
+4. Monitor actual slippage in demo mode vs simulated slippage, calibrate if needed
 
 #### Stale Data Risk
 
@@ -120,10 +109,10 @@ For Gate.io/Bitfinex ticks showing very wide spreads (>0.25%), the spread may be
 
 | Aspect | Simulation | Real Trading |
 |--------|-----------|-------------|
-| Slippage | Not modeled — fills at ticker price | Real order book impact |
+| Slippage | Modeled via order book depth (5 levels) | Real order book impact (may differ from 5-level estimate) |
 | Fill speed | Instant | 10–500ms per leg |
 | Partial fills | Never | Possible on thin books |
-| Net% accuracy | Exact (based on ticker) | May differ due to book depth |
+| Net% accuracy | Good (depth-adjusted) | May still differ due to book changes between detection and fill |
 | Max multiplier | 2.5x (aggressive OK) | Consider 2.0x cap initially |
 | Data freshness | Ignored | Should gate multiplier |
 

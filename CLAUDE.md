@@ -179,7 +179,77 @@ Transfer each coin on its own native chain (e.g., SOL on Solana, XRP on XRP Ledg
 | Ping interval | 20s (auto) | 15s | 18s | 15s | 25s | 18s | 15s | 15s | 15s |
 | Has last_price | Yes | Yes | Yes | No | Yes | Yes | No | Yes (TRADE topic) | Yes |
 | Has volume | Yes | Yes | Yes | No | Yes | No | No | No | Yes |
-| Special | — | — | Delta merging | 30 sub limit | — | REST token first | Per-symbol subscribe | DEPTH+TRADE topics | Array data, 30 sub limit, 2 connections |
+| Order book depth | @depth5@100ms | books5 channel | orderbook.1 | N/A (REST) | books5 channel | level5 topic | spot.order_book_update | — | Array book channel |
+| Special | — | — | Delta merging | 30 sub limit, protobuf | — | REST token first | Per-symbol subscribe | DEPTH+TRADE topics | Array data, 30 sub limit, 2 connections |
+
+## Order Book Depth & Slippage Simulation
+
+All 9 exchange fetchers subscribe to multi-level order book data (up to 5 levels) alongside ticker data. `PriceState` stores `bids` (descending) and `asks` (ascending) as `list[tuple[str, str]]`.
+
+### How It Works
+
+1. **Fetchers** populate `PriceState.bids`/`PriceState.asks` from exchange-specific depth channels (see WebSocket table above)
+2. **`slippage.py`** walks the order book to compute volume-weighted average fill price for a given trade size
+3. **Scoring** (`optimizer.py:_score_tick()`) deducts estimated slippage from `net_pct` — symbols with thin books score lower
+4. **Execution** (`monitor.py:_tick()`) recomputes slippage with actual `trade_size` (after adaptive sizing), deducts from profit
+5. **Trade log** includes `sim_slippage_pct`, `sim_buy_slippage_pct`, `sim_sell_slippage_pct` fields
+
+### Key Functions
+
+| Function | File | Purpose |
+|----------|------|---------|
+| `compute_buy_slippage(asks, trade_size_usd)` | `slippage.py` | Walk ask book upward, return `SlippageResult` |
+| `compute_sell_slippage(bids, trade_size_usd)` | `slippage.py` | Walk bid book downward, return `SlippageResult` |
+
+`SlippageResult` fields: `effective_price`, `slippage_pct`, `levels_consumed`, `total_depth_usd`, `sufficient_depth`.
+
+### Exchange-Specific Depth Sources
+
+| Exchange | Channel | Levels | Update Rate | Notes |
+|----------|---------|--------|-------------|-------|
+| Binance | `@depth5@100ms` | 5 | 100ms | Snapshot per push |
+| OKX | `books5` | 5 | ~100ms | Snapshot per push |
+| Bybit | `orderbook.1` | 1 | ~100ms | Single best level only |
+| MEXC | REST `/api/v3/depth?limit=5` | 5 | 3s poll | No WS depth available, uses async REST polling |
+| Bitget | `books5` | 5 | ~100ms | Snapshot per push |
+| KuCoin | `/spotMarket/level5` | 5 | ~100ms | Uses WS token auth |
+| Gate.io | `spot.order_book_update` | 5 | 100ms | Requires snapshot + delta merging |
+| Pionex | DEPTH topic (limit=5) | 5 | ~100ms | Multi-level bids/asks from DEPTH subscription |
+| Bitfinex | Book channel (array) | 5 | ~100ms | Sorted in-memory, `_BitfinexBookSubFetcher` |
+
+## WebSocket Proxy (Zurich VPS)
+
+Transparent WebSocket proxy on Oracle Cloud free-tier VPS in Zurich for low-latency Bitfinex data. Bitfinex servers are in Zug, Switzerland (~0.7ms from Zurich vs ~1,200ms from Bangkok).
+
+### Architecture
+
+```
+Bangkok (BitfinexFetcher)  ──200ms──>  Zurich (ws_proxy)  ──0.7ms──>  Bitfinex
+                           <──200ms──                     <──0.7ms──
+Total: ~201ms (vs 1,200ms direct)
+```
+
+### Configuration
+
+- `BITFINEX_WS_URL` in `config.py` — env-overridable, defaults to direct Bitfinex URL
+- Bangkok `.env`: `BITFINEX_WS_URL=ws://<ZURICH_IP>:9000`
+- Proxy is stateless — forwards raw WS frames bidirectionally, no message parsing
+- `ping_interval=None` on both sides — Bitfinex uses application-level JSON pings
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `proxy/ws_proxy.py` | Generic WebSocket proxy (~110 lines), reusable for any exchange |
+| `proxy/requirements.txt` | `websockets>=13.0` |
+| `scripts/ws-proxy.service` | systemd service for Zurich VPS |
+
+### Security
+
+- Oracle Cloud Security List restricts port 9000 to Bangkok VPS IP only
+- No TLS on proxy link (IP-restricted); Zurich→Bitfinex remains `wss://`
+- Fallback: revert `BITFINEX_WS_URL` in `.env` to direct URL and restart
+- **Monitoring**: Bangkok tracks proxy health via Bitfinex fetcher connection state. See "Proxy (Zurich VPS) Monitoring" section under Dashboard.
 
 ## Key Technical Requirements
 
@@ -329,6 +399,7 @@ The bot has a capital-aware adaptive trading system controlled by the **Adaptive
 
 Each active symbol gets a **trade multiplier** based on its focus tier (see Strong-Only Trading above). Active symbols always receive non-zero multipliers (1.0× floor for weak tier).
 
+- **Auto-scaling trade amount**: `trade_amount_pct` (default 0 = disabled). When > 0, `trade_amount = total_capital × trade_amount_pct` — auto-scales as capital grows. E.g., 1% of $3,000 = $30; capital grows to $5,000 → auto-updates to $50. Configurable via Settings UI ("Fixed $" / "% of Capital" toggle). When disabled (0), uses manual `trade_amount_usd`.
 - `allocated_trade_size = trade_amount × multiplier × net_pct_multiplier`
 - **Net%-based sizing** (`net_pct_sizing_enabled`, default true): scales trade size by current tick's net profitability. Tiers: <0.03%=0.5×, 0.03–0.08%=1.0×, 0.08–0.15%=1.5×, 0.15–0.25%=2.0×, >0.25%=2.5×. Capped by `net_pct_multiplier_cap` (default 2.5). Fat spreads get bigger trades; thin margins get smaller ones.
 - **Dynamic buffer**: Trade size capped by 95% of available balance when balance < 2× min_trade (small positions), 80% otherwise. Prevents wasting $2-8 on tiny positions.
@@ -397,13 +468,14 @@ All snapshots are exported in the XLSX "Configurations" sheet.
 
 | File | Responsibility |
 |------|---------------|
-| `monitor.py` | `_compute_trade_size()` — per-symbol adaptive sizing; `_tick()` — trade execution with threshold checks, ROI gate, miss streak tracking; `ConfigSnapshot` dataclass |
+| `monitor.py` | `_compute_trade_size()` — per-symbol adaptive sizing; `_tick()` — trade execution with slippage simulation, threshold checks, ROI gate, miss streak tracking; `_record_trade_pnl()` — hourly/daily P&L buckets; `ConfigSnapshot` dataclass |
+| `slippage.py` | `compute_buy_slippage()`, `compute_sell_slippage()` — order book depth-based slippage simulation |
 | `balance.py` | `compute_rebalance_amount()` — adaptive rebalance; transfer worthiness check in `_rebalance_usdt()`/`_rebalance_crypto()` |
 | `optimizer.py` | `_compute_scores()` — focus tiers + trade multipliers; `_complete_discovery()` — strong-only activation + dynamic buy/sell allocation; `_compute_dominant_pairs()` — per-symbol exchange detection; `_evaluate_demotions()` — strong threshold gating; `_track_candidate_transitions()` — strong/very_strong historical tracking; `_is_score_stable()` — candidate trend analysis (cliff drop, declining trend, min observation); `_update_watchlist()` — `[Candidate]` lifecycle logging |
 | `config.py` | `DEFAULT_FEE_CONFIGS`, `DEFAULT_TRANSFER_CONFIGS`, `ADAPTIVE_MODE` |
 | `fee_manager.py` | `FeeManager` — centralized fee computation, token discounts, referral cashbacks, zero-fee pairs, real mode |
 | `transfer_fee_manager.py` | `TransferFeeManager` — per-exchange per-network withdrawal fees (flat/percentage/conditional), preferred network selection |
-| `settings.json` | Runtime settings including `adaptive_mode`, `min_net_profit_pct`, `trade_amount_usd`, `total_capital`, `fee_configs`, `transfer_configs`, `reallocation_cost_horizon`, `demotion_cooldown_multiplier`, `hourly_external_transfer_cap` |
+| `settings.json` | Runtime settings including `adaptive_mode`, `min_net_profit_pct`, `trade_amount_usd`, `trade_amount_pct`, `total_capital`, `fee_configs`, `transfer_configs`, `reallocation_cost_horizon`, `demotion_cooldown_multiplier`, `hourly_external_transfer_cap` |
 
 ## Dashboard
 
@@ -413,10 +485,10 @@ React/TypeScript SPA served by the Python backend via WebSocket. Uses `HashRoute
 
 All pages have their own URL routes (`/#/`, `/#/rankings`, `/#/settings`, `/#/logs`). Sub-tabs also have routes (e.g., `/#/settings/fees`, `/#/logs/auth`, `/#/rankings/historical`). Browser back/forward and refresh work correctly.
 
-- **Dashboard** — Real-time overview: portfolio P&L (sim + demo), trade/transfer stats, demo exchange status, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`) and live Cur Net% column, balance table, price grid, demo portfolio comparison, recent trades/transfers, rotation log. Fully responsive: 2×2 stats grid, horizontal-scroll tables, bottom tab nav on mobile.
+- **Dashboard** — Real-time overview: header with persistent uptime (hover for downtime log), stats bar (portfolio, trades, profit, fees, transfers). Portfolio P&L (sim + demo), trade/transfer stats, demo exchange status, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`) and live Cur Net% column, balance table, price grid, demo portfolio comparison, recent trades/transfers, rotation log. Fully responsive: 2×2 stats grid, horizontal-scroll tables, bottom tab nav on mobile.
 - **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist. Performance charts section (cumulative P&L, hourly P&L, exchange profit contribution) using recharts. Markdown export ("Copy MD") for sharing data with Claude. All tables horizontal-scroll on mobile.
 - **Settings** — Three sub-tabs (routed: `/settings`, `/settings/fees`, `/settings/transfers`). Each setting has a `?` tooltip icon with detailed description (hover on desktop, tap on mobile):
-  - **General**: Configure all parameters: trade amount, capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: "Restart Bot" button clears saved state and starts fresh with configured capital. Form grids stack single-column on mobile.
+  - **General**: Configure all parameters: trade amount (fixed $ or % of capital with auto-scaling), capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: "Restart Bot" button clears saved state and starts fresh with configured capital. Form grids stack single-column on mobile.
   - **Fee Management**: Per-exchange fee configuration — **enable/disable checkbox** per exchange (disabled = excluded from trading/rebalancing, hot-applied), base taker rate, token discount toggle+%, fee model (received/spent/token), mechanism (instant/rebate/tier), referral cashback toggle+%+settlement delay, zero-fee pairs. Shows computed effective rates with formula breakdown. Cashback stats (pending/credited). Real mode banner. Save button with 5s cooldown. Hot-applied without restart.
   - **Transfer Fees**: Per-exchange withdrawal fee configuration — per-network fees (flat/percentage/conditional), preferred network selector (auto=cheapest), enable/disable individual networks. Shows effective fee and cheapest network per exchange. Save button with 5s cooldown. Hot-applied without restart.
 - **Logs** — Unified log viewer with two sub-tabs:
@@ -459,16 +531,42 @@ Full authentication system for the WebSocket dashboard:
 - **Fatal error traceback**: `run.py` logs full `traceback.format_exc()` on fatal errors (not just the exception message), enabling root-cause analysis from systemd journal logs.
 - **Disk export**: `_read_bot_logs_from_disk()` reads rotated + current log files for cross-day export ranges. `_read_auth_logs_from_disk()` reads JSONL files. Both use `asyncio.to_thread()` for non-blocking I/O.
 
+### Uptime Tracking
+
+Persistent uptime that survives VPS crashes and reboots. Stored separately from session state in `state/uptime.json`.
+
+- **True uptime**: `(now - first_start) - sum(downtime_durations)`. Excludes periods when the VPS was down.
+- **Downtime detection**: On startup, compares `now` vs `last_heartbeat` from `state/uptime.json`. Gap > 90s = downtime event recorded with `{start, end, duration}`. Last 50 events kept.
+- **Heartbeat**: `_save_uptime_heartbeat()` writes `last_heartbeat` to `state/uptime.json` every 60s (in the broadcast loop).
+- **Intentional restart resets everything**: "Restart Bot" button deletes `state/uptime.json` before `os.execv()` — next startup begins fresh with no downtime history.
+- **VPS crash/reboot**: No restart marker → `state/uptime.json` exists → gap detected → downtime recorded → uptime continues from original `first_start`.
+- **Header display**: Uptime shown in header (desktop only). Hover tooltip shows: "Running since" (UTC), "Total downtime" with restart count, and scrollable downtime log with timestamps and durations.
+- **All times in UTC**: Consistent with bot logs and performance charts.
+
+### Proxy (Zurich VPS) Monitoring
+
+Tracks Bitfinex fetcher's WebSocket connection state as a proxy for Zurich VPS health. When the Zurich proxy is down, the Bitfinex fetcher disconnects and `connected_exchanges` count drops automatically (e.g., 8/8 → 7/8).
+
+- **Real-time state tracking**: `_track_proxy_state()` runs every broadcast cycle (~1s). Detects connected→disconnected and disconnected→connected transitions.
+- **Downtime threshold**: 30s. Brief reconnections (< 30s) are filtered as noise.
+- **Persistence**: `state/proxy_uptime.json` stores `first_connected`, `last_heartbeat`, and up to 50 downtime events. Heartbeat saved every 60s.
+- **Header display**: "Exchanges: X/Y" has a hover tooltip showing: Zurich Proxy status (green/amber dot), "Running since" (UTC), "Total downtime" with outage count, and scrollable outage log.
+- **Connection indicator**: When Zurich proxy is down but Bangkok is up, header shows "Disconnected (Zurich)" with amber pulsing dot instead of "Connected".
+- **Intentional restart**: "Restart Bot" deletes `state/proxy_uptime.json` (fresh session, same as Bangkok uptime).
+- **Startup behavior**: Tracking begins after the Bitfinex fetcher first connects. No downtime inferred during Bangkok startup delay.
+
 ### State Persistence
 
 Session state survives restarts (including deploys via `systemctl restart`). `StateManager` in `state_manager.py` coordinates save/load.
 
 **What's persisted:**
 - **BalanceTracker**: USDT/crypto balances, transfers, fees, initialization state
-- **ArbitrageMonitor**: Trade history, config snapshots, tick count, session statistics
+- **ArbitrageMonitor**: Trade history, config snapshots, tick count, session statistics, hourly/daily P&L buckets
 - **SymbolOptimizer**: Active symbols, rotations, historical stats, discovery state, dominant pairs
 - **DemoPortfolioFetcher**: Baseline snapshots per exchange (first-fetch balances for delta computation)
 - **FeeManager**: Pending referral cashbacks and total credited cashback amount
+- **Uptime tracking**: First start timestamp, last heartbeat, downtime events — persisted to `state/uptime.json` (separate from `session.json`, deleted explicitly by restart handler)
+- **Proxy uptime tracking**: Zurich VPS connection state, first connected timestamp, outage events — persisted to `state/proxy_uptime.json` (deleted on restart)
 
 **How it works:**
 - Each component implements `to_state_dict()` / `from_state_dict()` for JSON serialization
@@ -478,11 +576,11 @@ Session state survives restarts (including deploys via `systemctl restart`). `St
 - State stored in `state/session.json` (gitignored)
 - `run()` methods guard timestamps (`_start_time`, `_discovery_start`) to avoid overwriting restored values
 
-**Restart button:** Settings → Danger Zone → "Restart Bot" clears saved state and restarts the process via `os.execv()`. Starts fresh with configured capital. Works both locally and under systemd. On restart: writes `state/restart_marker` file, client receives `restart_ack` → preserves auth state and shows stale data with yellow "Reconnecting..." indicator in header, auto-reconnects in ~2-5s without re-login. Email notifications suppressed during 30s grace period after restart.
+**Restart button:** Settings → Danger Zone → "Restart Bot" clears saved state, deletes `state/uptime.json` (resets uptime and downtime history), and restarts the process via `os.execv()`. Starts fresh with configured capital. Works both locally and under systemd. On restart: writes `state/restart_marker` file, client receives `restart_ack` → preserves auth state and shows stale data with yellow "Reconnecting..." indicator in header, auto-reconnects in ~2-5s without re-login. Email notifications suppressed during 30s grace period after restart.
 
 ### XLSX Export
 
-Click "Export XLSX" on the Rankings page. 18 sheets: Summary, Rolling Rankings, Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange (Rolling/Historical), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History, Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations, Fee Configuration, Transfer Configuration, Discrepancies.
+Click "Export XLSX" on the Rankings page. 21 sheets: Summary (with lifecycle funnel), Rolling Rankings (with Focus Tier/Dominant Buyers/Sellers/Cur Net%), Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange Rolling (with Buy%/Sell%), Exchange Historical (with Buy%/Sell%), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History (with Sim Slippage %), Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations, Fee Configuration, Transfer Configuration, Discrepancies, Hourly P&L, Daily P&L, Exchange Profit.
 
 ### Markdown Export
 
@@ -495,6 +593,7 @@ Click "Copy MD" on the Rankings page to copy markdown tables to clipboard (for s
 | `dashboard/src/App.tsx` | Main layout, HashRouter routing, WebSocket state, IP-denied priority gate, restart reconnection |
 | `dashboard/src/types.ts` | All TypeScript interfaces (Trade, SymbolRanking, AdaptiveConfig, ConfigSnapshot, AuthLogEntry, BotLogEntry, DemoComparisonState, etc.) |
 | `dashboard/src/hooks/useWebSocket.ts` | WebSocket connection, auth flow, state management, restart_ack handling, wsInitialized gate, export callbacks |
+| `dashboard/src/components/Header.tsx` | Header with nav tabs, uptime display (hover tooltip with downtime log), exchanges count (hover tooltip with Zurich proxy status/outage log), connection status ("Disconnected (Zurich)" when proxy down), stats bar, logout |
 | `dashboard/src/components/LoginPage.tsx` | Login form with reCAPTCHA integration |
 | `dashboard/src/components/LogsPage.tsx` | Unified Logs page container with Bot Logs / Auth Logs sub-tabs |
 | `dashboard/src/components/BotLogsTab.tsx` | Terminal-style real-time bot log viewer with filters and auto-scroll |
@@ -502,15 +601,15 @@ Click "Copy MD" on the Rankings page to copy markdown tables to clipboard (for s
 | `dashboard/src/components/ExportLogsModal.tsx` | Reusable export modal with time presets, custom UTC picker, filter toggle |
 | `dashboard/src/components/SymbolRankings.tsx` | Main page ranking card with Cur Net% column |
 | `dashboard/src/components/RankingPage.tsx` | Full ranking analysis page with performance charts and markdown export |
-| `dashboard/src/components/PerformanceCharts.tsx` | Recharts: cumulative P&L, hourly P&L, exchange profit contribution |
+| `dashboard/src/components/PerformanceCharts.tsx` | Recharts: cumulative P&L, hourly P&L (48h, persisted), daily P&L (7d, persisted), exchange profit contribution |
 | `dashboard/src/components/Tooltip.tsx` | Reusable `?` icon tooltip (hover/tap) for settings descriptions |
 | `dashboard/src/components/DemoComparison.tsx` | Per-exchange demo vs sim comparison cards with discrepancy log |
 | `dashboard/src/components/SettingsPage.tsx` | Settings form with General/Fee Management/Transfer Fees sub-tabs, adaptive mode toggle, IP whitelist, restart button |
 | `dashboard/src/components/FeeManagementTab.tsx` | Per-exchange fee configuration UI — discounts, referral cashback, zero-fee pairs |
 | `dashboard/src/components/TransferFeeManagementTab.tsx` | Per-exchange transfer fee configuration UI — per-network fees, preferred network, enable/disable |
-| `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 18 sheets |
+| `dashboard/src/utils/exportXlsx.ts` | XLSX export with all 21 sheets |
 | `dashboard/src/utils/exportMarkdown.ts` | Markdown table export for clipboard (rankings, trades, transfers) |
-| `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings, log export from disk, restart handler |
+| `dashboard_server.py` | Python WebSocket server, auth system, builds state, handles settings, log export from disk, restart handler, uptime tracking (`_load_uptime_data`, `_save_uptime_heartbeat`, `_get_uptime_info`), proxy monitoring (`_load_proxy_uptime_data`, `_track_proxy_state`, `_get_proxy_uptime_info`) |
 | `demo_fetcher.py` | Demo/testnet portfolio fetcher: REST API clients for Binance/OKX/Bybit, baseline snapshots, discrepancy detection |
 | `state_manager.py` | Session state persistence: atomic save/load, periodic saves, clear for fresh restart |
 | `email_notifier.py` | Gmail SMTP email notifications (login alerts, IP block alerts) |
@@ -631,6 +730,10 @@ Monitor._tick() detects opportunity
 
 `success`, `order_id`, `client_order_id`, `exchange`, `symbol`, `side`, `requested_qty`, `filled_qty`, `requested_price`, `actual_avg_price`, `actual_fee`, `fee_rate`, `fee_currency`, `is_maker`, `latency_ms`, `error`, `raw_response`, `timestamp`. Computed properties: `fill_ratio`, `is_partial`, `slippage_pct`.
 
+### SimulatedTrade Slippage Fields
+
+`sim_slippage_pct` (total buy+sell), `sim_buy_slippage_pct`, `sim_sell_slippage_pct` — computed from order book depth at actual trade size.
+
 ### SimulatedTrade Demo Fields
 
 `demo_buy_price`, `demo_sell_price`, `demo_buy_qty`, `demo_sell_qty`, `demo_profit_usd`, `demo_latency_ms`, `demo_slippage_pct`, `demo_status` (filled/partial/rejected/one_legged/unknown).
@@ -670,7 +773,7 @@ In demo mode, external USDT transfers use `InTransitFund` with estimated network
 
 | Aspect | Simulation | Demo Reality |
 |--------|-----------|-------------|
-| Fill price | Assumes ticker price | May differ (slippage) |
+| Fill price | Order book depth slippage simulation | May differ (actual slippage) |
 | Fill time | Instant | 10-500ms latency |
 | Partial fills | Never | Can happen on thin orderbooks |
 | Rate limits | Not modeled | Real API throttling |
@@ -683,8 +786,8 @@ In demo mode, external USDT transfers use `InTransitFund` with estimated network
 
 | Phase | Setup | Cost |
 |-------|-------|------|
-| Current | LightNode Bangkok (monolithic, all 9 exchanges) | $7.70/mo |
-| Phase 2 | + Oracle Zurich (free, Bitfinex <1ms) | $7.70/mo |
+| Current | LightNode Bangkok + Oracle Zurich (Bitfinex proxy) | $7.70/mo |
+| Phase 2 | (deployed — Zurich WS proxy live) | $7.70/mo |
 | Phase 3 | + Vultr Singapore (OKX/Bybit/Bitget/KuCoin/Gate.io) | $12.70/mo |
 | Phase 4 | + Tokyo VPS (Binance <1ms, Pionex) | ~$20/mo |
 
@@ -739,6 +842,15 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 - **OS**: Ubuntu 22.04
 - **Purpose**: Production monolithic deployment — all 9 exchanges from single VPS. MEXC accessible (Thailand not geo-blocked). Auto-deploy via GitHub Actions on push to master.
 
+### Current: Oracle Zurich (Bitfinex Proxy)
+
+- **Provider**: Oracle Cloud — Free tier (1/8 OCPU AMD, 1 GB RAM, 47 GB boot volume)
+- **Location**: Zurich, Switzerland
+- **OS**: Ubuntu 24.04 (Python 3.12)
+- **Shape**: VM.Standard.E2.1.Micro (AMD)
+- **Purpose**: WebSocket proxy for Bitfinex — 0.7ms to Bitfinex (vs 1,200ms from Bangkok). Runs `proxy/ws_proxy.py` as systemd service on port 9000.
+- **Network**: Port 9000 restricted to Bangkok VPS IP via Oracle Security List + iptables.
+
 ### Exchange Server Locations & Latency from Bangkok
 
 | Exchange | Server Location | Cloud | Latency from Bangkok |
@@ -751,7 +863,7 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 | Gate.io | Singapore | AWS ap-southeast-1 | ~161ms |
 | MEXC | Singapore | AWS ap-southeast-1 | ~25ms |
 | Pionex | Virginia, USA (likely) | AWS us-east-1 (via Cloudflare) | ~5.8s (slow) |
-| Bitfinex | Zug, Switzerland | Bare-metal (Market Synergy) | ~1.2s |
+| Bitfinex | Zug, Switzerland | Bare-metal (Market Synergy) | ~200ms (via Zurich proxy, was ~1.2s direct) |
 
 ### Pionex Geo-Restrictions
 
@@ -779,9 +891,9 @@ Bangkok VPS: MEXC fully accessible from Thailand. No geo-restrictions.
 | VPS 1 | Bangkok | LightNode | MEXC + **Orchestrator** | $7.70 |
 | VPS 2 | Singapore | Vultr | OKX, Bybit, Bitget, KuCoin, Gate.io | $5.00 |
 | VPS 3 | Tokyo | TBD | Binance (<1ms), Pionex | ~$7.50 |
-| VPS 4 | Zurich | Oracle (free) | Bitfinex (<1ms) | $0 |
+| VPS 4 | Zurich | Oracle (free) | Bitfinex WS proxy (<1ms) | $0 |
 
-Bangkok is the orchestrator (all 9 exchanges accessible, MEXC requires Thailand). Bitfinex at 0% fees benefits from dedicated low-latency VPS in Zurich (<1ms vs ~1.2s from Bangkok).
+Bangkok is the orchestrator (all 9 exchanges accessible, MEXC requires Thailand). VPS 4 (Zurich) is **deployed** — runs WebSocket proxy for Bitfinex data (0.7ms to Bitfinex, ~200ms total via Bangkok).
 
 See `documentations/VPS.md` for full latency matrix, geo-restriction matrix, and 4 VPS configuration options (2-5 VPS).
 
@@ -812,6 +924,7 @@ Detailed reference documents in `documentations/`:
 | `documentations/VPS.md` | VPS deployment strategy: latency matrix (9 exchanges × 5 locations), geo-restriction matrix, 4 VPS options (A-D), inter-VPS communication, orchestrator architecture, phased deployment plan |
 | `documentations/BOT_DECISION_MAKING.md` | Complete decision reference: fee computation (scoring vs taker), discovery, scoring, focus tiers, pair selection, threshold, trade sizing, execution, dominant pairs, capital allocation, rebalancing (6 gates), symbol lifecycle, net profit awareness, flow diagrams |
 | `documentations/FUTURE_PLANS.md` | Net%-based dynamic trade sizing design: multiplier tiers, distributed VPS latency analysis, slippage/stale data risks, simulation vs real trading considerations |
+| `documentations/SESSIONS.md` | Session history & analysis: per-session performance metrics, exchange pair breakdowns, pattern tracking, decision log |
 
 ## Technology Stack
 

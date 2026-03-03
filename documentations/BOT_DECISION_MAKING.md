@@ -240,7 +240,7 @@ score = avg_profitable_net × frequency
 Where:
 - `avg_profitable_net` = average `best_net_pct` across only profitable ticks (net > 0)
 - `frequency` = profitable_ticks / total_ticks (0.0 to 1.0)
-- `best_net_pct` in each tick = `spread_pct - (scoring_fee_buy + scoring_fee_sell) × 100`
+- `best_net_pct` in each tick = `spread_pct - (scoring_fee_buy + scoring_fee_sell) × 100 - slippage_pct`
 
 **Note**: Because scoring uses `get_scoring_fee()`, symbols that trade on exchanges with fast cashback (Bitget instant) will have higher `best_net_pct` in their ticks, leading to higher scores.
 
@@ -317,12 +317,17 @@ For each symbol with ≥ 2 exchanges reporting prices:
         2. Compute spread:
            spread_pct = (bid_sell - ask_buy) / ask_buy × 100
 
-        3. Compute scoring net (for pair SELECTION):
-           scoring_net = spread_pct - (scoring_fee_buy + scoring_fee_sell) × 100
+        3. Compute slippage estimate (from order book depth):
+           buy_slip = compute_buy_slippage(asks, trade_amount)
+           sell_slip = compute_sell_slippage(bids, trade_amount)
+           slippage_pct = buy_slip.slippage_pct + sell_slip.slippage_pct
 
-        4. Compute taker net (for profit CALCULATION):
+        4. Compute scoring net (for pair SELECTION):
+           scoring_net = spread_pct - (scoring_fee_buy + scoring_fee_sell) × 100 - slippage_pct
+
+        5. Compute taker net (for profit CALCULATION):
            fee_pct = (taker_fee_buy + taker_fee_sell) × 100
-           net_pct = spread_pct - fee_pct
+           net_pct = spread_pct - fee_pct - slippage_pct
            profit_usd = trade_amount × (net_pct / 100)
 
         5. Pick best pair by scoring_net:
@@ -439,13 +444,27 @@ sell_cashback = fee_manager.record_referral_cashback(sell_ex, symbol, trade_size
 
 Creates `PendingCashback` entries that will be credited after settlement delay.
 
-### 9.4 SimulatedTrade Record
+### 9.4 Slippage Recomputation at Actual Trade Size
+
+```python
+# Recompute slippage with actual trade_size (may differ from initial estimate)
+buy_slip = compute_buy_slippage(asks, trade_size)
+sell_slip = compute_sell_slippage(bids, trade_size)
+actual_slippage = buy_slip.slippage_pct + sell_slip.slippage_pct
+net_adjusted = spread - fee - actual_slippage
+actual_profit = trade_size × (net_adjusted / 100)
+```
+
+### 9.5 SimulatedTrade Record
 
 ```python
 SimulatedTrade(
-    profit_usd = trade_size × (net_pct / 100),  # taker-based net, not scoring-based
+    profit_usd = trade_size × (net_adjusted / 100),  # taker + slippage adjusted
     fee_pct = (taker_fee_buy + taker_fee_sell) × 100,
-    net_pct = spread_pct - fee_pct,
+    net_pct = spread_pct - fee_pct - actual_slippage,
+    sim_slippage_pct = actual_slippage,
+    sim_buy_slippage_pct = buy_slip.slippage_pct,
+    sim_sell_slippage_pct = sell_slip.slippage_pct,
     # + rounding metadata, data age, exchange info
 )
 ```
