@@ -1,0 +1,17 @@
+[Unit]
+Description=CoirnaBot WebSocket Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ws-proxy
+ExecStart=/home/ubuntu/ws-proxy/.venv/bin/python ws_proxy.py --target wss://api-pub.bitfinex.com/ws/2 --port 9000
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
