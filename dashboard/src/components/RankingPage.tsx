@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import type { ConfigSnapshot, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, OptimizerState, ProfitStats, WatchlistEntry, Portfolio, Simulation, Trade, Transfer } from '../types';
+import type { ConfigSnapshot, DailyPnlEntry, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, HourlyPnlEntry, OptimizerState, ProfitStats, WatchlistEntry, Portfolio, Simulation, Trade, Transfer } from '../types';
 import { exportXlsx } from '../utils/exportXlsx';
 import { exportRankingsMarkdown } from '../utils/exportMarkdown';
 import PerformanceCharts from './PerformanceCharts';
@@ -17,6 +17,8 @@ interface RankingPageProps {
   feeConfigs?: Record<string, ExchangeFeeConfig>;
   transferConfigs?: Record<string, ExchangeTransferConfig>;
   profitStats?: ProfitStats | null;
+  hourlyPnl?: HourlyPnlEntry[];
+  dailyPnl?: DailyPnlEntry[];
   defaultView?: 'rolling' | 'historical';
 }
 
@@ -827,7 +829,7 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
 // Main Component
 // ══════════════════════════════════════════════════════════════════════════════
 
-export default function RankingPage({ optimizer, tickCount, portfolio, simulation, allTrades, allTransfers, allConfigHistory, demoDiscrepancies, feeConfigs, transferConfigs, profitStats, defaultView }: RankingPageProps) {
+export default function RankingPage({ optimizer, tickCount, portfolio, simulation, allTrades, allTransfers, allConfigHistory, demoDiscrepancies, feeConfigs, transferConfigs, profitStats, hourlyPnl, dailyPnl, defaultView }: RankingPageProps) {
   const location = useLocation();
   const view: 'rolling' | 'historical' = defaultView || (location.pathname.endsWith('/historical') ? 'historical' : 'rolling');
   const windowMinutes = Math.round(optimizer.scoring_window / 60);
@@ -855,7 +857,7 @@ export default function RankingPage({ optimizer, tickCount, portfolio, simulatio
         </div>
         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
           <button
-            onClick={() => exportXlsx(optimizer, portfolio ?? null, simulation ?? null, allTrades ?? [], allTransfers ?? [], allConfigHistory ?? [], demoDiscrepancies ?? [], feeConfigs, transferConfigs, profitStats)}
+            onClick={() => exportXlsx(optimizer, portfolio ?? null, simulation ?? null, allTrades ?? [], allTransfers ?? [], allConfigHistory ?? [], demoDiscrepancies ?? [], feeConfigs, transferConfigs, profitStats, hourlyPnl, dailyPnl)}
             className="px-4 py-1.5 rounded-lg text-sm font-medium bg-slate-700 text-slate-300 hover:bg-slate-600 transition-colors"
           >
             Export XLSX
@@ -892,8 +894,8 @@ export default function RankingPage({ optimizer, tickCount, portfolio, simulatio
       </div>
 
       {/* Performance Charts */}
-      {(allTrades?.length ?? 0) > 0 && (
-        <PerformanceCharts trades={allTrades ?? []} transfers={allTransfers ?? []} />
+      {((allTrades?.length ?? 0) > 0 || (hourlyPnl?.length ?? 0) > 0) && (
+        <PerformanceCharts trades={allTrades ?? []} transfers={allTransfers ?? []} hourlyPnl={hourlyPnl ?? []} dailyPnl={dailyPnl ?? []} />
       )}
 
       {view === 'rolling' ? (

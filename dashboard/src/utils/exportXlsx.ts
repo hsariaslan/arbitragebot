@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import type { ConfigSnapshot, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, OptimizerState, Portfolio, ProfitStats, Simulation, Trade, Transfer } from '../types';
+import type { ConfigSnapshot, DailyPnlEntry, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, HourlyPnlEntry, OptimizerState, Portfolio, ProfitStats, Simulation, Trade, Transfer } from '../types';
 
 const tier1 = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'ADAUSDT'];
 const tier2 = ['AVAXUSDT', 'LINKUSDT', 'POLUSDT', 'DOTUSDT', 'NEARUSDT', 'SUIUSDT', 'APTUSDT', 'TRXUSDT'];
@@ -17,10 +17,22 @@ export function exportXlsx(
   feeConfigs?: Record<string, ExchangeFeeConfig>,
   transferConfigs?: Record<string, ExchangeTransferConfig>,
   profitStats?: ProfitStats | null,
+  hourlyPnl?: HourlyPnlEntry[],
+  dailyPnl?: DailyPnlEntry[],
 ) {
   const wb = XLSX.utils.book_new();
   const now = new Date();
   const sessionDuration = optimizer.session_start ? (Date.now() / 1000 - optimizer.session_start) : 0;
+
+  // -- Lifecycle funnel stats (for Summary) --
+  const hist = optimizer.historical_rankings || [];
+  const totalSymbols = hist.length;
+  const totalCandidates = hist.filter(h => h.times_became_candidate > 0).length;
+  const totalWatchlisted = hist.filter(h => h.times_entered_watchlist > 0).length;
+  const totalConfirmed = hist.filter(h => h.times_confirmed > 0).length;
+  const totalActivated = hist.filter(h => h.times_activated > 0).length;
+  const totalStrong = hist.filter(h => h.times_became_strong > 0).length;
+  const totalVeryStrong = hist.filter(h => h.times_became_very_strong > 0).length;
 
   // 1. Summary sheet
   const summaryData = [
@@ -56,6 +68,16 @@ export function exportXlsx(
     ['Pending Cashback $', profitStats?.pending_cashback ?? ''],
     ['Net Trading P&L $', portfolio && profitStats ? (portfolio.trading_pnl - portfolio.transfer_fees + (profitStats.credited_cashback ?? 0)) : (portfolio ? (portfolio.trading_pnl - portfolio.transfer_fees) : '')],
     ['Fee/Profit Ratio', portfolio && portfolio.trading_pnl > 0 ? (portfolio.transfer_fees / portfolio.trading_pnl * 100).toFixed(1) + '%' : ''],
+    ['Net $/hr', profitStats?.session_hourly_rate ?? ''],
+    [],
+    ['Lifecycle Funnel'],
+    ['Total Symbols', totalSymbols],
+    ['Became Candidate', totalCandidates],
+    ['Watchlisted', totalWatchlisted],
+    ['Confirmed', totalConfirmed],
+    ['Activated', totalActivated],
+    ['Became Strong', totalStrong],
+    ['Became Very Strong', totalVeryStrong],
   ];
   const wsSummary = XLSX.utils.aoa_to_sheet(summaryData);
   XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
@@ -76,6 +98,10 @@ export function exportXlsx(
       'Est $/hr': r.est_hourly_profit,
       'Trade Mult': r.trade_multiplier,
       'Allocated Trade $': r.allocated_trade_size,
+      'Focus Tier': r.focus_tier ?? '',
+      'Dominant Buyers': r.dominant_buyers?.join(', ') ?? '',
+      'Dominant Sellers': r.dominant_sellers?.join(', ') ?? '',
+      'Cur Net%': r.current_net_pct ?? '',
       Active: r.is_active ? 'YES' : '',
     }));
     const wsRolling = XLSX.utils.json_to_sheet(rollingRows);
@@ -127,6 +153,8 @@ export function exportXlsx(
       'As Seller': e.as_seller,
       'Total Involvement': e.total_involvement,
       'Profit Sum': e.profit_sum,
+      'Buy %': e.total_involvement > 0 ? Math.round(e.as_buyer / e.total_involvement * 100) : 0,
+      'Sell %': e.total_involvement > 0 ? Math.round(e.as_seller / e.total_involvement * 100) : 0,
     }));
     const wsEx = XLSX.utils.json_to_sheet(exRows);
     XLSX.utils.book_append_sheet(wb, wsEx, 'Exchange (Rolling)');
@@ -134,13 +162,18 @@ export function exportXlsx(
 
   // 5. Exchange Rankings (Historical)
   if (optimizer.historical_exchange_rankings?.length > 0) {
-    const histExRows = optimizer.historical_exchange_rankings.map(e => ({
-      Exchange: e.exchange,
-      'Total Buy Ticks': e.total_buy_ticks,
-      'Total Sell Ticks': e.total_sell_ticks,
-      'Total Profit Sum': e.total_profit_sum,
-      'Total Involvement': e.total_involvement,
-    }));
+    const histExRows = optimizer.historical_exchange_rankings.map(e => {
+      const total = e.total_buy_ticks + e.total_sell_ticks;
+      return {
+        Exchange: e.exchange,
+        'Total Buy Ticks': e.total_buy_ticks,
+        'Total Sell Ticks': e.total_sell_ticks,
+        'Total Profit Sum': e.total_profit_sum,
+        'Total Involvement': e.total_involvement,
+        'Buy %': total > 0 ? Math.round(e.total_buy_ticks / total * 100) : 0,
+        'Sell %': total > 0 ? Math.round(e.total_sell_ticks / total * 100) : 0,
+      };
+    });
     const wsHistEx = XLSX.utils.json_to_sheet(histExRows);
     XLSX.utils.book_append_sheet(wb, wsHistEx, 'Exchange (Historical)');
   }
@@ -221,6 +254,7 @@ export function exportXlsx(
       'Net%': t.net_pct,
       'Profit $': t.profit_usd,
       'Trade Amount $': t.trade_amount,
+      'Sim Slippage %': t.sim_slippage_pct ?? '',
       ...(hasDemoTrades ? {
         'Demo Buy $': t.demo_buy_price ?? '',
         'Demo Sell $': t.demo_sell_price ?? '',
@@ -413,6 +447,62 @@ export function exportXlsx(
     }));
     const wsDisc = XLSX.utils.json_to_sheet(discRows);
     XLSX.utils.book_append_sheet(wb, wsDisc, 'Discrepancies');
+  }
+
+  // 17. Hourly P&L (persisted chart data)
+  if (hourlyPnl && hourlyPnl.length > 0) {
+    const hourlyRows = hourlyPnl.map(h => ({
+      Hour: h.hour.replace('_', ' ') + ':00 UTC',
+      'Trading P&L $': h.pnl,
+      'Transfer Fees $': h.fees,
+      'Net P&L $': h.net,
+      Trades: h.trades,
+    }));
+    const wsHourly = XLSX.utils.json_to_sheet(hourlyRows);
+    XLSX.utils.book_append_sheet(wb, wsHourly, 'Hourly P&L');
+  }
+
+  // 18. Daily P&L (persisted chart data)
+  if (dailyPnl && dailyPnl.length > 0) {
+    const dailyRows = dailyPnl.map(d => ({
+      Date: d.date,
+      'Trading P&L $': d.pnl,
+      'Transfer Fees $': d.fees,
+      'Net P&L $': d.net,
+      Trades: d.trades,
+    }));
+    const wsDaily = XLSX.utils.json_to_sheet(dailyRows);
+    XLSX.utils.book_append_sheet(wb, wsDaily, 'Daily P&L');
+  }
+
+  // 19. Exchange Profit Contribution (computed from trades)
+  if (allTrades.length > 0) {
+    const profits = new Map<string, { buy: number; sell: number; total: number; trades: number }>();
+    for (const t of allTrades) {
+      const half = t.profit_usd / 2;
+      const buyEntry = profits.get(t.buy_exchange) ?? { buy: 0, sell: 0, total: 0, trades: 0 };
+      buyEntry.buy += half;
+      buyEntry.total += half;
+      buyEntry.trades++;
+      profits.set(t.buy_exchange, buyEntry);
+
+      const sellEntry = profits.get(t.sell_exchange) ?? { buy: 0, sell: 0, total: 0, trades: 0 };
+      sellEntry.sell += half;
+      sellEntry.total += half;
+      sellEntry.trades++;
+      profits.set(t.sell_exchange, sellEntry);
+    }
+    const exProfitRows = [...profits.entries()]
+      .sort((a, b) => b[1].total - a[1].total)
+      .map(([exchange, data]) => ({
+        Exchange: exchange,
+        'As Buyer Profit $': Number(data.buy.toFixed(4)),
+        'As Seller Profit $': Number(data.sell.toFixed(4)),
+        'Total Profit $': Number(data.total.toFixed(4)),
+        'Trade Involvements': data.trades,
+      }));
+    const wsExProfit = XLSX.utils.json_to_sheet(exProfitRows);
+    XLSX.utils.book_append_sheet(wb, wsExProfit, 'Exchange Profit');
   }
 
   // Generate and download
