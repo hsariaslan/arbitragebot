@@ -51,6 +51,11 @@ class PriceState:
     volume: str = ""
     updated_at: float = 0.0
     received_at: float = 0.0  # Local time when data was received (for staleness detection)
+    # Multi-level order book (up to 5 levels)
+    # bids: [(price_str, qty_str), ...] descending by price
+    # asks: [(price_str, qty_str), ...] ascending by price
+    bids: list[tuple[str, str]] | None = None
+    asks: list[tuple[str, str]] | None = None
 
 
 class BaseFetcher(abc.ABC):

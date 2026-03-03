@@ -52,13 +52,14 @@ class OKXFetcher(BaseFetcher):
         return inst_id.replace("-", "")
 
     async def _on_connect(self, ws: Any) -> None:
-        """Send subscription for all symbol tickers after connecting."""
-        args = [
-            {"channel": "tickers", "instId": self._to_okx_symbol(s)}
-            for s in self.symbols
-        ]
+        """Send subscription for tickers + books5 after connecting."""
+        args = []
+        for s in self.symbols:
+            inst = self._to_okx_symbol(s)
+            args.append({"channel": "tickers", "instId": inst})
+            args.append({"channel": "books5", "instId": inst})
         await ws.send(json.dumps({"op": "subscribe", "args": args}))
-        logger.info(f"[{self.exchange_name}] Subscribed to {len(self.symbols)} tickers")
+        logger.info(f"[{self.exchange_name}] Subscribed to {len(self.symbols)} tickers + books5")
 
     def _ws_connect_kwargs(self) -> dict[str, Any]:
         """Disable library-level ping; OKX uses application-level 'ping' string."""
@@ -80,29 +81,65 @@ class OKXFetcher(BaseFetcher):
 
     def _parse_message(self, raw_message: dict[str, Any]) -> tuple[str, PriceState] | None:
         """
-        Parse an OKX tickers channel push message.
+        Parse an OKX tickers or books5 channel push message.
 
-        Format: {"arg": {"channel": "tickers", "instId": "BTC-USDT"},
-                 "data": [{"bidPx": ..., "askPx": ..., ...}]}
-        Returns None for subscription confirmations or other non-data messages.
+        Tickers: {"arg": {"channel": "tickers", "instId": "BTC-USDT"},
+                  "data": [{"bidPx": ..., "askPx": ..., ...}]}
+        Books5:  {"arg": {"channel": "books5", "instId": "BTC-USDT"},
+                  "data": [{"bids": [["price","qty","0","N"], ...],
+                            "asks": [["price","qty","0","N"], ...], "ts": "..."}]}
         """
         data_list = raw_message.get("data")
         if not data_list:
             return None
 
         arg = raw_message.get("arg", {})
-        if arg.get("channel") != "tickers":
+        channel = arg.get("channel", "")
+        inst_id = arg.get("instId", "")
+        symbol = self._from_okx_symbol(inst_id)
+
+        if channel == "books5":
+            data = data_list[0]
+            existing = self._state.get(symbol, PriceState())
+
+            bids_raw = data.get("bids", [])
+            asks_raw = data.get("asks", [])
+
+            # OKX books5 format: [price, qty, deprecated, numOrders]
+            depth_bids = [(b[0], b[1]) for b in bids_raw if len(b) >= 2] or None
+            depth_asks = [(a[0], a[1]) for a in asks_raw if len(a) >= 2] or None
+
+            ts_raw = data.get("ts", "0")
+            try:
+                updated_at = int(ts_raw) / 1000.0
+            except (ValueError, TypeError):
+                updated_at = existing.updated_at
+
+            price_state = PriceState(
+                bid=bids_raw[0][0] if bids_raw else existing.bid,
+                ask=asks_raw[0][0] if asks_raw else existing.ask,
+                bid_qty=bids_raw[0][1] if bids_raw else existing.bid_qty,
+                ask_qty=asks_raw[0][1] if asks_raw else existing.ask_qty,
+                last_price=existing.last_price,
+                volume=existing.volume,
+                updated_at=updated_at,
+                bids=depth_bids,
+                asks=depth_asks,
+            )
+            return symbol, price_state
+
+        if channel != "tickers":
             return None
 
         data = data_list[0]
-        inst_id = arg.get("instId", "")
-        symbol = self._from_okx_symbol(inst_id)
 
         ts_raw = data.get("ts", "0")
         try:
             updated_at = int(ts_raw) / 1000.0
         except (ValueError, TypeError):
             updated_at = 0.0
+
+        existing = self._state.get(symbol, PriceState())
 
         price_state = PriceState(
             bid=data.get("bidPx", ""),
@@ -112,6 +149,8 @@ class OKXFetcher(BaseFetcher):
             last_price=data.get("last", ""),
             volume=data.get("vol24h", ""),
             updated_at=updated_at,
+            bids=existing.bids,
+            asks=existing.asks,
         )
 
         return symbol, price_state

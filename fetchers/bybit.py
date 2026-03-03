@@ -3,12 +3,12 @@ Bybit Spot WebSocket fetcher.
 
 Connects to Bybit v5 public WebSocket API for spot and streams real-time
 data using two channels per symbol:
-    - orderbook.1 for best bid/ask prices and quantities
+    - orderbook.5 for 5-level bid/ask prices and quantities
     - tickers for lastPrice and 24h volume
 
-Bybit orderbook.1 fields:
-    b = [[price, qty]] best bid
-    a = [[price, qty]] best ask
+Bybit orderbook.5 fields:
+    b = [[price, qty], ...] bids (up to 5 levels, descending)
+    a = [[price, qty], ...] asks (up to 5 levels, ascending)
     s = symbol
 
 Bybit tickers fields:
@@ -44,10 +44,10 @@ class BybitFetcher(BaseFetcher):
         return BYBIT_WS_URL
 
     async def _on_connect(self, ws: Any) -> None:
-        """Subscribe to orderbook.1 and tickers for all symbols (batched, max 10 args per message)."""
+        """Subscribe to orderbook.5 and tickers for all symbols (batched, max 10 args per message)."""
         args = []
         for s in self.symbols:
-            args.append(f"orderbook.1.{s}")
+            args.append(f"orderbook.5.{s}")
             args.append(f"tickers.{s}")
         # Bybit limits 10 args per subscribe message
         batch_size = 10
@@ -76,10 +76,10 @@ class BybitFetcher(BaseFetcher):
 
     def _parse_message(self, raw_message: dict[str, Any]) -> tuple[str, PriceState] | None:
         """
-        Parse Bybit orderbook.1 or tickers messages.
+        Parse Bybit orderbook.5 or tickers messages.
 
-        orderbook.1: {"topic": "orderbook.1.BTCUSDT",
-                      "data": {"s": "BTCUSDT", "b": [["price","qty"]], "a": [["price","qty"]]}}
+        orderbook.5: {"topic": "orderbook.5.BTCUSDT",
+                      "data": {"s": "BTCUSDT", "b": [["price","qty"], ...], "a": [["price","qty"], ...]}}
         tickers:     {"topic": "tickers.BTCUSDT",
                       "data": {"symbol": "BTCUSDT", "lastPrice": "...", "volume24h": "..."}}
 
@@ -96,20 +96,27 @@ class BybitFetcher(BaseFetcher):
         except (ValueError, TypeError):
             updated_at = 0.0
 
-        if topic.startswith("orderbook.1."):
+        if topic.startswith("orderbook."):
             symbol = data.get("s", "")
-            bids = data.get("b", [])
-            asks = data.get("a", [])
+            bids_raw = data.get("b", [])
+            asks_raw = data.get("a", [])
 
             existing = self._state.get(symbol, PriceState())
+
+            # Parse multi-level depth
+            depth_bids = [(b[0], b[1]) for b in bids_raw if len(b) >= 2] or None
+            depth_asks = [(a[0], a[1]) for a in asks_raw if len(a) >= 2] or None
+
             price_state = PriceState(
-                bid=bids[0][0] if bids else existing.bid,
-                ask=asks[0][0] if asks else existing.ask,
-                bid_qty=bids[0][1] if bids else existing.bid_qty,
-                ask_qty=asks[0][1] if asks else existing.ask_qty,
+                bid=bids_raw[0][0] if bids_raw else existing.bid,
+                ask=asks_raw[0][0] if asks_raw else existing.ask,
+                bid_qty=bids_raw[0][1] if bids_raw else existing.bid_qty,
+                ask_qty=asks_raw[0][1] if asks_raw else existing.ask_qty,
                 last_price=existing.last_price,
                 volume=existing.volume,
                 updated_at=updated_at,
+                bids=depth_bids,
+                asks=depth_asks,
             )
             return symbol, price_state
 
@@ -124,6 +131,8 @@ class BybitFetcher(BaseFetcher):
                 last_price=data.get("lastPrice") or existing.last_price,
                 volume=data.get("volume24h") or existing.volume,
                 updated_at=updated_at,
+                bids=existing.bids,
+                asks=existing.asks,
             )
             return symbol, price_state
 

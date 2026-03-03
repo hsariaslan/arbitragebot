@@ -140,20 +140,28 @@ class PionexFetcher(BaseFetcher):
             if data is None:
                 return None
 
-            bids = data.get("bids", [])
-            asks = data.get("asks", [])
+            bids_raw = data.get("bids", [])
+            asks_raw = data.get("asks", [])
 
             bid = ""
             bid_qty = ""
             ask = ""
             ask_qty = ""
 
-            if bids and len(bids) > 0:
-                bid = str(bids[0][0]) if len(bids[0]) > 0 else ""
-                bid_qty = str(bids[0][1]) if len(bids[0]) > 1 else ""
-            if asks and len(asks) > 0:
-                ask = str(asks[0][0]) if len(asks[0]) > 0 else ""
-                ask_qty = str(asks[0][1]) if len(asks[0]) > 1 else ""
+            if bids_raw and len(bids_raw) > 0:
+                bid = str(bids_raw[0][0]) if len(bids_raw[0]) > 0 else ""
+                bid_qty = str(bids_raw[0][1]) if len(bids_raw[0]) > 1 else ""
+            if asks_raw and len(asks_raw) > 0:
+                ask = str(asks_raw[0][0]) if len(asks_raw[0]) > 0 else ""
+                ask_qty = str(asks_raw[0][1]) if len(asks_raw[0]) > 1 else ""
+
+            # Parse multi-level depth
+            depth_bids = [
+                (str(b[0]), str(b[1])) for b in bids_raw if len(b) >= 2
+            ] or None
+            depth_asks = [
+                (str(a[0]), str(a[1])) for a in asks_raw if len(a) >= 2
+            ] or None
 
             price_state = PriceState(
                 bid=bid,
@@ -163,6 +171,8 @@ class PionexFetcher(BaseFetcher):
                 last_price=self._last_prices.get(symbol, ""),
                 volume="",
                 updated_at=updated_at,
+                bids=depth_bids,
+                asks=depth_asks,
             )
             return symbol, price_state
 
@@ -288,7 +298,7 @@ class _PionexSubConnection:
                     "op": "SUBSCRIBE",
                     "topic": "DEPTH",
                     "symbol": pionex_sym,
-                    "limit": 1,
+                    "limit": 5,
                 }))
                 await ws.send(json.dumps({
                     "op": "SUBSCRIBE",

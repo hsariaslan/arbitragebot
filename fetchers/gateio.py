@@ -60,19 +60,30 @@ class GateIOFetcher(BaseFetcher):
         return gate_symbol.replace("_", "")
 
     async def _on_connect(self, ws: Any) -> None:
-        """Subscribe to spot.tickers for all symbols (one message per symbol)."""
+        """Subscribe to spot.tickers + spot.order_book for all symbols."""
         ts = int(time.time())
-        for i, s in enumerate(self.symbols):
+        msg_id = 0
+        for s in self.symbols:
             gate_sym = self._to_gateio_symbol(s)
-            msg = {
+            msg_id += 1
+            await ws.send(json.dumps({
                 "time": ts,
-                "id": i + 1,
+                "id": msg_id,
                 "channel": "spot.tickers",
                 "event": "subscribe",
                 "payload": [gate_sym],
-            }
-            await ws.send(json.dumps(msg))
-        logger.info(f"[{self.exchange_name}] Subscribed to {len(self.symbols)} tickers")
+            }))
+            msg_id += 1
+            await ws.send(json.dumps({
+                "time": ts,
+                "id": msg_id,
+                "channel": "spot.order_book",
+                "event": "subscribe",
+                "payload": [gate_sym, "5", "100ms"],
+            }))
+        logger.info(
+            f"[{self.exchange_name}] Subscribed to {len(self.symbols)} tickers + order_book"
+        )
 
     def _ws_connect_kwargs(self) -> dict[str, Any]:
         """Disable library-level ping; Gate.io uses application-level JSON ping."""
@@ -95,25 +106,54 @@ class GateIOFetcher(BaseFetcher):
 
     def _parse_message(self, raw_message: dict[str, Any]) -> tuple[str, PriceState] | None:
         """
-        Parse a Gate.io spot.tickers push message.
+        Parse a Gate.io spot.tickers or spot.order_book push message.
 
-        Format: {"time": 1606293275, "time_ms": 1606293275723,
-                 "channel": "spot.tickers", "event": "update",
-                 "result": {"currency_pair": "BTC_USDT",
-                            "highest_bid": "19177.79", "lowest_ask": "19179.38",
-                            "last": "19178.50", "base_volume": "9110.47",
-                            "quote_volume": "145082083.25", ...}}
+        Tickers: {"channel": "spot.tickers", "event": "update",
+                  "result": {"currency_pair": "BTC_USDT", "highest_bid": "...", ...}}
+        Order book: {"channel": "spot.order_book", "event": "update",
+                     "result": {"s": "BTC_USDT", "bids": [["price","qty"], ...],
+                                "asks": [["price","qty"], ...], "t": 1606293275723}}
         """
         channel = raw_message.get("channel", "")
-        if channel != "spot.tickers":
-            return None
-
         event = raw_message.get("event", "")
         if event != "update":
             return None
 
         result = raw_message.get("result")
         if result is None:
+            return None
+
+        if channel == "spot.order_book":
+            gate_symbol = result.get("s", "")
+            symbol = self._from_gateio_symbol(gate_symbol)
+            existing = self._state.get(symbol, PriceState())
+
+            bids_raw = result.get("bids", [])
+            asks_raw = result.get("asks", [])
+
+            depth_bids = [(b[0], b[1]) for b in bids_raw if len(b) >= 2] or None
+            depth_asks = [(a[0], a[1]) for a in asks_raw if len(a) >= 2] or None
+
+            ts_raw = result.get("t", 0)
+            try:
+                updated_at = int(ts_raw) / 1000.0
+            except (ValueError, TypeError):
+                updated_at = existing.updated_at
+
+            price_state = PriceState(
+                bid=bids_raw[0][0] if bids_raw else existing.bid,
+                ask=asks_raw[0][0] if asks_raw else existing.ask,
+                bid_qty=bids_raw[0][1] if bids_raw else existing.bid_qty,
+                ask_qty=asks_raw[0][1] if asks_raw else existing.ask_qty,
+                last_price=existing.last_price,
+                volume=existing.volume,
+                updated_at=updated_at,
+                bids=depth_bids,
+                asks=depth_asks,
+            )
+            return symbol, price_state
+
+        if channel != "spot.tickers":
             return None
 
         gate_symbol = result.get("currency_pair", "")
@@ -125,14 +165,18 @@ class GateIOFetcher(BaseFetcher):
         except (ValueError, TypeError):
             updated_at = 0.0
 
+        existing = self._state.get(symbol, PriceState())
+
         price_state = PriceState(
             bid=result.get("highest_bid", ""),
             ask=result.get("lowest_ask", ""),
-            bid_qty="",   # spot.tickers does not include quantities
-            ask_qty="",   # spot.tickers does not include quantities
+            bid_qty=existing.bid_qty,
+            ask_qty=existing.ask_qty,
             last_price=result.get("last", ""),
             volume=result.get("base_volume", ""),
             updated_at=updated_at,
+            bids=existing.bids,
+            asks=existing.asks,
         )
 
         return symbol, price_state

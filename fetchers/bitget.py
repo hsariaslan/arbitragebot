@@ -41,13 +41,13 @@ class BitgetFetcher(BaseFetcher):
         return BITGET_WS_URL
 
     async def _on_connect(self, ws: Any) -> None:
-        """Subscribe to ticker for all symbols."""
-        args = [
-            {"instType": "SPOT", "channel": "ticker", "instId": s}
-            for s in self.symbols
-        ]
+        """Subscribe to ticker + books5 for all symbols."""
+        args = []
+        for s in self.symbols:
+            args.append({"instType": "SPOT", "channel": "ticker", "instId": s})
+            args.append({"instType": "SPOT", "channel": "books5", "instId": s})
         await ws.send(json.dumps({"op": "subscribe", "args": args}))
-        logger.info(f"[{self.exchange_name}] Subscribed to {len(self.symbols)} tickers")
+        logger.info(f"[{self.exchange_name}] Subscribed to {len(self.symbols)} tickers + books5")
 
     def _ws_connect_kwargs(self) -> dict[str, Any]:
         """Disable library-level ping; Bitget uses application-level string ping."""
@@ -69,10 +69,13 @@ class BitgetFetcher(BaseFetcher):
 
     def _parse_message(self, raw_message: dict[str, Any]) -> tuple[str, PriceState] | None:
         """
-        Parse a Bitget ticker push message.
+        Parse a Bitget ticker or books5 push message.
 
-        Format: {"action": "snapshot", "arg": {"instType": "SPOT", "channel": "ticker",
+        Ticker: {"action": "snapshot", "arg": {"instType": "SPOT", "channel": "ticker",
                  "instId": "BTCUSDT"}, "data": [{...}]}
+        Books5: {"action": "snapshot", "arg": {"instType": "SPOT", "channel": "books5",
+                 "instId": "BTCUSDT"}, "data": [{"bids": [["price","qty"], ...],
+                 "asks": [["price","qty"], ...], "ts": "..."}]}
         """
         arg = raw_message.get("arg")
         data = raw_message.get("data")
@@ -80,10 +83,40 @@ class BitgetFetcher(BaseFetcher):
             return None
 
         channel = arg.get("channel", "")
+        symbol = arg.get("instId", "")
+
+        if channel == "books5":
+            d = data[0]
+            existing = self._state.get(symbol, PriceState())
+
+            bids_raw = d.get("bids", [])
+            asks_raw = d.get("asks", [])
+
+            depth_bids = [(b[0], b[1]) for b in bids_raw if len(b) >= 2] or None
+            depth_asks = [(a[0], a[1]) for a in asks_raw if len(a) >= 2] or None
+
+            ts_raw = d.get("ts", 0)
+            try:
+                updated_at = int(ts_raw) / 1000.0
+            except (ValueError, TypeError):
+                updated_at = existing.updated_at
+
+            price_state = PriceState(
+                bid=bids_raw[0][0] if bids_raw else existing.bid,
+                ask=asks_raw[0][0] if asks_raw else existing.ask,
+                bid_qty=bids_raw[0][1] if bids_raw else existing.bid_qty,
+                ask_qty=asks_raw[0][1] if asks_raw else existing.ask_qty,
+                last_price=existing.last_price,
+                volume=existing.volume,
+                updated_at=updated_at,
+                bids=depth_bids,
+                asks=depth_asks,
+            )
+            return symbol, price_state
+
         if channel != "ticker":
             return None
 
-        symbol = arg.get("instId", "")
         d = data[0]
 
         ts_raw = d.get("ts", 0)
@@ -91,6 +124,8 @@ class BitgetFetcher(BaseFetcher):
             updated_at = int(ts_raw) / 1000.0
         except (ValueError, TypeError):
             updated_at = 0.0
+
+        existing = self._state.get(symbol, PriceState())
 
         price_state = PriceState(
             bid=d.get("bidPr", ""),
@@ -100,6 +135,8 @@ class BitgetFetcher(BaseFetcher):
             last_price=d.get("lastPr", ""),
             volume=d.get("baseVolume", ""),
             updated_at=updated_at,
+            bids=existing.bids,
+            asks=existing.asks,
         )
 
         return symbol, price_state

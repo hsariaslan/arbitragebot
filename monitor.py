@@ -17,6 +17,7 @@ LOCAL_TZ = timezone(timedelta(hours=3))  # UTC+3
 from typing import TYPE_CHECKING
 
 from balance import BalanceTracker
+from slippage import compute_buy_slippage, compute_sell_slippage
 from config import (
     ACTIVE_EXCHANGES,
     ACTIVE_SYMBOLS,
@@ -79,6 +80,10 @@ class SimulatedTrade:
     rounding_impact_usd: float = 0.0
     # Data freshness metadata (D-07: stale price detection)
     data_age_ms: float = 0.0
+    # Simulated slippage (from order book depth)
+    sim_slippage_pct: float = 0.0
+    sim_buy_slippage_pct: float = 0.0
+    sim_sell_slippage_pct: float = 0.0
     # Demo execution results (Phase 2: populated when execution_mode=demo)
     demo_buy_price: float = 0.0
     demo_sell_price: float = 0.0
@@ -151,6 +156,12 @@ class ArbitrageMonitor:
         # Configuration history tracking
         self._config_history: list[ConfigSnapshot] = []
 
+        # Hourly/daily P&L tracking (persisted across restarts)
+        # Key: "YYYY-MM-DD_HH" -> {"pnl": float, "trades": int}
+        self._hourly_pnl: dict[str, dict] = {}
+        # Key: "YYYY-MM-DD" -> {"pnl": float, "trades": int}
+        self._daily_pnl: dict[str, dict] = {}
+
         # Consecutive miss tracking: only rebalance after N consecutive
         # profitable ticks that couldn't execute due to insufficient balance.
         # Key: "sym:buy_ex:sell_ex" → consecutive miss count
@@ -216,6 +227,24 @@ class ArbitrageMonitor:
             f"[Monitor] Demo execution enabled for: "
             f"{executor.supported_exchanges}"
         )
+
+    def _record_trade_pnl(self, timestamp: float, profit_usd: float) -> None:
+        """Record trade profit in hourly and daily P&L buckets."""
+        from datetime import datetime, timezone
+
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        hour_key = dt.strftime("%Y-%m-%d_%H")
+        day_key = dt.strftime("%Y-%m-%d")
+
+        if hour_key not in self._hourly_pnl:
+            self._hourly_pnl[hour_key] = {"pnl": 0.0, "trades": 0}
+        self._hourly_pnl[hour_key]["pnl"] += profit_usd
+        self._hourly_pnl[hour_key]["trades"] += 1
+
+        if day_key not in self._daily_pnl:
+            self._daily_pnl[day_key] = {"pnl": 0.0, "trades": 0}
+        self._daily_pnl[day_key]["pnl"] += profit_usd
+        self._daily_pnl[day_key]["trades"] += 1
 
     def _output(self, text: str) -> None:
         """Print to console and append to log file."""
@@ -769,13 +798,13 @@ class ArbitrageMonitor:
                 bid_depth = bid_f * bid_qty_f if bid_qty_f > 0 else float("inf")
                 ask_depth = ask_f * ask_qty_f if ask_qty_f > 0 else float("inf")
 
-                exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, bid_depth, ask_depth))
+                exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, bid_depth, ask_depth, ps.bids, ps.asks))
 
             if len(exchange_prices) < 2:
                 continue
 
             # Track per-exchange internal spread (bid-ask on same exchange)
-            for ex_name, ex_bid, ex_ask, _, _ in exchange_prices:
+            for ex_name, ex_bid, ex_ask, _, _, _, _ in exchange_prices:
                 if ex_bid > 0:
                     internal_spread = (ex_ask - ex_bid) / ex_bid * 100
                     self._exchange_spread_sum[ex_name] += internal_spread
@@ -785,9 +814,11 @@ class ArbitrageMonitor:
 
             best_scoring_net = float("-inf")
             best_row = None
+            best_buy_asks = None
+            best_sell_bids = None
 
-            for i, (ex_buy, _, ask_i, _, ask_depth_i) in enumerate(exchange_prices):
-                for j, (ex_sell, bid_j, _, bid_depth_j, _) in enumerate(exchange_prices):
+            for i, (ex_buy, _, ask_i, _, ask_depth_i, _bids_i, asks_i) in enumerate(exchange_prices):
+                for j, (ex_sell, bid_j, _, bid_depth_j, _, bids_j, _asks_j) in enumerate(exchange_prices):
                     if i == j:
                         continue
 
@@ -799,22 +830,29 @@ class ArbitrageMonitor:
 
                     spread_pct = (bid_j - ask_i) / ask_i * 100
 
+                    # Compute slippage estimate using trade_amount
+                    buy_slip = compute_buy_slippage(asks_i, self._trade_amount)
+                    sell_slip = compute_sell_slippage(bids_j, self._trade_amount)
+                    slippage_pct = buy_slip.slippage_pct + sell_slip.slippage_pct
+
                     # Scoring fees for pair selection (includes cashback weighting)
                     s_buy = self._fee_manager.get_scoring_fee(ex_buy, symbol) if self._fee_manager else 0.001
                     s_sell = self._fee_manager.get_scoring_fee(ex_sell, symbol) if self._fee_manager else 0.001
-                    scoring_net = spread_pct - (s_buy + s_sell) * 100
+                    scoring_net = spread_pct - (s_buy + s_sell) * 100 - slippage_pct
 
                     # Taker fees for profit calculation (actual fee charged)
                     t_buy = self._fee_manager.get_taker_fee(ex_buy, symbol) if self._fee_manager else 0.001
                     t_sell = self._fee_manager.get_taker_fee(ex_sell, symbol) if self._fee_manager else 0.001
                     fee_pct = (t_buy + t_sell) * 100
-                    net_pct = spread_pct - fee_pct
+                    net_pct = spread_pct - fee_pct - slippage_pct
                     profit_usd = self._trade_amount * (net_pct / 100)
 
                     if scoring_net > best_scoring_net:
                         best_scoring_net = scoring_net
                         best_row = (symbol, ex_buy, ask_i, ex_sell, bid_j,
                                     spread_pct, fee_pct, net_pct, profit_usd)
+                        best_buy_asks = asks_i
+                        best_sell_bids = bids_j
 
             if best_row is not None:
                 rows.append(best_row)
@@ -980,7 +1018,12 @@ class ArbitrageMonitor:
 
                     if can_trade:
                         self._interval_executed += 1
-                        actual_profit = trade_size * (net / 100)
+                        # Recompute slippage with actual trade size
+                        buy_slip_actual = compute_buy_slippage(best_buy_asks, trade_size)
+                        sell_slip_actual = compute_sell_slippage(best_sell_bids, trade_size)
+                        actual_slippage = buy_slip_actual.slippage_pct + sell_slip_actual.slippage_pct
+                        net_adjusted = spread - fee - actual_slippage
+                        actual_profit = trade_size * (net_adjusted / 100)
                         # Data age: max of buy and sell exchange ages (ms)
                         buy_age = symbol_ex_age.get(buy_ex, 0.0)
                         sell_age = symbol_ex_age.get(sell_ex, 0.0)
@@ -992,7 +1035,7 @@ class ArbitrageMonitor:
                             buy_exchange=buy_ex, sell_exchange=sell_ex,
                             buy_price=ask_p, sell_price=bid_p,
                             spread_pct=spread, fee_pct=fee,
-                            net_pct=net, profit_usd=actual_profit,
+                            net_pct=net_adjusted, profit_usd=actual_profit,
                             trade_amount=trade_size,
                             buy_qty_raw=adj.get("buy_qty_raw", 0.0),
                             buy_qty_rounded=adj.get("buy_qty_rounded", 0.0),
@@ -1000,14 +1043,19 @@ class ArbitrageMonitor:
                             sell_qty_rounded=adj.get("sell_qty_rounded", 0.0),
                             rounding_impact_usd=adj.get("rounding_impact_usd", 0.0),
                             data_age_ms=max_age_ms,
+                            sim_slippage_pct=actual_slippage,
+                            sim_buy_slippage_pct=buy_slip_actual.slippage_pct,
+                            sim_sell_slippage_pct=sell_slip_actual.slippage_pct,
                         )
                         self._trades.append(trade)
+                        self._record_trade_pnl(now, actual_profit)
                         qty = trade_size / ask_p if ask_p > 0 else 0.0
+                        slip_str = f" slip={actual_slippage:.4f}%" if actual_slippage > 0 else ""
                         logger.info(
                             f"[Trade] #{len(self._trades)} {sym} {buy_ex}->{sell_ex}: "
                             f"buy@${ask_p:.4f} sell@${bid_p:.4f} qty={qty:.4f} "
                             f"size=${trade_size:.2f} profit=${actual_profit:.4f} "
-                            f"(net={net:+.4f}%)"
+                            f"(net={net_adjusted:+.4f}%{slip_str})"
                         )
                         if trade_adj:
                             rnd = trade_adj["rounding_impact_usd"]
@@ -1451,6 +1499,8 @@ class ArbitrageMonitor:
             "_exchange_spread_count": dict(self._exchange_spread_count),
             "_execution_mode": self._execution_mode,
             "demo_executor": self._executor.to_state_dict() if self._executor else None,
+            "_hourly_pnl": self._hourly_pnl,
+            "_daily_pnl": self._daily_pnl,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -1482,3 +1532,5 @@ class ArbitrageMonitor:
         self._exchange_spread_count = defaultdict(
             int, data.get("_exchange_spread_count", {})
         )
+        self._hourly_pnl = data.get("_hourly_pnl", {})
+        self._daily_pnl = data.get("_daily_pnl", {})

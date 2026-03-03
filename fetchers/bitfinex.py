@@ -195,10 +195,30 @@ class BitfinexFetcher(BaseFetcher):
         return symbol, price_state
 
     async def run(self) -> None:
-        """Override run to handle 2 connections when symbols > 30."""
+        """Override run to handle multiple connections.
+
+        Uses 2 connections for ticker + 2 for book depth (4 total when >30 symbols).
+        """
         if len(self.symbols) <= 30:
-            # Single connection is enough
-            await super().run()
+            # Single ticker + single book connection
+            self._running = True
+            self._ensure_output_dir()
+            self._connect_time = time.time()
+            self._first_data_time = 0.0
+
+            ticker_sub = _BitfinexSubFetcher(self, self.symbols)
+            book_sub = _BitfinexBookSubFetcher(self, self.symbols)
+
+            try:
+                await asyncio.gather(
+                    ticker_sub.run(),
+                    book_sub.run(),
+                    self._snapshot_loop(),
+                    self._latency_log_loop(),
+                )
+            except Exception as e:
+                if self._running:
+                    logger.error(f"[{self.exchange_name}] Error in multi-connection run: {e}")
             return
 
         # Split symbols into two batches
@@ -208,12 +228,13 @@ class BitfinexFetcher(BaseFetcher):
 
         logger.info(
             f"[{self.exchange_name}] Splitting {len(self.symbols)} symbols "
-            f"across 2 connections ({len(batch1)} + {len(batch2)})"
+            f"across 4 connections (2 ticker + 2 book)"
         )
 
-        # Create two sub-fetchers that share state with this parent
-        fetcher1 = _BitfinexSubFetcher(self, batch1)
-        fetcher2 = _BitfinexSubFetcher(self, batch2)
+        ticker1 = _BitfinexSubFetcher(self, batch1)
+        ticker2 = _BitfinexSubFetcher(self, batch2)
+        book1 = _BitfinexBookSubFetcher(self, batch1)
+        book2 = _BitfinexBookSubFetcher(self, batch2)
 
         self._running = True
         self._ensure_output_dir()
@@ -222,8 +243,10 @@ class BitfinexFetcher(BaseFetcher):
 
         try:
             await asyncio.gather(
-                fetcher1.run(),
-                fetcher2.run(),
+                ticker1.run(),
+                ticker2.run(),
+                book1.run(),
+                book2.run(),
                 self._snapshot_loop(),
                 self._latency_log_loop(),
             )
@@ -407,6 +430,225 @@ class _BitfinexSubFetcher:
                     )
                     self._channel_map.clear()
                     self._confirmed.clear()
+                    self._last_data_time = 0.0
+                    await ws.close()
+                    return
+
+
+class _BitfinexBookSubFetcher:
+    """Internal helper: single Bitfinex WS connection for book depth data (≤30 symbols).
+
+    Subscribes to the 'book' channel with P0 precision and 5 levels.
+    Data format:
+        Snapshot: [CHAN_ID, [[PRICE, COUNT, AMOUNT], ...]]
+        Update:   [CHAN_ID, [PRICE, COUNT, AMOUNT]]
+    AMOUNT > 0 = bid, AMOUNT < 0 = ask (absolute value = qty).
+    """
+
+    def __init__(self, parent: BitfinexFetcher, symbols: list[str]) -> None:
+        self._parent = parent
+        self._symbols = symbols
+        self._channel_map: dict[int, str] = {}
+        self._confirmed: set[str] = set()
+        self._last_data_time: float = 0.0
+        # Maintain full book state per symbol for snapshot+update merging
+        self._book_bids: dict[str, dict[float, float]] = {}  # symbol -> {price: qty}
+        self._book_asks: dict[str, dict[float, float]] = {}  # symbol -> {price: qty}
+
+    async def run(self) -> None:
+        from config import RECONNECT_INITIAL_DELAY, RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY
+
+        delay = RECONNECT_INITIAL_DELAY
+        while self._parent._running:
+            try:
+                await self._connect_and_listen()
+                delay = RECONNECT_INITIAL_DELAY
+            except Exception as e:
+                if not self._parent._running:
+                    break
+                logger.error(
+                    f"[{self._parent.exchange_name}] Book sub-connection error: {e}"
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY)
+
+    async def _connect_and_listen(self) -> None:
+        url = self._parent._build_ws_url()
+        kwargs = self._parent._ws_connect_kwargs()
+
+        # Clear book state on reconnect
+        self._channel_map.clear()
+        self._confirmed.clear()
+        self._book_bids.clear()
+        self._book_asks.clear()
+
+        async with websockets.connect(url, **kwargs) as ws:
+            logger.info(
+                f"[{self._parent.exchange_name}] Book sub-connection for "
+                f"{len(self._symbols)} symbols connected"
+            )
+
+            for s in self._symbols:
+                bfx_sym = BitfinexFetcher._to_bitfinex_symbol(s)
+                await ws.send(json.dumps({
+                    "event": "subscribe",
+                    "channel": "book",
+                    "symbol": bfx_sym,
+                    "prec": "P0",
+                    "freq": "F0",
+                    "len": "5",
+                }))
+
+            listener = asyncio.create_task(self._listen(ws))
+            keepalive = asyncio.create_task(self._keep_alive(ws))
+            staleness = asyncio.create_task(self._staleness_watchdog(ws))
+
+            done, pending = await asyncio.wait(
+                [listener, keepalive, staleness],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+
+    async def _listen(self, ws: Any) -> None:
+        async for raw in ws:
+            if not self._parent._running:
+                break
+            try:
+                message = json.loads(raw)
+
+                # Event messages (subscribed, error, info, pong)
+                if isinstance(message, dict):
+                    event = message.get("event", "")
+                    if event == "subscribed" and message.get("channel") == "book":
+                        chan_id = message.get("chanId")
+                        bfx_symbol = message.get("symbol", "")
+                        if chan_id is not None and bfx_symbol:
+                            symbol = BitfinexFetcher._from_bitfinex_symbol(bfx_symbol)
+                            self._channel_map[chan_id] = symbol
+                            self._confirmed.add(symbol)
+                            self._book_bids[symbol] = {}
+                            self._book_asks[symbol] = {}
+                            if len(self._confirmed) == len(self._symbols):
+                                logger.info(
+                                    f"[{self._parent.exchange_name}] "
+                                    f"Subscribed to {len(self._confirmed)} book channels"
+                                )
+                    continue
+
+                # Data messages (arrays)
+                if not isinstance(message, list) or len(message) < 2:
+                    continue
+
+                chan_id = message[0]
+                payload = message[1]
+
+                if payload == "hb":
+                    continue
+
+                symbol = self._channel_map.get(chan_id)
+                if not symbol or symbol not in self._parent._state:
+                    continue
+
+                # Snapshot: [[PRICE, COUNT, AMOUNT], ...]
+                # Update: [PRICE, COUNT, AMOUNT]
+                if isinstance(payload, list) and len(payload) > 0:
+                    if isinstance(payload[0], list):
+                        # Snapshot — reset book
+                        self._book_bids[symbol] = {}
+                        self._book_asks[symbol] = {}
+                        for entry in payload:
+                            if len(entry) >= 3:
+                                self._process_book_entry(symbol, entry)
+                    elif len(payload) >= 3:
+                        # Single update
+                        self._process_book_entry(symbol, payload)
+
+                    self._update_price_state_depth(symbol)
+                    self._last_data_time = time.time()
+
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                logger.debug(f"[{self._parent.exchange_name}] Book parse error: {e}")
+
+    def _process_book_entry(self, symbol: str, entry: list) -> None:
+        """Process a single book entry [PRICE, COUNT, AMOUNT].
+
+        COUNT > 0: add/update level. COUNT = 0: remove level.
+        AMOUNT > 0: bid. AMOUNT < 0: ask.
+        """
+        price = float(entry[0])
+        count = int(entry[1])
+        amount = float(entry[2])
+
+        if count == 0:
+            # Remove price level
+            self._book_bids.get(symbol, {}).pop(price, None)
+            self._book_asks.get(symbol, {}).pop(price, None)
+        elif amount > 0:
+            # Bid
+            self._book_bids.setdefault(symbol, {})[price] = abs(amount)
+            self._book_asks.get(symbol, {}).pop(price, None)
+        elif amount < 0:
+            # Ask
+            self._book_asks.setdefault(symbol, {})[price] = abs(amount)
+            self._book_bids.get(symbol, {}).pop(price, None)
+
+    def _update_price_state_depth(self, symbol: str) -> None:
+        """Convert internal book state to sorted bids/asks lists on PriceState."""
+        existing = self._parent._state.get(symbol, PriceState())
+
+        bids_dict = self._book_bids.get(symbol, {})
+        asks_dict = self._book_asks.get(symbol, {})
+
+        # Sort bids descending, asks ascending; take top 5
+        sorted_bids = sorted(bids_dict.items(), key=lambda x: -x[0])[:5]
+        sorted_asks = sorted(asks_dict.items(), key=lambda x: x[0])[:5]
+
+        depth_bids = [(str(p), str(q)) for p, q in sorted_bids] or None
+        depth_asks = [(str(p), str(q)) for p, q in sorted_asks] or None
+
+        now = time.time()
+        self._parent._state[symbol] = PriceState(
+            bid=existing.bid,
+            ask=existing.ask,
+            bid_qty=existing.bid_qty,
+            ask_qty=existing.ask_qty,
+            last_price=existing.last_price,
+            volume=existing.volume,
+            updated_at=existing.updated_at,
+            received_at=now,
+            bids=depth_bids,
+            asks=depth_asks,
+        )
+
+    async def _keep_alive(self, ws: Any) -> None:
+        cid = 0
+        while self._parent._running:
+            try:
+                cid += 1
+                await ws.send(json.dumps({"event": "ping", "cid": cid}))
+            except Exception:
+                break
+            await asyncio.sleep(15)
+
+    async def _staleness_watchdog(self, ws: Any) -> None:
+        while self._parent._running:
+            await asyncio.sleep(5.0)
+            if self._last_data_time > 0:
+                stale = time.time() - self._last_data_time
+                if stale >= self._parent.STALENESS_RECONNECT_SECONDS:
+                    logger.warning(
+                        f"[{self._parent.exchange_name}] Book sub-connection stale "
+                        f"({stale:.0f}s), reconnecting"
+                    )
+                    self._channel_map.clear()
+                    self._confirmed.clear()
+                    self._book_bids.clear()
+                    self._book_asks.clear()
                     self._last_data_time = 0.0
                     await ws.close()
                     return

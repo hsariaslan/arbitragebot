@@ -26,6 +26,7 @@ from config import (
     MAX_DATA_AGE_SECONDS,
     SYMBOLS,
 )
+from slippage import compute_buy_slippage, compute_sell_slippage
 
 if TYPE_CHECKING:
     from balance import BalanceTracker, Transfer
@@ -430,7 +431,7 @@ class SymbolOptimizer:
         now = time.time()
 
         for symbol in self._all_symbols:
-            exchange_prices: list[tuple[str, float, float]] = []
+            exchange_prices: list[tuple[str, float, float, list | None, list | None]] = []
 
             for fetcher in self._fetchers:
                 if fetcher.exchange_name not in self._active_exchanges:
@@ -447,7 +448,7 @@ class SymbolOptimizer:
                     ask_f = float(ps.ask)
                     if bid_f <= 0 or ask_f <= 0:
                         continue
-                    exchange_prices.append((fetcher.exchange_name, bid_f, ask_f))
+                    exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, ps.bids, ps.asks))
                 except (ValueError, TypeError):
                     continue
 
@@ -461,15 +462,21 @@ class SymbolOptimizer:
             best_spread = 0.0
             best_fee = 0.0
 
-            for i, (ex_buy, _, ask_i) in enumerate(exchange_prices):
-                for j, (ex_sell, bid_j, _) in enumerate(exchange_prices):
+            for i, (ex_buy, _, ask_i, _bids_i, asks_i) in enumerate(exchange_prices):
+                for j, (ex_sell, bid_j, _, bids_j, _asks_j) in enumerate(exchange_prices):
                     if i == j:
                         continue
                     spread_pct = (bid_j - ask_i) / ask_i * 100
                     buy_fee = self._fee_manager.get_scoring_fee(ex_buy, symbol) if self._fee_manager else 0.001
                     sell_fee = self._fee_manager.get_scoring_fee(ex_sell, symbol) if self._fee_manager else 0.001
                     fee_pct = (buy_fee + sell_fee) * 100
-                    net_pct = spread_pct - fee_pct
+
+                    # Deduct estimated slippage from depth data
+                    buy_slip = compute_buy_slippage(asks_i, self._trade_amount)
+                    sell_slip = compute_sell_slippage(bids_j, self._trade_amount)
+                    slippage_pct = buy_slip.slippage_pct + sell_slip.slippage_pct
+
+                    net_pct = spread_pct - fee_pct - slippage_pct
 
                     if net_pct > best_net:
                         best_net = net_pct
@@ -1745,8 +1752,17 @@ class SymbolOptimizer:
         needed_per_exchange = self._trade_amount * 3  # 3× trade amount needed
 
         # Cost to get USDT on buyer exchanges (for buying)
+        # Use raw USDT balance (not reserve-adjusted) for Bitfinex because the
+        # reserve IS the trading capital when Bitfinex is the buyer.  The reserve
+        # protects per-trade execution via available_usdt_for_trading(), but for
+        # expansion cost estimation we only care whether USDT physically exists
+        # on the exchange — no external transfer is needed if it does.
         for ex, _ in pairs["buyers"]:
-            usdt_avail = self._balance.available_usdt_for_trading(ex)
+            usdt_avail = (
+                self._balance.usdt.get(ex, 0.0)
+                if ex == "Bitfinex"
+                else self._balance.available_usdt_for_trading(ex)
+            )
             if usdt_avail >= needed_per_exchange:
                 continue  # already funded
             # Estimate cheapest way to get USDT here
