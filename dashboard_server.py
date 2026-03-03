@@ -1230,7 +1230,10 @@ class DashboardServer:
                 "downtimes": [],
             }
             self._save_uptime_heartbeat(force=True)
-            logger.info("[Uptime] Fresh start (intentional restart)")
+            logger.info(
+                f"[Uptime] Bangkok VPS fresh start (intentional restart) at "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC"
+            )
             return
 
         # Try to load existing data
@@ -1249,9 +1252,9 @@ class DashboardServer:
                         "duration": round(gap, 1),
                     })
                     logger.info(
-                        f"[Uptime] Downtime detected: {gap:.0f}s "
-                        f"({time.strftime('%H:%M:%S', time.gmtime(last_hb))} → "
-                        f"{time.strftime('%H:%M:%S', time.gmtime(now))} UTC)"
+                        f"[Uptime] Bangkok VPS was DOWN for {gap:.0f}s "
+                        f"({time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(last_hb))} → "
+                        f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC)"
                     )
 
                 self._uptime_data = {
@@ -1261,9 +1264,12 @@ class DashboardServer:
                 }
                 self._save_uptime_heartbeat(force=True)
                 total_down = sum(d["duration"] for d in downtimes)
+                first_start = data.get("first_start", now)
                 logger.info(
-                    f"[Uptime] Resumed: {len(downtimes)} previous downtimes, "
-                    f"{total_down:.0f}s total downtime"
+                    f"[Uptime] Bangkok VPS UP at "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC "
+                    f"(running since {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(first_start))} UTC, "
+                    f"{len(downtimes)} downtimes, {total_down:.0f}s total downtime)"
                 )
                 return
             except (json.JSONDecodeError, OSError, KeyError) as e:
@@ -1276,7 +1282,10 @@ class DashboardServer:
             "downtimes": [],
         }
         self._save_uptime_heartbeat(force=True)
-        logger.info("[Uptime] First start — tracking begins")
+        logger.info(
+            f"[Uptime] Bangkok VPS first start at "
+            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC"
+        )
 
     def _save_uptime_heartbeat(self, force: bool = False) -> None:
         """Update last_heartbeat and write to disk. Called every 60s."""
@@ -1360,6 +1369,15 @@ class DashboardServer:
             if is_connected:
                 if self._proxy_uptime_data.get("first_connected", 0.0) == 0.0:
                     self._proxy_uptime_data["first_connected"] = now
+                    logger.info(
+                        f"[Uptime] Zurich proxy first connected at "
+                        f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC"
+                    )
+                else:
+                    logger.info(
+                        f"[Uptime] Zurich proxy UP at "
+                        f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC"
+                    )
                 self._proxy_was_connected = True
             # If not connected, stay None — don't start tracking until first connection
             return
@@ -1368,7 +1386,10 @@ class DashboardServer:
             # Connected → disconnected
             self._proxy_disconnect_start = now
             self._proxy_was_connected = False
-            logger.warning("[Uptime] Zurich proxy disconnected")
+            logger.warning(
+                f"[Uptime] Zurich proxy DOWN at "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC"
+            )
 
         elif not self._proxy_was_connected and is_connected:
             # Disconnected → connected
@@ -1382,7 +1403,16 @@ class DashboardServer:
                 # Keep last 50
                 self._proxy_uptime_data["downtimes"] = self._proxy_uptime_data["downtimes"][-50:]
                 logger.info(
-                    f"[Uptime] Zurich proxy recovered after {duration:.0f}s downtime"
+                    f"[Uptime] Zurich proxy UP at "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC "
+                    f"(was down {duration:.0f}s since "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(self._proxy_disconnect_start))} UTC)"
+                )
+            else:
+                logger.info(
+                    f"[Uptime] Zurich proxy UP at "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC "
+                    f"(brief reconnection {duration:.0f}s, below threshold)"
                 )
             self._proxy_was_connected = True
 
