@@ -22,6 +22,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const { subTab } = useParams<{ subTab?: string }>();
   const activeSubTab: SettingsSubTab = subTab === 'fees' ? 'fees' : subTab === 'transfers' ? 'transfers' : 'general';
   const [tradeAmount, setTradeAmount] = useState(currentSettings.trade_amount_usd);
+  const [tradeAmountPct, setTradeAmountPct] = useState(currentSettings.trade_amount_pct ?? 0);
   const [totalCapital, setTotalCapital] = useState(currentSettings.total_capital ?? 1800);
   const [showConfirm, setShowConfirm] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
@@ -69,6 +70,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   useEffect(() => {
     if (!dirty) {
       setTradeAmount(currentSettings.trade_amount_usd);
+      setTradeAmountPct(currentSettings.trade_amount_pct ?? 0);
       setTotalCapital(currentSettings.total_capital ?? 1800);
       setAutoRotate(currentSettings.auto_rotate ?? true);
       setNumActiveSymbols(currentSettings.num_active_symbols ?? 3);
@@ -111,6 +113,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
 
   const buildSettings = (): Settings => ({
     trade_amount_usd: tradeAmount,
+    trade_amount_pct: tradeAmountPct,
     total_capital: totalCapital,
     auto_rotate: autoRotate,
     num_active_symbols: numActiveSymbols,
@@ -213,21 +216,59 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           </div>
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
-              Trade Amount ($)
-              <Tooltip text="Base USD amount per trade before multipliers. With adaptive mode: actual size = trade_amount x symbol_multiplier x tick_quality_factor. Lower values ($10-20) work better with limited capital. Default: $20. Config key: trade_amount_usd" />
+              Trade Amount
+              <Tooltip text="Base USD amount per trade before multipliers. 'Fixed $' sets a static amount. '% of Capital' auto-scales with total capital (e.g., 1% of $3000 = $30). With adaptive mode: actual size = trade_amount x symbol_multiplier x net%_factor. Config key: trade_amount_usd / trade_amount_pct" />
             </label>
-            <div className="flex items-center gap-2">
-              {[10, 50, 100, 200].map(amt => (
-                <button key={amt} onClick={() => { setDirty(true); setTradeAmount(amt); }}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    tradeAmount === amt ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                  }`}>
-                  ${amt}
-                </button>
-              ))}
+            {/* Mode toggle */}
+            <div className="flex items-center gap-1 mb-2">
+              <button onClick={() => { setDirty(true); setTradeAmountPct(0); }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  tradeAmountPct === 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                }`}>
+                Fixed $
+              </button>
+              <button onClick={() => { setDirty(true); if (tradeAmountPct === 0) setTradeAmountPct(0.01); }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  tradeAmountPct > 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                }`}>
+                % of Capital
+              </button>
             </div>
-            <input type="number" value={tradeAmount} min={1} onChange={d(setTradeAmount, 10)}
-              className="w-full mt-2 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+            {tradeAmountPct > 0 ? (
+              <>
+                <div className="flex items-center gap-2">
+                  {[0.005, 0.01, 0.02, 0.05].map(pct => (
+                    <button key={pct} onClick={() => { setDirty(true); setTradeAmountPct(pct); }}
+                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        tradeAmountPct === pct ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                      }`}>
+                      {(pct * 100).toFixed(1)}%
+                    </button>
+                  ))}
+                </div>
+                <input type="number" value={Math.round(tradeAmountPct * 10000) / 100} min={0.1} max={50} step={0.1}
+                  onChange={e => { setDirty(true); setTradeAmountPct(Math.max(0.001, (Number(e.target.value) || 1) / 100)); }}
+                  className="w-full mt-2 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                <div className="text-xs text-slate-400 mt-1">
+                  = <span className="text-green-400 font-medium">${(totalCapital * tradeAmountPct).toFixed(2)}</span> per trade ({(tradeAmountPct * 100).toFixed(1)}% of ${totalCapital.toLocaleString()})
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  {[10, 50, 100, 200].map(amt => (
+                    <button key={amt} onClick={() => { setDirty(true); setTradeAmount(amt); }}
+                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        tradeAmount === amt ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                      }`}>
+                      ${amt}
+                    </button>
+                  ))}
+                </div>
+                <input type="number" value={tradeAmount} min={1} onChange={d(setTradeAmount, 10)}
+                  className="w-full mt-2 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+              </>
+            )}
           </div>
         </div>
         <div className="mt-4">

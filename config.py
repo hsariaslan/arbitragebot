@@ -117,7 +117,7 @@ PIONEX_WS_URL: str = "wss://ws.pionex.com/wsPub"
 PIONEX_EXCHANGE_NAME: str = "Pionex"
 
 # Bitfinex Spot WebSocket (v2 public API)
-BITFINEX_WS_URL: str = "wss://api-pub.bitfinex.com/ws/2"
+BITFINEX_WS_URL: str = os.environ.get("BITFINEX_WS_URL", "wss://api-pub.bitfinex.com/ws/2")
 BITFINEX_EXCHANGE_NAME: str = "Bitfinex"
 
 # Arbitrage monitor refresh interval
@@ -125,6 +125,7 @@ MONITOR_INTERVAL_SECONDS: float = 1.0
 
 # Simulation settings
 TRADE_AMOUNT_USD: float = 100.0  # Simulated trade size
+TRADE_AMOUNT_PCT: float = 0.0  # 0 = disabled, >0 = fraction of total_capital (e.g. 0.01 = 1%)
 
 # Exchange taker fees (used for both buy and sell in simulation)
 # Rates reflect available token-based discounts where applicable

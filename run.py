@@ -92,8 +92,12 @@ async def main() -> None:
 
     # Load settings from settings.json (or create defaults)
     settings = load_settings()
-    trade_amount = settings["trade_amount_usd"]
+    trade_amount_pct = float(settings.get("trade_amount_pct", 0.0))
     total_capital = settings.get("total_capital", 1800.0)
+    if trade_amount_pct > 0:
+        trade_amount = round(total_capital * trade_amount_pct, 2)
+    else:
+        trade_amount = settings["trade_amount_usd"]
     adaptive_mode = settings.get("adaptive_mode", True)
 
     # Initialize FeeManager from settings (backward compatible — empty → defaults)

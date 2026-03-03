@@ -43,6 +43,7 @@ from config import (
     SETTINGS_FILE,
     STRONG_SCORE_THRESHOLD,
     TOTAL_CAPITAL,
+    TRADE_AMOUNT_PCT,
     TRADE_AMOUNT_USD,
     TRADING_SCORE_THRESHOLD,
     VERY_STRONG_SCORE_THRESHOLD,
@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SETTINGS: dict = {
     "trade_amount_usd": TRADE_AMOUNT_USD,
+    "trade_amount_pct": TRADE_AMOUNT_PCT,
     "total_capital": TOTAL_CAPITAL,
     "auto_rotate": AUTO_ROTATE,
     "num_active_symbols": NUM_ACTIVE_SYMBOLS,
