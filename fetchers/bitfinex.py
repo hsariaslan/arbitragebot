@@ -319,16 +319,19 @@ class _BitfinexSubFetcher:
             keepalive = asyncio.create_task(self._keep_alive(ws))
             staleness = asyncio.create_task(self._staleness_watchdog(ws))
 
-            done, pending = await asyncio.wait(
-                [listener, keepalive, staleness],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+            try:
+                done, pending = await asyncio.wait(
+                    [listener, keepalive, staleness],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    t.cancel()
+                    try:
+                        await t
+                    except asyncio.CancelledError:
+                        pass
+            finally:
+                self._parent._ws_connected = False
 
     async def _listen(self, ws: Any) -> None:
         async for raw in ws:
@@ -509,16 +512,19 @@ class _BitfinexBookSubFetcher:
             keepalive = asyncio.create_task(self._keep_alive(ws))
             staleness = asyncio.create_task(self._staleness_watchdog(ws))
 
-            done, pending = await asyncio.wait(
-                [listener, keepalive, staleness],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+            try:
+                done, pending = await asyncio.wait(
+                    [listener, keepalive, staleness],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    t.cancel()
+                    try:
+                        await t
+                    except asyncio.CancelledError:
+                        pass
+            finally:
+                self._parent._ws_connected = False
 
     async def _listen(self, ws: Any) -> None:
         async for raw in ws:
