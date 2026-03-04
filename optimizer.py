@@ -1538,7 +1538,8 @@ class SymbolOptimizer:
                 for ex_name, _ in pairs.get("sellers", []):
                     active_sellers.add(ex_name)
             transfers = self._balance.consolidate_to_bitfinex(
-                active_buyers, active_seller_exchanges=active_sellers,
+                active_buyers, idle_threshold=1800.0,
+                active_seller_exchanges=active_sellers,
             )
             if transfers:
                 hub_fee = sum(t.fee_usd for t in transfers)
@@ -1938,9 +1939,10 @@ class SymbolOptimizer:
                 buyer_set = active_buyers if self._active_symbols else None
                 seller_set = active_sellers if self._active_symbols else None
                 self._balance.consolidate_to_bitfinex(
-                    buyer_set, active_seller_exchanges=seller_set,
+                    buyer_set, idle_threshold=1800.0,
+                    active_seller_exchanges=seller_set,
                 )
-                self._consolidate_idle_seller_crypto(idle_threshold=900.0)
+                self._consolidate_idle_seller_crypto(idle_threshold=1800.0)
                 self._balance.replenish_reserve()
             return
 
@@ -1980,7 +1982,8 @@ class SymbolOptimizer:
             buyer_set = active_buyers if self._active_symbols else None
             seller_set = active_sellers if self._active_symbols else None
             transfers = self._balance.consolidate_to_bitfinex(
-                buyer_set, active_seller_exchanges=seller_set,
+                buyer_set, idle_threshold=1800.0,
+                active_seller_exchanges=seller_set,
             )
             if transfers:
                 hub_fee = sum(t.fee_usd for t in transfers)
@@ -1990,8 +1993,8 @@ class SymbolOptimizer:
                     f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
                     f"(fees: ${hub_fee:.4f})"
                 )
-            # Also consolidate crypto from idle seller exchanges (15 min threshold)
-            self._consolidate_idle_seller_crypto(idle_threshold=900.0)
+            # Also consolidate crypto from idle seller exchanges (30 min threshold)
+            self._consolidate_idle_seller_crypto(idle_threshold=1800.0)
 
         active_scores = [
             self._scores[s]
@@ -2141,6 +2144,24 @@ class SymbolOptimizer:
                         f"{self._reallocation_cost_horizon}h)"
                     )
                     continue
+                # Pair fee viability: block if dominant pair's combined fees exceed avg net%
+                if self._fee_manager:
+                    cand_pairs = self._compute_dominant_pairs(candidate.symbol, max_per_direction=2)
+                    buyers = cand_pairs.get("buyers", [])
+                    sellers = cand_pairs.get("sellers", [])
+                    if buyers and sellers:
+                        buy_fee = self._fee_manager.get_taker_fee(buyers[0][0])
+                        sell_fee = self._fee_manager.get_taker_fee(sellers[0][0])
+                        combined_fee_pct = (buy_fee + sell_fee) * 100  # convert to %
+                        avg_net = candidate.avg_profitable_net
+                        if combined_fee_pct > avg_net * 0.8 and avg_net > 0:
+                            logger.info(
+                                f"[Candidate] EXPAND_BLOCKED {candidate.symbol}: "
+                                f"pair_fee={combined_fee_pct:.3f}% > "
+                                f"avg_net={avg_net:.3f}%×0.8={avg_net*0.8:.3f}% "
+                                f"({buyers[0][0]}→{sellers[0][0]}) — pair_fee_exceeds_net"
+                            )
+                            continue
                 logger.info(
                     f"[Candidate] EXPAND_READY {candidate.symbol}: "
                     f"score={candidate.score:.6f} peak={wl_entry.peak_score:.6f} "
@@ -2442,20 +2463,21 @@ class SymbolOptimizer:
             new_buyers = {ex for ex, _ in new_pairs["buyers"]}
 
             if old_sellers != new_sellers or old_buyers != new_buyers:
-                self._reallocate_symbol(sym, old_pairs, new_pairs)
-                self._dominant_pairs[sym] = new_pairs
-                self._last_reallocation[sym] = now
+                if self._reallocate_symbol(sym, old_pairs, new_pairs):
+                    self._dominant_pairs[sym] = new_pairs
+                    self._last_reallocation[sym] = now
 
     def _reallocate_symbol(
         self, symbol: str, old_pairs: dict, new_pairs: dict
-    ) -> None:
-        """Move capital for a symbol from old dominant exchanges to new ones."""
+    ) -> bool:
+        """Move capital for a symbol from old dominant exchanges to new ones.
+        Returns True if capital was actually moved, False if skipped."""
         from balance import Transfer
 
         prices = self._get_all_prices()
         price = prices.get(symbol, 0.0)
         if price <= 0:
-            return
+            return False
 
         now = time.time()
         old_sellers = {ex for ex, _ in old_pairs["sellers"]}
@@ -2464,7 +2486,7 @@ class SymbolOptimizer:
         added_sellers = new_sellers - old_sellers
 
         if not removed_sellers and not added_sellers:
-            return
+            return False
 
         # --- Cost estimation gate ---
         est_sell_cost = 0.0
@@ -2496,7 +2518,7 @@ class SymbolOptimizer:
                 f"est_cost=${total_est_cost:.4f} > benefit=${benefit:.4f} "
                 f"(hourly=${est_hourly:.4f} x {self._reallocation_cost_horizon}h)"
             )
-            return
+            return False
 
         # Sell crypto on exchanges no longer dominant
         freed_capital = 0.0
@@ -2558,6 +2580,7 @@ class SymbolOptimizer:
             f"[Optimizer] Reallocated {symbol}: sellers [{old_str}]→[{new_str}], "
             f"fees: ${total_fee:.4f}"
         )
+        return True
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
