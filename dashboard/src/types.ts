@@ -146,6 +146,18 @@ export interface Settings {
   one_leg_failure_rate?: number;
   one_leg_unwind_slippage_mult?: number;
   max_position_multiplier?: number;
+  // Anomaly protection
+  anomaly_protection_enabled?: boolean;
+  circuit_breaker_window?: number;
+  circuit_breaker_threshold?: number;
+  circuit_breaker_resume_pct?: number;
+  circuit_breaker_cooldown?: number;
+  drawdown_threshold_pct?: number;
+  drawdown_resume_pct?: number;
+  drawdown_emergency_mult?: number;
+  symbol_loss_streak_threshold?: number;
+  symbol_loss_streak_cooldown?: number;
+  warning_pnl_pct?: number;
   // Security
   ip_whitelist_enabled?: boolean;
   ip_whitelist?: string[];
@@ -384,6 +396,43 @@ export interface DemoComparisonState {
   demo_portfolio_total: number;  // demo exchanges + sim fallback for non-demo exchanges
 }
 
+// ── Anomaly Protection ─────────────────────────────────────────────
+
+export interface AnomalyEvent {
+  timestamp: number;
+  layer: string;
+  level: string;
+  reason: string;
+}
+
+export interface AnomalyProtectionState {
+  enabled: boolean;
+  paused: boolean;
+  pause_reason: string;
+  pause_layer: string;
+  pause_timestamp: number;
+  warning_active: boolean;
+  warning_reason: string;
+  trade_size_multiplier: number;
+  emergency_triggered: boolean;
+  rolling_pnl: number;
+  rolling_pnl_window: number;
+  trades_in_window: number;
+  loss_rate: number;
+  peak_portfolio: number;
+  current_drawdown_pct: number;
+  symbol_blocks: Record<string, number>;
+  symbol_losses: Record<string, number>;
+  total_pauses: number;
+  total_warnings: number;
+  total_emergency_sells: number;
+  total_symbol_blocks: number;
+  circuit_breaker_threshold: number;
+  drawdown_threshold_pct: number;
+  symbol_loss_streak_threshold: number;
+  events: AnomalyEvent[];
+}
+
 // ── Fee Management ──────────────────────────────────────────────────
 
 export interface ExchangeFeeConfig {
@@ -483,4 +532,9 @@ export interface DashboardState {
   fee_stats?: FeeStats;
   // Transfer fee management
   transfer_configs?: Record<string, ExchangeTransferConfig>;
+  // Anomaly protection
+  anomaly_protection?: AnomalyProtectionState;
+  manual_stopped?: boolean;
+  manual_stop_timestamp?: number;
+  distribute_enabled?: boolean;
 }

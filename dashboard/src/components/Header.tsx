@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import type { Portfolio, Simulation, ProfitStats, UptimeInfo, ProxyUptimeInfo } from '../types';
+import type { Portfolio, Simulation, ProfitStats, UptimeInfo, ProxyUptimeInfo, AnomalyProtectionState } from '../types';
 
 interface HeaderProps {
   connected: boolean;
@@ -11,6 +11,9 @@ interface HeaderProps {
   portfolio: Portfolio | null;
   simulation: Simulation | null;
   profitStats: ProfitStats | null;
+  anomalyProtection?: AnomalyProtectionState;
+  manualStopped?: boolean;
+  manualStopTimestamp?: number;
   onLogout: () => void;
 }
 
@@ -56,7 +59,7 @@ const mobileNavClass = ({ isActive }: { isActive: boolean }) =>
     isActive ? 'bg-slate-700 text-white' : 'text-slate-500'
   }`;
 
-export default function Header({ connected, uptimeSeconds, uptimeInfo, connectedExchanges, totalExchanges, proxyUptimeInfo, portfolio, simulation, profitStats, onLogout }: HeaderProps) {
+export default function Header({ connected, uptimeSeconds, uptimeInfo, connectedExchanges, totalExchanges, proxyUptimeInfo, portfolio, simulation, profitStats, anomalyProtection, manualStopped, manualStopTimestamp, onLogout }: HeaderProps) {
   // Connection state: connected, reconnecting (disconnected but was authed), or disconnected
   const proxyDown = connected && proxyUptimeInfo && !proxyUptimeInfo.is_connected;
   const connectionDot = !connected
@@ -157,6 +160,99 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
               {connectionText}
             </span>
           </div>
+          {/* Anomaly protection / manual stop indicator */}
+          {manualStopped && (
+            <div className="hidden sm:flex items-center gap-1.5 relative group/anomaly cursor-default">
+              <div className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.5)]" />
+              <span className="text-red-400 text-xs font-medium">STOPPED</span>
+              <div className="absolute right-0 top-full mt-2 w-72 bg-slate-800 border border-red-900/50 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/anomaly:opacity-100 group-hover/anomaly:visible transition-all duration-150 z-50">
+                <div className="text-red-400 font-medium mb-2">Trading Manually Stopped</div>
+                {manualStopTimestamp != null && manualStopTimestamp > 0 && (
+                  <div className="mb-1"><span className="text-slate-500">Stopped for:</span> <span className="text-white font-mono">{formatDuration(Date.now() / 1000 - manualStopTimestamp)}</span></div>
+                )}
+                {portfolio && (
+                  <>
+                    <div className="mb-1"><span className="text-slate-500">Portfolio:</span> <span className="text-white font-mono">${portfolio.total_value.toFixed(2)}</span></div>
+                    <div><span className="text-slate-500">Session P&L:</span> <PnlText value={portfolio.net_pnl} /></div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+          {!manualStopped && anomalyProtection?.emergency_triggered && (
+            <div className="hidden sm:flex items-center gap-1.5 relative group/anomaly cursor-default">
+              <div className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.5)]" />
+              <span className="text-red-400 text-xs font-medium">EMERGENCY</span>
+              <div className="absolute right-0 top-full mt-2 w-72 bg-slate-800 border border-red-900/50 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/anomaly:opacity-100 group-hover/anomaly:visible transition-all duration-150 z-50">
+                <div className="text-red-400 font-medium mb-2">Emergency Sell-All Triggered</div>
+                <div className="text-slate-400 mb-2">{anomalyProtection.pause_reason}</div>
+                {anomalyProtection.pause_timestamp > 0 && (
+                  <div className="mb-1"><span className="text-slate-500">Duration:</span> <span className="text-white font-mono">{formatDuration(Date.now() / 1000 - anomalyProtection.pause_timestamp)}</span></div>
+                )}
+                <div className="mb-1"><span className="text-slate-500">Drawdown:</span> <span className="text-red-400 font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span></div>
+                <div className="text-amber-400 mt-2 font-medium">Requires manual resume</div>
+              </div>
+            </div>
+          )}
+          {!manualStopped && !anomalyProtection?.emergency_triggered && anomalyProtection?.paused && (
+            <div className="hidden sm:flex items-center gap-1.5 relative group/anomaly cursor-default">
+              <div className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.5)] animate-pulse" />
+              <span className="text-red-400 text-xs font-medium">PAUSED</span>
+              <div className="absolute right-0 top-full mt-2 w-80 bg-slate-800 border border-red-900/50 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/anomaly:opacity-100 group-hover/anomaly:visible transition-all duration-150 z-50">
+                <div className="text-red-400 font-medium mb-1">Trading Paused ({anomalyProtection.pause_layer})</div>
+                <div className="text-slate-400 mb-2">{anomalyProtection.pause_reason}</div>
+                {anomalyProtection.pause_timestamp > 0 && (
+                  <div className="mb-1"><span className="text-slate-500">Paused for:</span> <span className="text-white font-mono">{formatDuration(Date.now() / 1000 - anomalyProtection.pause_timestamp)}</span></div>
+                )}
+                <div className="mb-1"><span className="text-slate-500">Rolling P&L:</span> <span className="font-mono text-red-400">${anomalyProtection.rolling_pnl.toFixed(2)}</span> <span className="text-slate-600">/ threshold ${anomalyProtection.circuit_breaker_threshold.toFixed(2)}</span></div>
+                <div className="mb-1"><span className="text-slate-500">Drawdown:</span> <span className="font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span> <span className="text-slate-600">/ threshold {anomalyProtection.drawdown_threshold_pct.toFixed(1)}%</span></div>
+                <div className="mb-1"><span className="text-slate-500">Trades in window:</span> <span className="font-mono">{anomalyProtection.trades_in_window}</span> <span className="text-slate-600">({anomalyProtection.loss_rate.toFixed(1)}% loss rate)</span></div>
+                {Object.keys(anomalyProtection.symbol_blocks).length > 0 && (
+                  <div className="mb-1"><span className="text-slate-500">Blocked symbols:</span> <span className="text-amber-400">{Object.keys(anomalyProtection.symbol_blocks).join(', ')}</span></div>
+                )}
+                {anomalyProtection.events.length > 0 && (
+                  <div className="border-t border-slate-700 pt-2 mt-2 space-y-1">
+                    <div className="text-slate-500 font-medium">Recent events:</div>
+                    {anomalyProtection.events.slice(-3).reverse().map((e, i) => (
+                      <div key={i} className="text-slate-400 truncate">{e.level}: {e.reason}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {!manualStopped && !anomalyProtection?.paused && anomalyProtection?.warning_active && (
+            <div className="hidden sm:flex items-center gap-1.5 relative group/anomaly cursor-default">
+              <div className="w-2 h-2 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)] animate-pulse" />
+              <span className="text-amber-400 text-xs font-medium">WARNING</span>
+              <div className="absolute right-0 top-full mt-2 w-80 bg-slate-800 border border-amber-900/50 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/anomaly:opacity-100 group-hover/anomaly:visible transition-all duration-150 z-50">
+                <div className="text-amber-400 font-medium mb-1">Trade Size Reduced (x{anomalyProtection.trade_size_multiplier})</div>
+                <div className="text-slate-400 mb-2">{anomalyProtection.warning_reason}</div>
+                <div className="mb-1"><span className="text-slate-500">Rolling P&L:</span> <span className="font-mono text-amber-400">${anomalyProtection.rolling_pnl.toFixed(2)}</span> <span className="text-slate-600">/ threshold ${anomalyProtection.circuit_breaker_threshold.toFixed(2)}</span></div>
+                <div className="mb-1"><span className="text-slate-500">Trades in window:</span> <span className="font-mono">{anomalyProtection.trades_in_window}</span> <span className="text-slate-600">({anomalyProtection.loss_rate.toFixed(1)}% loss rate)</span></div>
+                <div><span className="text-slate-500">Drawdown:</span> <span className="font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span></div>
+              </div>
+            </div>
+          )}
+          {!manualStopped && anomalyProtection?.enabled && !anomalyProtection?.paused && !anomalyProtection?.warning_active && !anomalyProtection?.emergency_triggered && (
+            <div className="hidden sm:flex items-center gap-1.5 relative group/anomaly cursor-default">
+              <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.3)]" />
+              <span className="text-emerald-400 text-xs font-medium">Protected</span>
+              <div className="absolute right-0 top-full mt-2 w-80 bg-slate-800 border border-emerald-900/50 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/anomaly:opacity-100 group-hover/anomaly:visible transition-all duration-150 z-50">
+                <div className="text-emerald-400 font-medium mb-2">Anomaly Protection Active</div>
+                <div className="mb-1"><span className="text-slate-500">Rolling P&L:</span> <span className="font-mono">${anomalyProtection.rolling_pnl.toFixed(2)}</span> <span className="text-slate-600">/ threshold ${anomalyProtection.circuit_breaker_threshold.toFixed(2)}</span></div>
+                <div className="mb-1"><span className="text-slate-500">Peak portfolio:</span> <span className="font-mono">${anomalyProtection.peak_portfolio.toFixed(2)}</span></div>
+                <div className="mb-1"><span className="text-slate-500">Drawdown:</span> <span className="font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span> <span className="text-slate-600">/ threshold {anomalyProtection.drawdown_threshold_pct.toFixed(1)}%</span></div>
+                {Object.keys(anomalyProtection.symbol_blocks).length > 0 && (
+                  <div className="mb-1"><span className="text-slate-500">Blocked symbols:</span> <span className="text-amber-400">{Object.keys(anomalyProtection.symbol_blocks).join(', ')}</span></div>
+                )}
+                <div className="border-t border-slate-700 pt-2 mt-2">
+                  <span className="text-slate-500">Session:</span>{' '}
+                  <span className="text-slate-400">{anomalyProtection.total_pauses}p / {anomalyProtection.total_warnings}w / {anomalyProtection.total_symbol_blocks}sb</span>
+                </div>
+              </div>
+            </div>
+          )}
           <button
             onClick={onLogout}
             className="text-slate-500 hover:text-slate-300 text-sm transition-colors"

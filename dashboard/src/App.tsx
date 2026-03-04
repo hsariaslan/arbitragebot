@@ -182,6 +182,9 @@ export default function App() {
           portfolio={state.portfolio}
           simulation={state.simulation}
           profitStats={state.profit_stats ?? null}
+          anomalyProtection={state.anomaly_protection}
+          manualStopped={state.manual_stopped}
+          manualStopTimestamp={state.manual_stop_timestamp}
           onLogout={logout}
         />
 
@@ -231,10 +234,15 @@ export default function App() {
                 onSave={handleSaveSettings}
                 onApply={handleApplySettings}
                 onSendMessage={send}
+                onSendWithCallback={sendWithCallback}
                 feeConfigs={state.fee_configs}
                 feeRealMode={state.fee_real_mode}
                 feeStats={state.fee_stats}
                 transferConfigs={state.transfer_configs}
+                anomalyProtection={state.anomaly_protection}
+                manualStopped={state.manual_stopped}
+                balances={state.balances}
+                distributeEnabled={state.distribute_enabled}
               />
             } />
             <Route path="/settings/:subTab" element={
@@ -243,10 +251,15 @@ export default function App() {
                 onSave={handleSaveSettings}
                 onApply={handleApplySettings}
                 onSendMessage={send}
+                onSendWithCallback={sendWithCallback}
                 feeConfigs={state.fee_configs}
                 feeRealMode={state.fee_real_mode}
                 feeStats={state.fee_stats}
                 transferConfigs={state.transfer_configs}
+                anomalyProtection={state.anomaly_protection}
+                manualStopped={state.manual_stopped}
+                balances={state.balances}
+                distributeEnabled={state.distribute_enabled}
               />
             } />
             <Route path="/logs" element={

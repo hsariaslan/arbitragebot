@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { NavLink, useParams } from 'react-router-dom';
-import type { Settings, ExchangeFeeConfig, ExchangeTransferConfig, FeeStats } from '../types';
+import type { Settings, ExchangeFeeConfig, ExchangeTransferConfig, FeeStats, AnomalyProtectionState, ExchangeBalance } from '../types';
 import FeeManagementTab from './FeeManagementTab';
 import TransferFeeManagementTab from './TransferFeeManagementTab';
 import Tooltip from './Tooltip';
@@ -10,15 +10,20 @@ interface SettingsPageProps {
   onSave: (settings: Settings) => void;
   onApply: (settings: Settings) => void;
   onSendMessage: (msg: object) => void;
+  onSendWithCallback: (msg: object, callback: (data: any) => void) => void;
   feeConfigs?: Record<string, ExchangeFeeConfig>;
   feeRealMode?: boolean;
   feeStats?: FeeStats;
   transferConfigs?: Record<string, ExchangeTransferConfig>;
+  anomalyProtection?: AnomalyProtectionState;
+  manualStopped?: boolean;
+  balances?: Record<string, ExchangeBalance>;
+  distributeEnabled?: boolean;
 }
 
 type SettingsSubTab = 'general' | 'fees' | 'transfers';
 
-export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage, feeConfigs, feeRealMode, feeStats, transferConfigs }: SettingsPageProps) {
+export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage, onSendWithCallback, feeConfigs, feeRealMode, feeStats, transferConfigs, anomalyProtection, manualStopped, balances, distributeEnabled }: SettingsPageProps) {
   const { subTab } = useParams<{ subTab?: string }>();
   const activeSubTab: SettingsSubTab = subTab === 'fees' ? 'fees' : subTab === 'transfers' ? 'transfers' : 'general';
   const [tradeAmount, setTradeAmount] = useState(currentSettings.trade_amount_usd);
@@ -67,8 +72,27 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [oneLegFailureRate, setOneLegFailureRate] = useState(currentSettings.one_leg_failure_rate ?? 0.02);
   const [oneLegUnwindSlippageMult, setOneLegUnwindSlippageMult] = useState(currentSettings.one_leg_unwind_slippage_mult ?? 1.5);
   const [maxPositionMultiplier, setMaxPositionMultiplier] = useState(currentSettings.max_position_multiplier ?? 5.0);
+  const [anomalyEnabled, setAnomalyEnabled] = useState(currentSettings.anomaly_protection_enabled ?? true);
+  const [cbWindow, setCbWindow] = useState(currentSettings.circuit_breaker_window ?? 900);
+  const [cbThreshold, setCbThreshold] = useState(currentSettings.circuit_breaker_threshold ?? -5.0);
+  const [cbResumePct, setCbResumePct] = useState(currentSettings.circuit_breaker_resume_pct ?? 0.5);
+  const [cbCooldown, setCbCooldown] = useState(currentSettings.circuit_breaker_cooldown ?? 300);
+  const [ddThreshold, setDdThreshold] = useState(currentSettings.drawdown_threshold_pct ?? 5.0);
+  const [ddResumePct, setDdResumePct] = useState(currentSettings.drawdown_resume_pct ?? 3.0);
+  const [ddEmergencyMult, setDdEmergencyMult] = useState(currentSettings.drawdown_emergency_mult ?? 2.0);
+  const [lsThreshold, setLsThreshold] = useState(currentSettings.symbol_loss_streak_threshold ?? 4);
+  const [lsCooldown, setLsCooldown] = useState(currentSettings.symbol_loss_streak_cooldown ?? 300);
+  const [warningPnlPct, setWarningPnlPct] = useState(currentSettings.warning_pnl_pct ?? 0.5);
+  const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [securityStatus, setSecurityStatus] = useState<string | null>(null);
   const [showRestartConfirm, setShowRestartConfirm] = useState(false);
+  const [showHardStop, setShowHardStop] = useState(false);
+  const [hardStopBitfinex, setHardStopBitfinex] = useState(true);
+  const [hardStopConfirmText, setHardStopConfirmText] = useState('');
+  const [hardStopResult, setHardStopResult] = useState<{ positions_sold: number; total_gross: number; total_fees: number; total_net: number; sells: { exchange: string; symbol: string; qty: number; price: number; gross: number; fee: number; net: number; path: string }[] } | null>(null);
+  const [showDistribute, setShowDistribute] = useState(false);
+  const [distributeConfirmText, setDistributeConfirmText] = useState('');
+  const [distributeResult, setDistributeResult] = useState<{ distributed: number; transfers: { exchange: string; amount: number }[]; strategy: string } | null>(null);
 
   // Sync from server when not dirty
   const settingsKey = JSON.stringify(currentSettings);
@@ -117,6 +141,17 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setMaxPositionMultiplier(currentSettings.max_position_multiplier ?? 5.0);
       setIpWhitelistEnabled(currentSettings.ip_whitelist_enabled ?? false);
       setIpWhitelist((currentSettings.ip_whitelist ?? []).join(', '));
+      setAnomalyEnabled(currentSettings.anomaly_protection_enabled ?? true);
+      setCbWindow(currentSettings.circuit_breaker_window ?? 900);
+      setCbThreshold(currentSettings.circuit_breaker_threshold ?? -5.0);
+      setCbResumePct(currentSettings.circuit_breaker_resume_pct ?? 0.5);
+      setCbCooldown(currentSettings.circuit_breaker_cooldown ?? 300);
+      setDdThreshold(currentSettings.drawdown_threshold_pct ?? 5.0);
+      setDdResumePct(currentSettings.drawdown_resume_pct ?? 3.0);
+      setDdEmergencyMult(currentSettings.drawdown_emergency_mult ?? 2.0);
+      setLsThreshold(currentSettings.symbol_loss_streak_threshold ?? 4);
+      setLsCooldown(currentSettings.symbol_loss_streak_cooldown ?? 300);
+      setWarningPnlPct(currentSettings.warning_pnl_pct ?? 0.5);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsKey]);
@@ -163,6 +198,17 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     one_leg_failure_rate: oneLegFailureRate,
     one_leg_unwind_slippage_mult: oneLegUnwindSlippageMult,
     max_position_multiplier: maxPositionMultiplier,
+    anomaly_protection_enabled: anomalyEnabled,
+    circuit_breaker_window: cbWindow,
+    circuit_breaker_threshold: cbThreshold,
+    circuit_breaker_resume_pct: cbResumePct,
+    circuit_breaker_cooldown: cbCooldown,
+    drawdown_threshold_pct: ddThreshold,
+    drawdown_resume_pct: ddResumePct,
+    drawdown_emergency_mult: ddEmergencyMult,
+    symbol_loss_streak_threshold: lsThreshold,
+    symbol_loss_streak_cooldown: lsCooldown,
+    warning_pnl_pct: warningPnlPct,
   });
 
   const handleSave = () => {
@@ -664,6 +710,207 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         </div>
       </div>
 
+      {/* Anomaly Protection */}
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Anomaly Protection</h2>
+
+        {/* Status banner */}
+        {anomalyProtection?.paused && (
+          <div className="mb-4 p-3 bg-red-950/50 border border-red-900/50 rounded-lg">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-red-400 font-medium text-sm">Trading Paused</span>
+                <span className="text-slate-400 text-xs ml-2">({anomalyProtection.pause_layer})</span>
+                <p className="text-slate-400 text-xs mt-1">{anomalyProtection.pause_reason}</p>
+              </div>
+              <button onClick={() => onSendMessage({ type: 'anomaly_resume' })}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium transition-colors">
+                Resume Trading
+              </button>
+            </div>
+          </div>
+        )}
+        {anomalyProtection?.warning_active && !anomalyProtection?.paused && (
+          <div className="mb-4 p-3 bg-amber-950/30 border border-amber-900/50 rounded-lg">
+            <span className="text-amber-400 font-medium text-sm">Warning Active</span>
+            <span className="text-slate-400 text-xs ml-2">(trade size x0.5)</span>
+            <p className="text-slate-400 text-xs mt-1">{anomalyProtection.warning_reason}</p>
+          </div>
+        )}
+
+        {/* Live stats */}
+        {anomalyProtection && (
+          <div className="mb-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div className="bg-slate-700/50 rounded-lg p-2">
+              <div className="text-slate-500">Rolling P&L</div>
+              <div className={`font-mono font-medium ${anomalyProtection.rolling_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                ${anomalyProtection.rolling_pnl.toFixed(2)}
+              </div>
+            </div>
+            <div className="bg-slate-700/50 rounded-lg p-2">
+              <div className="text-slate-500">Drawdown</div>
+              <div className={`font-mono font-medium ${anomalyProtection.current_drawdown_pct > 2 ? 'text-amber-400' : 'text-slate-300'}`}>
+                {anomalyProtection.current_drawdown_pct.toFixed(2)}%
+              </div>
+            </div>
+            <div className="bg-slate-700/50 rounded-lg p-2">
+              <div className="text-slate-500">Pauses / Warnings</div>
+              <div className="text-slate-300 font-mono">{anomalyProtection.total_pauses}p / {anomalyProtection.total_warnings}w</div>
+            </div>
+            <div className="bg-slate-700/50 rounded-lg p-2">
+              <div className="text-slate-500">Symbol Blocks</div>
+              <div className="text-slate-300 font-mono">{anomalyProtection.total_symbol_blocks}</div>
+            </div>
+          </div>
+        )}
+
+        {/* Blocked symbols */}
+        {anomalyProtection && Object.keys(anomalyProtection.symbol_blocks).length > 0 && (
+          <div className="mb-4 p-3 bg-slate-700/30 rounded-lg">
+            <div className="text-xs text-slate-500 mb-1">Blocked Symbols</div>
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(anomalyProtection.symbol_blocks).map(([sym, until]) => (
+                <span key={sym} className="px-2 py-0.5 bg-red-950/50 border border-red-900/50 rounded text-xs text-red-400">
+                  {sym} <span className="text-slate-500">({Math.max(0, Math.round((until - Date.now() / 1000)))}s)</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-4">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <input type="checkbox" checked={anomalyEnabled}
+              onChange={e => { setDirty(true); setAnomalyEnabled(e.target.checked); }}
+              className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
+            <span className="text-sm text-slate-300">Enable Anomaly Protection</span>
+            <Tooltip text="Master toggle for the 3-layer anomaly protection system: circuit breaker (rolling P&L), drawdown protection (peak-to-trough), and per-symbol loss streak detection. When disabled, no anomaly checks run. Default: enabled. Config key: anomaly_protection_enabled" />
+          </label>
+
+          {anomalyEnabled && (
+            <>
+            {/* Layer 1: Circuit Breaker */}
+            <div className="border-l-2 border-blue-600/50 pl-4 space-y-3">
+              <h3 className="text-xs font-semibold text-blue-400 uppercase tracking-wider">Layer 1: Circuit Breaker (Rolling P&L)</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="flex items-center text-xs text-slate-500 mb-1">
+                    Window (seconds)
+                    <Tooltip text="Rolling time window for P&L tracking. Only trades within this window count toward the threshold. Shorter windows react faster but may false-trigger. Range: 60-7200. Default: 900 (15 min). Config key: circuit_breaker_window" />
+                  </label>
+                  <input type="number" value={cbWindow} min={60} max={7200} step={60}
+                    onChange={d(setCbWindow, 900)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                  <label className="flex items-center text-xs text-slate-500 mb-1">
+                    Threshold ($)
+                    <Tooltip text="If rolling P&L drops below this value, all trading is paused. For $1000 capital, -$5 means -0.5% loss in the window. Must be negative. Range: -1000 to 0. Default: -$5.00. Config key: circuit_breaker_threshold" />
+                  </label>
+                  <input type="number" value={cbThreshold} min={-1000} max={0} step={0.5}
+                    onChange={d(setCbThreshold, -5.0)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                  <label className="flex items-center text-xs text-slate-500 mb-1">
+                    Resume %
+                    <Tooltip text="Auto-resume when rolling P&L recovers above threshold x resume%. At 0.5 with -$5 threshold, resumes when P&L > -$2.50. Range: 0.1-1.0. Default: 0.5. Config key: circuit_breaker_resume_pct" />
+                  </label>
+                  <input type="number" value={cbResumePct} min={0.1} max={1.0} step={0.1}
+                    onChange={d(setCbResumePct, 0.5)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                  <label className="flex items-center text-xs text-slate-500 mb-1">
+                    Cooldown (seconds)
+                    <Tooltip text="Minimum wait time before auto-resuming after circuit breaker triggers. Even if P&L recovers quickly, trading won't resume until cooldown expires. Range: 30-3600. Default: 300 (5 min). Config key: circuit_breaker_cooldown" />
+                  </label>
+                  <input type="number" value={cbCooldown} min={30} max={3600} step={30}
+                    onChange={d(setCbCooldown, 300)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                </div>
+              </div>
+            </div>
+
+            {/* Layer 2: Drawdown */}
+            <div className="border-l-2 border-amber-600/50 pl-4 space-y-3">
+              <h3 className="text-xs font-semibold text-amber-400 uppercase tracking-wider">Layer 2: Drawdown Protection (Peak-to-Trough)</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div>
+                  <label className="flex items-center text-xs text-slate-500 mb-1">
+                    Threshold (%)
+                    <Tooltip text="If portfolio drops this % from session peak, all trading is paused. For $1000 capital at 5%: pause at -$50. Accounts for crypto positions' market value. Range: 0.5-20.0. Default: 5.0%. Config key: drawdown_threshold_pct" />
+                  </label>
+                  <input type="number" value={ddThreshold} min={0.5} max={20.0} step={0.5}
+                    onChange={d(setDdThreshold, 5.0)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                  <label className="flex items-center text-xs text-slate-500 mb-1">
+                    Resume (%)
+                    <Tooltip text="Auto-resume when drawdown recovers below this %. Must be lower than threshold. Range: 0.1-10.0. Default: 3.0%. Config key: drawdown_resume_pct" />
+                  </label>
+                  <input type="number" value={ddResumePct} min={0.1} max={10.0} step={0.5}
+                    onChange={d(setDdResumePct, 3.0)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                  <label className="flex items-center text-xs text-slate-500 mb-1">
+                    Emergency Multiplier
+                    <Tooltip text="At threshold x multiplier drawdown, triggers EMERGENCY sell-all. With 5% threshold and 2.0x mult: emergency at 10%. Sells all crypto positions immediately. Requires manual resume. Range: 1.5-5.0. Default: 2.0. Config key: drawdown_emergency_mult" />
+                  </label>
+                  <input type="number" value={ddEmergencyMult} min={1.5} max={5.0} step={0.5}
+                    onChange={d(setDdEmergencyMult, 2.0)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                </div>
+              </div>
+            </div>
+
+            {/* Layer 3: Per-Symbol Loss Streak */}
+            <div className="border-l-2 border-purple-600/50 pl-4 space-y-3">
+              <h3 className="text-xs font-semibold text-purple-400 uppercase tracking-wider">Layer 3: Per-Symbol Loss Streak</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="flex items-center text-xs text-slate-500 mb-1">
+                    Streak Threshold
+                    <Tooltip text="Number of consecutive losing trades on the SAME symbol before blocking it. Only that symbol is blocked — other symbols keep trading. Resets on a profitable trade. Range: 2-20. Default: 4. Config key: symbol_loss_streak_threshold" />
+                  </label>
+                  <input type="number" value={lsThreshold} min={2} max={20} step={1}
+                    onChange={d(setLsThreshold, 4)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                  <label className="flex items-center text-xs text-slate-500 mb-1">
+                    Block Cooldown (seconds)
+                    <Tooltip text="How long a symbol stays blocked after hitting the loss streak threshold. After cooldown, the streak resets and the symbol can trade again. Range: 60-3600. Default: 300 (5 min). Config key: symbol_loss_streak_cooldown" />
+                  </label>
+                  <input type="number" value={lsCooldown} min={60} max={3600} step={30}
+                    onChange={d(setLsCooldown, 300)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                </div>
+              </div>
+            </div>
+
+            {/* Warning */}
+            <div className="border-l-2 border-slate-600/50 pl-4 space-y-3">
+              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Warning (Pre-Pause Trade Size Reduction)</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="flex items-center text-xs text-slate-500 mb-1">
+                    Warning P&L %
+                    <Tooltip text="When rolling P&L drops below threshold x warning%, trade size is reduced to 0.5x as a precaution. At 0.5 with -$5 threshold: warning at -$2.50. Early defensive measure before full pause. Range: 0.1-1.0. Default: 0.5. Config key: warning_pnl_pct" />
+                  </label>
+                  <input type="number" value={warningPnlPct} min={0.1} max={1.0} step={0.1}
+                    onChange={d(setWarningPnlPct, 0.5)}
+                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+                </div>
+              </div>
+            </div>
+            </>
+          )}
+        </div>
+      </div>
+
       {/* Security */}
       <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Security</h2>
@@ -710,15 +957,76 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       {/* Danger Zone */}
       <div className="bg-red-950/30 border border-red-900/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-red-400 uppercase tracking-wider mb-3">Danger Zone</h2>
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <p className="text-sm text-slate-300">Restart Bot</p>
-            <p className="text-xs text-slate-500 mt-0.5">Discard all session data and start fresh with ${totalCapital}.</p>
+        <div className="space-y-4">
+          {/* Manual Stop/Start */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <p className="text-sm text-slate-300">Manual Trading Control</p>
+              <p className="text-xs mt-0.5">
+                {manualStopped
+                  ? <span className="text-red-400">Trading is STOPPED</span>
+                  : <span className="text-emerald-400">Trading is ACTIVE</span>
+                }
+              </p>
+            </div>
+            {manualStopped ? (
+              <button onClick={() => onSendMessage({ type: 'manual_start' })}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition-colors">
+                Start Trading
+              </button>
+            ) : (
+              <button onClick={() => setShowStopConfirm(true)}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors">
+                Stop Trading
+              </button>
+            )}
           </div>
-          <button onClick={() => setShowRestartConfirm(true)}
-            className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors">
-            Restart Bot
-          </button>
+          <div className="border-t border-red-900/30" />
+          {/* Hard Stop */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <p className="text-sm text-slate-300">Hard Stop — Convert All Crypto to USDT</p>
+              <p className="text-xs text-slate-500 mt-0.5">Sell all crypto positions across all exchanges. Stops trading automatically.</p>
+            </div>
+            <button onClick={() => { setShowHardStop(true); setHardStopConfirmText(''); setHardStopResult(null); }}
+              className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
+              Hard Stop
+            </button>
+          </div>
+          <div className="border-t border-red-900/30" />
+          {/* Distribute from Bitfinex */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <p className="text-sm text-slate-300">Distribute USDT from Bitfinex</p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {distributeEnabled
+                  ? 'Distribute Bitfinex USDT to exchanges based on symbol profitability.'
+                  : 'Enabled after Hard Stop with Transfer to Bitfinex, or switching to live mode.'}
+              </p>
+            </div>
+            <button
+              onClick={() => { setShowDistribute(true); setDistributeConfirmText(''); setDistributeResult(null); }}
+              disabled={!distributeEnabled}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
+                distributeEnabled
+                  ? 'bg-red-600 hover:bg-red-500 text-white'
+                  : 'bg-slate-700 text-slate-500 cursor-not-allowed'
+              }`}>
+              Distribute USDT
+            </button>
+          </div>
+          <div className="border-t border-red-900/30" />
+          {/* Restart Bot */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <p className="text-sm text-slate-300">Restart Bot</p>
+              <p className="text-xs text-slate-500 mt-0.5">Discard all session data and start fresh with ${totalCapital}.</p>
+            </div>
+            <button onClick={() => setShowRestartConfirm(true)}
+              className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors">
+              Restart Bot
+            </button>
+          </div>
         </div>
       </div>
 
@@ -736,6 +1044,31 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <span className="text-emerald-400 text-sm font-medium">{saveStatus}</span>
         )}
       </div>
+
+      {/* Stop Trading Confirmation Modal */}
+      {showStopConfirm && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-slate-800 rounded-xl p-6 max-w-md w-full mx-4 border border-red-900/50">
+            <h3 className="text-lg font-semibold text-white mb-2">Stop Trading?</h3>
+            <p className="text-slate-400 text-sm mb-4">
+              Are you sure you want to stop all trading? The bot will remain running but will not execute any trades until you start it again.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => setShowStopConfirm(false)}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-sm">
+                Cancel
+              </button>
+              <button onClick={() => {
+                onSendMessage({ type: 'manual_stop' });
+                setShowStopConfirm(false);
+              }}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium">
+                Stop Trading
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Restart Confirmation Modal */}
       {showRestartConfirm && (
@@ -757,6 +1090,249 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
                 className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium">
                 Restart
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hard Stop Modal */}
+      {showHardStop && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-slate-800 rounded-xl max-w-lg w-full mx-4 border border-red-900/50 overflow-hidden">
+            <div className="bg-red-900/60 px-6 py-3">
+              <h3 className="text-lg font-semibold text-red-200">Hard Stop — Convert All Crypto to USDT</h3>
+            </div>
+            <div className="p-6">
+              {hardStopResult ? (
+                <div>
+                  <p className="text-emerald-400 font-medium mb-3">Hard Stop Complete</p>
+                  <div className="text-sm text-slate-300 space-y-1">
+                    <div>Positions sold: <span className="text-white font-mono">{hardStopResult.positions_sold}</span></div>
+                    <div>Total gross: <span className="text-white font-mono">${hardStopResult.total_gross.toFixed(2)}</span></div>
+                    <div>Total fees: <span className="text-amber-400 font-mono">${hardStopResult.total_fees.toFixed(4)}</span></div>
+                    <div>Total net: <span className="text-emerald-400 font-mono">${hardStopResult.total_net.toFixed(2)}</span></div>
+                  </div>
+                  {hardStopResult.sells?.length > 0 && (
+                    <div className="mt-3 max-h-48 overflow-y-auto border border-slate-700/50 rounded-lg">
+                      <table className="w-full text-xs">
+                        <thead className="bg-slate-900/80 sticky top-0">
+                          <tr className="text-slate-500">
+                            <th className="text-left px-2 py-1">Exchange</th>
+                            <th className="text-left px-2 py-1">Symbol</th>
+                            <th className="text-right px-2 py-1">Gross</th>
+                            <th className="text-right px-2 py-1">Fee</th>
+                            <th className="text-left px-2 py-1">Path</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {hardStopResult.sells.map((s, i) => (
+                            <tr key={i} className="border-t border-slate-700/30">
+                              <td className="px-2 py-1 text-slate-300">{s.exchange}</td>
+                              <td className="px-2 py-1 text-white">{s.symbol}</td>
+                              <td className="px-2 py-1 text-right font-mono text-white">${s.gross.toFixed(2)}</td>
+                              <td className="px-2 py-1 text-right font-mono text-amber-400">${s.fee.toFixed(4)}</td>
+                              <td className="px-2 py-1 text-slate-400">{s.path}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <div className="flex gap-3 justify-end mt-4">
+                    <button onClick={() => setShowHardStop(false)}
+                      className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-sm">
+                      Close
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="mb-4">
+                    <label className="flex items-center gap-2 cursor-pointer mb-3">
+                      <input type="checkbox" checked={hardStopBitfinex} onChange={e => setHardStopBitfinex(e.target.checked)}
+                        className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-500" />
+                      <span className="text-sm text-slate-300">Transfer to Bitfinex (0% taker fee)</span>
+                    </label>
+                    <p className="text-xs text-slate-500">
+                      {hardStopBitfinex
+                        ? 'Crypto will be transferred to Bitfinex and sold at 0% taker. Symbols not available on Bitfinex are sold locally.'
+                        : 'All crypto will be sold locally on each exchange (pays taker fee per exchange).'}
+                    </p>
+                  </div>
+                  {/* Fee estimate */}
+                  {balances && feeConfigs && (
+                    <div className="bg-slate-900/50 rounded-lg p-3 mb-4 text-xs">
+                      <div className="text-slate-500 font-medium mb-2">Fee Estimate</div>
+                      {(() => {
+                        let totalCrypto = 0;
+                        let estFees = 0;
+                        let localFees = 0;
+                        const perExchange: { exchange: string; crypto: number; fee: number; localFee: number; positions: number }[] = [];
+                        Object.entries(balances).forEach(([ex, bal]) => {
+                          let exCrypto = 0;
+                          let exFee = 0;
+                          let exLocalFee = 0;
+                          let positions = 0;
+                          Object.values(bal.crypto || {}).forEach(c => {
+                            if (c.value > 0) {
+                              exCrypto += c.value;
+                              positions++;
+                              const feeRate = feeConfigs[ex]?.base_taker_rate ?? 0.001;
+                              const discount = feeConfigs[ex]?.token_discount_enabled ? (feeConfigs[ex]?.token_discount_pct ?? 0) : 0;
+                              const localFeeAmt = c.value * feeRate * (1 - discount);
+                              exLocalFee += localFeeAmt;
+                              if (!hardStopBitfinex || ex === 'Bitfinex') {
+                                exFee += localFeeAmt;
+                              }
+                              // With Bitfinex transfer: 0% taker (no fee for non-Bitfinex exchanges)
+                            }
+                          });
+                          if (positions > 0) {
+                            totalCrypto += exCrypto;
+                            estFees += exFee;
+                            localFees += exLocalFee;
+                            perExchange.push({ exchange: ex, crypto: exCrypto, fee: exFee, localFee: exLocalFee, positions });
+                          }
+                        });
+                        return (
+                          <div className="space-y-2 text-slate-300">
+                            <div>Total crypto value: <span className="text-white font-mono">${totalCrypto.toFixed(2)}</span> ({perExchange.reduce((s, e) => s + e.positions, 0)} positions)</div>
+                            {perExchange.length > 0 && (
+                              <div className="border-t border-slate-700/50 pt-1.5 space-y-0.5">
+                                {perExchange.map(e => (
+                                  <div key={e.exchange} className="flex justify-between">
+                                    <span className="text-slate-400">{e.exchange} <span className="text-slate-600">({e.positions} pos, ${e.crypto.toFixed(2)})</span></span>
+                                    <span className="font-mono">
+                                      {hardStopBitfinex && e.exchange !== 'Bitfinex'
+                                        ? <span className="text-emerald-400">$0.0000</span>
+                                        : <span className="text-amber-400">${e.fee.toFixed(4)}</span>}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            <div className="border-t border-slate-700/50 pt-1.5">
+                              <div className="flex justify-between font-medium">
+                                <span>Total estimated fees:</span>
+                                <span className="text-amber-400 font-mono">${estFees.toFixed(4)}</span>
+                              </div>
+                              {hardStopBitfinex && (
+                                <div className="text-emerald-400 mt-0.5">Savings vs local sell: ~${(localFees - estFees).toFixed(4)}</div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                  <div className="mb-4">
+                    <label className="block text-xs text-slate-500 mb-1">Type <span className="text-red-400 font-mono">hard stop</span> to confirm:</label>
+                    <input type="text" value={hardStopConfirmText} onChange={e => setHardStopConfirmText(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600"
+                      placeholder="hard stop" autoFocus />
+                  </div>
+                  <div className="flex gap-3 justify-end">
+                    <button onClick={() => setShowHardStop(false)}
+                      className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-sm">
+                      Cancel
+                    </button>
+                    <button
+                      disabled={hardStopConfirmText !== 'hard stop'}
+                      onClick={() => {
+                        onSendWithCallback(
+                          { type: 'hard_stop', transfer_to_bitfinex: hardStopBitfinex },
+                          (data) => setHardStopResult(data),
+                        );
+                        setHardStopConfirmText('');
+                      }}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium ${
+                        hardStopConfirmText === 'hard stop'
+                          ? 'bg-red-600 hover:bg-red-500 text-white'
+                          : 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                      }`}>
+                      Confirm Hard Stop
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Distribute USDT from Bitfinex Modal */}
+      {showDistribute && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-slate-800 rounded-xl max-w-lg w-full mx-4 border border-red-900/50 overflow-hidden">
+            <div className="bg-red-900/60 px-6 py-3">
+              <h3 className="text-lg font-semibold text-red-200">Distribute USDT from Bitfinex</h3>
+            </div>
+            <div className="p-6">
+              {distributeResult ? (
+                <div>
+                  <p className="text-emerald-400 font-medium mb-3">Distribution Complete ({distributeResult.strategy})</p>
+                  <div className="text-sm text-slate-300 space-y-1">
+                    <div>Total distributed: <span className="text-white font-mono">${distributeResult.distributed.toFixed(2)}</span></div>
+                    {distributeResult.transfers.map((t, i) => (
+                      <div key={i} className="text-xs text-slate-400">Bitfinex → {t.exchange}: <span className="font-mono text-white">${t.amount.toFixed(2)}</span></div>
+                    ))}
+                  </div>
+                  <div className="flex gap-3 justify-end mt-4">
+                    <button onClick={() => setShowDistribute(false)}
+                      className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-sm">
+                      Close
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {balances?.Bitfinex && (
+                    <div className="bg-slate-900/50 rounded-lg p-3 mb-4 text-xs">
+                      <div className="text-slate-500 font-medium mb-2">Bitfinex Balance</div>
+                      <div className="space-y-1 text-slate-300">
+                        <div>USDT: <span className="text-white font-mono">${balances.Bitfinex.usdt.toFixed(2)}</span></div>
+                        <div>Reserve: <span className="text-amber-400 font-mono">~${(Number(currentSettings.total_capital ?? 1800) * Number(currentSettings.bitfinex_reserve_pct ?? 0.15)).toFixed(2)}</span></div>
+                        <div>Available: <span className="text-emerald-400 font-mono">${Math.max(0, balances.Bitfinex.usdt - Number(currentSettings.total_capital ?? 1800) * Number(currentSettings.bitfinex_reserve_pct ?? 0.15)).toFixed(2)}</span></div>
+                      </div>
+                      <div className="mt-2 text-slate-500">Distribution: score-weighted to profitable exchanges (free transfer)</div>
+                    </div>
+                  )}
+                  <div className="mb-4">
+                    <label className="block text-xs text-slate-500 mb-1">Type <span className="text-red-400 font-mono">distribute usdt</span> to confirm:</label>
+                    <input type="text" value={distributeConfirmText} onChange={e => setDistributeConfirmText(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600"
+                      placeholder="distribute usdt" autoFocus />
+                  </div>
+                  <div className="flex gap-3 justify-end">
+                    <button onClick={() => setShowDistribute(false)}
+                      className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-sm">
+                      Cancel
+                    </button>
+                    <button
+                      disabled={distributeConfirmText !== 'distribute usdt'}
+                      onClick={() => {
+                        onSendWithCallback(
+                          { type: 'distribute_from_bitfinex' },
+                          (data) => {
+                            if (data.type === 'distribute_error') {
+                              setDistributeResult({ distributed: 0, transfers: [], strategy: data.error ?? 'Error' });
+                            } else {
+                              setDistributeResult(data);
+                            }
+                          },
+                        );
+                        setDistributeConfirmText('');
+                      }}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium ${
+                        distributeConfirmText === 'distribute usdt'
+                          ? 'bg-red-600 hover:bg-red-500 text-white'
+                          : 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                      }`}>
+                      Distribute
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>

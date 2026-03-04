@@ -166,6 +166,9 @@ class DashboardServer:
         self._last_settings_save: float = 0.0
         self._settings_cooldown: float = 5.0  # 5s between settings operations
 
+        # Distribute from Bitfinex — one-shot enabled on specific triggers
+        self._distribute_enabled: bool = False
+
     @staticmethod
     def _setup_auth_logger() -> logging.Logger:
         """Create a dedicated logger for authentication events."""
@@ -878,6 +881,18 @@ class DashboardServer:
         "one_leg_failure_rate": (float, 0.0, 0.20),
         "one_leg_unwind_slippage_mult": (float, 1.0, 5.0),
         "max_position_multiplier": (float, 0, 50),
+        # Anomaly protection
+        "anomaly_protection_enabled": (bool, None, None),
+        "circuit_breaker_window": (int, 60, 7200),
+        "circuit_breaker_threshold": (float, -1000, 0),
+        "circuit_breaker_resume_pct": (float, 0.1, 1.0),
+        "circuit_breaker_cooldown": (int, 30, 3600),
+        "drawdown_threshold_pct": (float, 0.5, 20.0),
+        "drawdown_resume_pct": (float, 0.1, 10.0),
+        "drawdown_emergency_mult": (float, 1.5, 5.0),
+        "symbol_loss_streak_threshold": (int, 2, 50),
+        "symbol_loss_streak_cooldown": (int, 60, 7200),
+        "warning_pnl_pct": (float, 0.1, 1.0),
     }
 
     _SETTINGS_ENUMS: dict[str, list[str]] = {
@@ -1166,6 +1181,41 @@ class DashboardServer:
             end_ts = msg.get("end", time.time())
             entries = await asyncio.to_thread(self._read_auth_logs_from_disk, start_ts, end_ts)
             await ws.send(json.dumps({"type": "export_auth_logs_result", "logs": entries}))
+
+        elif msg_type == "anomaly_resume":
+            self._monitor._anomaly.manual_resume()
+            self._monitor._anomaly_paused = False
+            logger.info("[Dashboard] Anomaly protection manually resumed")
+
+        elif msg_type == "manual_stop":
+            self._monitor._manual_stopped = True
+            self._monitor._manual_stop_timestamp = time.time()
+            logger.info("[Monitor] MANUAL_STOP by operator")
+
+        elif msg_type == "manual_start":
+            self._monitor._manual_stopped = False
+            self._monitor._manual_stop_timestamp = 0.0
+            logger.info("[Monitor] MANUAL_START by operator")
+
+        elif msg_type == "hard_stop":
+            transfer_to_bitfinex = msg.get("transfer_to_bitfinex", True)
+            self._monitor._manual_stopped = True
+            self._monitor._manual_stop_timestamp = time.time()
+            result = self._hard_stop_all(transfer_to_bitfinex)
+            if transfer_to_bitfinex:
+                self._distribute_enabled = True
+            await ws.send(json.dumps({"type": "hard_stop_result", **result}))
+
+        elif msg_type == "distribute_from_bitfinex":
+            if not self._distribute_enabled:
+                await ws.send(json.dumps({
+                    "type": "distribute_error",
+                    "error": "Distribution not enabled",
+                }))
+                return
+            result = self._distribute_from_bitfinex()
+            self._distribute_enabled = False
+            await ws.send(json.dumps({"type": "distribute_result", **result}))
 
         elif msg_type == "restart":
             logger.info("[Dashboard] Fresh restart requested from dashboard")
@@ -1543,6 +1593,7 @@ class DashboardServer:
 
     def _apply_settings(self, settings: dict) -> None:
         """Apply new settings: restart discovery with updated parameters."""
+        old_settings = dict(self._settings)  # snapshot for change detection
         trade_amount_pct = float(settings.get("trade_amount_pct", 0.0))
         total_capital = settings.get("total_capital", 1800.0)
         if trade_amount_pct > 0:
@@ -1655,6 +1706,31 @@ class DashboardServer:
         if "max_position_multiplier" in settings:
             self._monitor._max_position_multiplier = float(settings["max_position_multiplier"])
 
+        # Anomaly protection
+        anomaly = self._monitor._anomaly
+        if "anomaly_protection_enabled" in settings:
+            anomaly._enabled = settings["anomaly_protection_enabled"]
+        if "circuit_breaker_window" in settings:
+            anomaly._cb_window = int(settings["circuit_breaker_window"])
+        if "circuit_breaker_threshold" in settings:
+            anomaly._cb_threshold = float(settings["circuit_breaker_threshold"])
+        if "circuit_breaker_resume_pct" in settings:
+            anomaly._cb_resume_pct = float(settings["circuit_breaker_resume_pct"])
+        if "circuit_breaker_cooldown" in settings:
+            anomaly._cb_cooldown = int(settings["circuit_breaker_cooldown"])
+        if "drawdown_threshold_pct" in settings:
+            anomaly._dd_threshold_pct = float(settings["drawdown_threshold_pct"])
+        if "drawdown_resume_pct" in settings:
+            anomaly._dd_resume_pct = float(settings["drawdown_resume_pct"])
+        if "drawdown_emergency_mult" in settings:
+            anomaly._dd_emergency_mult = float(settings["drawdown_emergency_mult"])
+        if "symbol_loss_streak_threshold" in settings:
+            anomaly._sls_threshold = int(settings["symbol_loss_streak_threshold"])
+        if "symbol_loss_streak_cooldown" in settings:
+            anomaly._sls_cooldown = int(settings["symbol_loss_streak_cooldown"])
+        if "warning_pnl_pct" in settings:
+            anomaly._warning_pnl_pct = float(settings["warning_pnl_pct"])
+
         # execution_mode: persisted to settings.json but requires restart
         # (no hot-apply — executor creation happens at startup)
 
@@ -1676,6 +1752,16 @@ class DashboardServer:
 
         # Record config snapshot
         self._monitor.record_config_snapshot("settings_applied")
+
+        # Enable distribute if switching to live mode
+        old_mode = old_settings.get("execution_mode", "simulation")
+        new_mode = settings.get("execution_mode", old_mode)
+        if new_mode == "live" and old_mode != "live":
+            self._distribute_enabled = True
+            logger.info("[Settings] Execution mode changed to live — distribute from Bitfinex enabled")
+
+        # Log comprehensive settings snapshot with diffs
+        self._log_all_settings("settings_applied", old_settings=old_settings)
 
     def _apply_enabled_exchanges(self, fee_data: dict) -> None:
         """Hot-apply exchange enabled/disabled state to monitor/optimizer/balance.
@@ -1713,6 +1799,263 @@ class DashboardServer:
             f"active: {sorted(target_active)}"
             + (f", disabled: {sorted(disabled)}" if disabled else "")
         )
+
+    def _hard_stop_all(self, transfer_to_bitfinex: bool) -> dict:
+        """Convert all crypto positions to USDT. Operator action."""
+        if not self._balance:
+            return {"positions_sold": 0, "total_gross": 0, "total_fees": 0, "total_net": 0, "sells": []}
+
+        prices = self._monitor._get_current_prices()
+        bitfinex_available = "Bitfinex" in (self._balance._exchanges or [])
+        sells: list[dict] = []
+        total_gross = 0.0
+        total_fees = 0.0
+
+        for ex in list(self._balance._exchanges or []):
+            for sym in list(self._balance.crypto.get(ex, {}).keys()):
+                qty = self._balance.crypto[ex].get(sym, 0.0)
+                if qty <= 0:
+                    continue
+                price = prices.get(sym, 0.0)
+                if price <= 0:
+                    continue
+
+                # Determine sell path
+                use_bitfinex = (
+                    transfer_to_bitfinex
+                    and bitfinex_available
+                    and ex != "Bitfinex"
+                    and prices.get(sym, 0) > 0  # symbol has price data
+                )
+
+                if use_bitfinex:
+                    result = self._balance.force_sell_crypto_via_bitfinex(
+                        ex, sym, qty, price,
+                    )
+                    gross = result["gross"]
+                    fee = result["withdrawal_fee"]
+                    net = result["net"]
+                    sell_path = f"{ex}→Bitfinex (0% taker)"
+                else:
+                    # Sell locally
+                    fee_rate = (
+                        self._fee_manager.get_taker_fee(ex, sym)
+                        if self._fee_manager else 0.001
+                    )
+                    gross = qty * price
+                    fee = gross * fee_rate
+                    net = gross - fee
+                    self._balance.usdt[ex] += net
+                    self._balance.crypto[ex][sym] = 0.0
+                    sell_path = f"local ({ex})"
+
+                total_gross += gross
+                total_fees += fee
+                sells.append({
+                    "exchange": ex, "symbol": sym, "qty": round(qty, 8),
+                    "price": round(price, 4), "gross": round(gross, 2),
+                    "fee": round(fee, 4), "net": round(net, 2), "path": sell_path,
+                })
+                logger.warning(
+                    f"[Monitor] HARD_STOP_SELL {sym} on {ex}: "
+                    f"qty={qty:.6f} price=${price:.4f} gross=${gross:.2f} "
+                    f"fee=${fee:.4f} net=${net:.2f} via {sell_path}"
+                )
+
+        total_net = total_gross - total_fees
+        logger.warning(
+            f"[Monitor] HARD_STOP_COMPLETE: {len(sells)} positions sold, "
+            f"gross=${total_gross:.2f} fees=${total_fees:.4f} net=${total_net:.2f}"
+        )
+        return {
+            "positions_sold": len(sells),
+            "total_gross": round(total_gross, 2),
+            "total_fees": round(total_fees, 4),
+            "total_net": round(total_net, 2),
+            "sells": sells,
+        }
+
+    def _distribute_from_bitfinex(self) -> dict:
+        """Distribute USDT from Bitfinex to other exchanges. Operator action."""
+        if not self._balance or "Bitfinex" not in (self._balance._exchanges or []):
+            return {"available": 0, "transfers": [], "strategy": "none"}
+
+        bitfinex_usdt = self._balance.usdt.get("Bitfinex", 0.0)
+        reserve = getattr(self._balance, "_bitfinex_reserve_target", 0.0)
+        available = max(0, bitfinex_usdt - reserve)
+        if available < 10:
+            return {"available": round(available, 2), "transfers": [], "strategy": "insufficient"}
+
+        # Determine allocation strategy
+        enabled_exchanges = (
+            self._fee_manager.get_enabled_exchanges()
+            if self._fee_manager else set(self._balance._exchanges or [])
+        )
+        targets = [ex for ex in enabled_exchanges if ex != "Bitfinex"]
+        if not targets:
+            return {"available": round(available, 2), "transfers": [], "strategy": "no_targets"}
+
+        strategy = "even_split"
+        allocations: dict[str, float] = {}
+
+        # Try score-weighted allocation from optimizer
+        if self._optimizer and self._optimizer._active_symbols:
+            opt = self._optimizer
+            total_weight = 0.0
+            ex_weights: dict[str, float] = {}
+            for sym in opt._active_symbols:
+                score = opt._latest_scores.get(sym, 0.01)
+                dom = opt._dominant_pairs.get(sym, {})
+                buyers = dom.get("buyers", [])
+                for buyer_info in buyers:
+                    bex = buyer_info[0] if isinstance(buyer_info, (list, tuple)) else buyer_info
+                    if bex in targets:
+                        w = score * (buyer_info[1] if isinstance(buyer_info, (list, tuple)) and len(buyer_info) > 1 else 1.0)
+                        ex_weights[bex] = ex_weights.get(bex, 0) + w
+                        total_weight += w
+
+            if total_weight > 0 and ex_weights:
+                strategy = "score_weighted"
+                for ex, w in ex_weights.items():
+                    allocations[ex] = available * (w / total_weight)
+                # Give remaining exchanges a minimum share
+                remaining = [ex for ex in targets if ex not in allocations]
+                if remaining and len(allocations) < len(targets):
+                    min_share = available * 0.05  # 5% floor per exchange
+                    total_min = min_share * len(remaining)
+                    if total_min < available * 0.3:  # Don't exceed 30% for unallocated
+                        scale = (available - total_min) / available
+                        for ex in allocations:
+                            allocations[ex] *= scale
+                        for ex in remaining:
+                            allocations[ex] = min_share
+
+        # Fallback: even split
+        if not allocations:
+            per_exchange = available / len(targets)
+            allocations = {ex: per_exchange for ex in targets}
+
+        transfers: list[dict] = []
+        for ex, amount in allocations.items():
+            if amount < 1:
+                continue
+            self._balance.usdt["Bitfinex"] -= amount
+            self._balance.usdt[ex] = self._balance.usdt.get(ex, 0.0) + amount
+            transfers.append({"exchange": ex, "amount": round(amount, 2)})
+            logger.info(
+                f"[Monitor] DISTRIBUTE Bitfinex→{ex}: ${amount:.2f} (free)"
+            )
+
+        total_distributed = sum(t["amount"] for t in transfers)
+        logger.info(
+            f"[Monitor] DISTRIBUTE_COMPLETE: ${total_distributed:.2f} to "
+            f"{len(transfers)} exchanges ({strategy})"
+        )
+        return {
+            "available": round(available, 2),
+            "distributed": round(total_distributed, 2),
+            "transfers": transfers,
+            "strategy": strategy,
+        }
+
+    def _log_all_settings(self, reason: str, old_settings: dict | None = None) -> None:
+        """Log comprehensive settings snapshot. Called at session start and on change."""
+        s = self._settings
+        mon = self._monitor
+        opt = self._optimizer
+        bal = self._balance
+        ano = mon._anomaly if mon else None
+
+        # Trade amount
+        trade_pct = float(s.get("trade_amount_pct", 0))
+        capital = float(s.get("total_capital", 1800))
+        if trade_pct > 0:
+            ta_str = f"${round(capital * trade_pct, 2)} ({trade_pct * 100:.1f}% of ${capital:.0f})"
+        else:
+            ta_str = f"${s.get('trade_amount_usd', 10)} (fixed, capital=${capital:.0f})"
+
+        # Exchange fees summary
+        fee_parts = []
+        fee_cfgs = s.get("fee_configs", {})
+        disabled_exs = []
+        for ex_name in sorted(fee_cfgs.keys()):
+            cfg = fee_cfgs[ex_name]
+            if not cfg.get("enabled", True):
+                disabled_exs.append(ex_name)
+                continue
+            eff = cfg.get("base_taker_rate", 0.001)
+            if cfg.get("token_discount_enabled"):
+                eff *= (1 - cfg.get("token_discount_pct", 0))
+            # Short exchange name
+            short = {"Binance": "BIN", "OKX": "OKX", "Bybit": "BYB", "MEXC": "MEX",
+                     "Bitget": "BGT", "KuCoin": "KUC", "Gate.io": "GAT",
+                     "Pionex": "PIO", "Bitfinex": "BFX"}.get(ex_name, ex_name[:3])
+            fee_parts.append(f"{short}={eff * 100:.3f}%")
+
+        # Anomaly settings
+        ano_enabled = s.get("anomaly_protection_enabled", True)
+        cb_w = s.get("circuit_breaker_window", 900)
+        cb_t = s.get("circuit_breaker_threshold", -5.0)
+        cb_c = s.get("circuit_breaker_cooldown", 300)
+        dd_t = s.get("drawdown_threshold_pct", 5.0)
+        dd_e = s.get("drawdown_emergency_mult", 2.0)
+        sls_t = s.get("symbol_loss_streak_threshold", 4)
+        sls_c = s.get("symbol_loss_streak_cooldown", 300)
+
+        # Bitfinex reserve
+        bfx_pct = s.get("bitfinex_reserve_pct", 0.15)
+        bfx_floor = s.get("bitfinex_reserve_hard_floor", 0.05)
+
+        lines = [
+            f"trade_amount={ta_str}",
+            f"adaptive_mode={s.get('adaptive_mode', True)}, auto_rotate={s.get('auto_rotate', True)}",
+            f"max_symbols={s.get('max_active_symbols', 8)}, min_symbols={s.get('num_active_symbols', 3)}, scoring_window={s.get('scoring_window', 60)}s, eval_interval={s.get('evaluation_interval', 60)}s",
+            f"min_net_pct={s.get('min_net_profit_pct', 0.02):.2f}%, rebalance_cooldown={s.get('rebalance_cooldown', 30)}s, roi_horizon={s.get('rebalance_roi_horizon', 300)}s, roi_divisor={s.get('rebalance_roi_divisor', 5)}",
+            f"net_pnl_gate: warmup={s.get('net_pnl_gate_warmup_trades', 10)} trades, grace={s.get('net_pnl_gate_grace_seconds', 1800)}s",
+            f"net_pct_sizing={s.get('net_pct_sizing_enabled', True)}, cap={s.get('net_pct_multiplier_cap', 2.5)}",
+            f"spread_persistence={s.get('spread_persistence_ticks', 1)} ticks, evd_penalty={s.get('event_driven_seller_penalty_pct', 0.05)}, one_leg_rate={s.get('one_leg_failure_rate', 0.02)}, max_pos_mult={s.get('max_position_multiplier', 5.0)}",
+            f"anomaly: enabled={ano_enabled}, cb_window={cb_w}s, cb_threshold=${cb_t:.2f}, cb_cooldown={cb_c}s",
+            f"anomaly: dd_threshold={dd_t:.1f}%, dd_emergency={dd_e:.1f}x, streak_threshold={sls_t}, streak_cooldown={sls_c}s",
+            f"bitfinex_reserve={bfx_pct * 100:.1f}% (${capital * bfx_pct:.0f}), hard_floor={bfx_floor * 100:.1f}% (${capital * bfx_floor:.0f})",
+            f"hourly_transfer_cap=${s.get('hourly_external_transfer_cap', 2.0):.2f}",
+            f"fee_real_mode={s.get('fee_real_mode', False)}",
+            f"exchanges: {' '.join(fee_parts)}",
+            f"disabled_exchanges: {', '.join(disabled_exs) if disabled_exs else 'none'}",
+            f"execution_mode={s.get('execution_mode', 'simulation')}",
+        ]
+
+        detail_str = "\n".join(f"  | {line}" for line in lines)
+
+        # Change detection
+        changes_str = ""
+        if old_settings:
+            diffs = []
+            keys_to_check = [
+                "trade_amount_usd", "trade_amount_pct", "total_capital",
+                "adaptive_mode", "auto_rotate", "max_active_symbols",
+                "num_active_symbols", "min_net_profit_pct", "rebalance_cooldown",
+                "scoring_window", "evaluation_interval", "rebalance_roi_horizon",
+                "rebalance_roi_divisor", "net_pnl_gate_warmup_trades",
+                "net_pnl_gate_grace_seconds", "spread_persistence_ticks",
+                "event_driven_seller_penalty_pct", "one_leg_failure_rate",
+                "max_position_multiplier", "anomaly_protection_enabled",
+                "circuit_breaker_window", "circuit_breaker_threshold",
+                "circuit_breaker_cooldown", "drawdown_threshold_pct",
+                "drawdown_emergency_mult", "symbol_loss_streak_threshold",
+                "symbol_loss_streak_cooldown", "bitfinex_reserve_pct",
+                "hourly_external_transfer_cap", "execution_mode",
+                "net_pct_sizing_enabled", "net_pct_multiplier_cap",
+            ]
+            for k in keys_to_check:
+                old_v = old_settings.get(k)
+                new_v = s.get(k)
+                if old_v != new_v and old_v is not None:
+                    diffs.append(f"{k} {old_v}→{new_v}")
+            if diffs:
+                changes_str = f"\n  | CHANGES: {', '.join(diffs)}"
+
+        tag = reason.upper()
+        logger.info(f"[Settings] {tag}\n{detail_str}{changes_str}")
 
     def _build_optimizer_state(self) -> dict[str, Any]:
         """Collect optimizer state for dashboard broadcast."""
@@ -1776,6 +2119,14 @@ class DashboardServer:
         portfolio_value = self._balance.get_portfolio_value(prices) if self._balance.initialized else initial
         trading_pnl = sum(t.profit_usd for t in self._monitor._trades)
         transfer_fees = self._balance.total_transfer_fees
+
+        # Anomaly protection: update drawdown tracking with portfolio context
+        self._monitor._anomaly.update_portfolio_value(portfolio_value, context={
+            "portfolio_value": portfolio_value,
+            "active_symbols": len(active_symbols),
+            "connected_exchanges": connected,
+            "total_exchanges": len(active_exchanges),
+        })
 
         # Net profit awareness: update optimizer to gate rotations when in deficit
         credited_cashback = (
@@ -1969,6 +2320,10 @@ class DashboardServer:
             "daily_pnl": self._build_daily_pnl(),
             "settings": self._settings,
             "execution_mode": self._monitor._execution_mode,
+            "manual_stopped": self._monitor._manual_stopped,
+            "manual_stop_timestamp": self._monitor._manual_stop_timestamp,
+            "distribute_enabled": self._distribute_enabled,
+            **(self._monitor._anomaly.to_broadcast_dict()),
             "all_exchanges": ALL_EXCHANGES,
             "all_symbols": SYMBOLS,
             "optimizer": self._build_optimizer_state(),
