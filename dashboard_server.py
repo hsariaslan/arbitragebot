@@ -611,6 +611,12 @@ class DashboardServer:
             logger.info(
                 f"[Dashboard] WebSocket server started on ws://{DASHBOARD_BIND_HOST}:{DASHBOARD_WS_PORT}"
             )
+            # Log version and all settings 10s after server start (ensures log handler is ready for export)
+            def _log_startup():
+                from config import __version__
+                logger.info(f"[Config] version=v{__version__}")
+                self._log_all_settings("session_start")
+            asyncio.get_event_loop().call_later(10.0, _log_startup)
             while self._running:
                 if self._clients:
                     state = self._build_state()

@@ -269,9 +269,6 @@ async def main() -> None:
         transfer_fee_manager=transfer_fee_manager,
     )
 
-    # Log comprehensive settings snapshot at session start
-    dashboard._log_all_settings("session_start")
-
     # Demo/testnet portfolio comparison (optional — needs API keys in .env)
     from demo_fetcher import DemoPortfolioFetcher
     demo_fetcher = DemoPortfolioFetcher(
