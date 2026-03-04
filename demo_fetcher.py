@@ -112,6 +112,11 @@ class DemoPortfolioFetcher:
         # Set of exchanges that have demo executors (set by run.py)
         self._demo_exchanges: set[str] = set()
 
+        # Discrepancy log throttling: {key -> (last_log_time, last_diff_abs)}
+        self._disc_log_throttle: dict[str, tuple[float, float]] = {}
+        self._disc_log_interval: float = 300.0  # 5 min between repeated logs
+        self._disc_summary_time: float = 0.0  # last summary log time
+
         # Fee rate validation: track which exchanges have been validated (D-04)
         self._fee_validated: dict[str, bool] = {}
         # Actual demo/testnet fee rates (may differ from production config)
@@ -543,6 +548,35 @@ class DemoPortfolioFetcher:
     # D-18: Grace period after sim trades to avoid false discrepancies
     _TRADE_GRACE_PERIOD: float = 30.0  # seconds
 
+    def _should_log_discrepancy(self, key: str, diff_abs: float = 0.0) -> bool:
+        """Throttle repeated discrepancy logs. Returns True if should log.
+
+        Logs immediately on: first occurrence, time interval elapsed (5 min),
+        or significant value change (>50% diff change from last logged value).
+        """
+        now = time.time()
+        entry = self._disc_log_throttle.get(key)
+        if entry is None:
+            # First occurrence — always log
+            self._disc_log_throttle[key] = (now, diff_abs)
+            return True
+
+        last_time, last_diff = entry
+
+        # Time interval elapsed
+        if now - last_time >= self._disc_log_interval:
+            self._disc_log_throttle[key] = (now, diff_abs)
+            return True
+
+        # Significant value change (>50% diff change)
+        if last_diff > 0 and diff_abs > 0:
+            change_ratio = abs(diff_abs - last_diff) / last_diff
+            if change_ratio > 0.5:
+                self._disc_log_throttle[key] = (now, diff_abs)
+                return True
+
+        return False
+
     def _detect_discrepancies(
         self, exchange: str, demo: DemoBalance, prices: dict[str, float]
     ) -> list[Discrepancy]:
@@ -599,11 +633,12 @@ class DemoPortfolioFetcher:
                 root_cause=root,
             )
             discrepancies.append(disc)
-            logger.info(
-                f"[DemoCompare] {exchange} USDT {dtype}: "
-                f"sim=${sim_usdt:.2f} adjusted_demo=${adjusted_demo_usdt:.2f} "
-                f"diff=${usdt_diff:.2f} ({diff_pct:+.2f}%) — {root}"
-            )
+            if self._should_log_discrepancy(f"{exchange}:USDT:{dtype}", usdt_diff):
+                logger.info(
+                    f"[DemoCompare] {exchange} USDT {dtype}: "
+                    f"sim=${sim_usdt:.2f} adjusted_demo=${adjusted_demo_usdt:.2f} "
+                    f"diff=${usdt_diff:.2f} ({diff_pct:+.2f}%) — {root}"
+                )
 
         # 2. Crypto positions — compare qty deltas from baseline
         # Check symbols where sim holds qty > 0 OR demo has a non-zero
@@ -665,11 +700,25 @@ class DemoPortfolioFetcher:
                     root_cause=root,
                 )
                 discrepancies.append(disc)
-                logger.info(
-                    f"[DemoCompare] {exchange} {sym} {dtype}: "
-                    f"sim=${sim_val:.2f} demo_delta=${adjusted_demo_val:.2f} "
-                    f"diff=${val_diff:.2f} ({diff_pct:+.2f}%) — {root}"
-                )
+                if self._should_log_discrepancy(f"{exchange}:{sym}:{dtype}", val_diff):
+                    logger.info(
+                        f"[DemoCompare] {exchange} {sym} {dtype}: "
+                        f"sim=${sim_val:.2f} demo_delta=${adjusted_demo_val:.2f} "
+                        f"diff=${val_diff:.2f} ({diff_pct:+.2f}%) — {root}"
+                    )
+
+        # Periodic summary of active discrepancies (every 5 min)
+        now = time.time()
+        if discrepancies and now - self._disc_summary_time >= 300.0:
+            self._disc_summary_time = now
+            type_counts: dict[str, int] = {}
+            for d in discrepancies:
+                type_counts[d.discrepancy_type] = type_counts.get(d.discrepancy_type, 0) + 1
+            parts = " ".join(f"{t}={c}" for t, c in sorted(type_counts.items()))
+            logger.info(
+                f"[DemoCompare] {exchange} active discrepancies: "
+                f"{len(discrepancies)} ({parts})"
+            )
 
         return discrepancies
 
