@@ -654,6 +654,12 @@ class DashboardServer:
         if fee_configs:
             self._apply_enabled_exchanges(fee_configs)
 
+        # Sync persisted settings to components at startup.
+        # run.py passes some settings to constructors, but may use stale defaults
+        # if settings.json was updated via dashboard in a previous session.
+        # This ensures values like hourly_external_transfer_cap are current.
+        self._sync_settings_on_startup(self._settings)
+
         # Schedule restart grace period end
         if self._restart_grace:
             asyncio.get_event_loop().call_later(30.0, self._clear_restart_grace)
@@ -1846,6 +1852,79 @@ class DashboardServer:
 
         # Log comprehensive settings snapshot with diffs
         self._log_all_settings("settings_applied", old_settings=old_settings)
+
+    def _sync_settings_on_startup(self, settings: dict) -> None:
+        """Sync persisted settings to components at startup.
+
+        Targeted subset of _apply_settings() — only syncs numeric/boolean
+        values without triggering optimizer reset or discovery restart.
+        Ensures settings.json values changed via dashboard in previous
+        sessions are applied to BalanceTracker, Monitor, etc.
+        """
+        # Balance settings
+        if "hourly_external_transfer_cap" in settings:
+            self._balance._hourly_external_transfer_cap = float(settings["hourly_external_transfer_cap"])
+        if "bitfinex_reserve_pct" in settings:
+            self._balance._bitfinex_reserve_pct = float(settings["bitfinex_reserve_pct"])
+            self._balance._bitfinex_reserve_target = (
+                self._balance._initial_investment * self._balance._bitfinex_reserve_pct
+            )
+        if "bitfinex_reserve_hard_floor" in settings:
+            self._balance._bitfinex_reserve_hard_floor = float(settings["bitfinex_reserve_hard_floor"])
+            self._balance._bitfinex_reserve_hard_floor_amount = (
+                self._balance._initial_investment * self._balance._bitfinex_reserve_hard_floor
+            )
+        if "rebalance_cooldown" in settings:
+            self._balance._rebalance_cooldown = int(settings["rebalance_cooldown"])
+        if "adaptive_mode" in settings:
+            self._balance._adaptive_mode = settings["adaptive_mode"]
+
+        # Monitor settings
+        if "min_net_profit_pct" in settings:
+            self._monitor._min_net_profit_pct = float(settings["min_net_profit_pct"])
+        if "rebalance_roi_horizon" in settings:
+            self._monitor._rebalance_roi_horizon = int(settings["rebalance_roi_horizon"])
+        if "rebalance_roi_divisor" in settings:
+            self._monitor._rebalance_roi_divisor = int(settings["rebalance_roi_divisor"])
+        if "min_misses_before_rebalance" in settings:
+            self._monitor._min_misses_before_rebalance = int(settings["min_misses_before_rebalance"])
+        if "net_pnl_gate_warmup_trades" in settings:
+            self._monitor._net_pnl_gate_warmup_trades = int(settings["net_pnl_gate_warmup_trades"])
+        if "net_pnl_gate_grace_seconds" in settings:
+            self._monitor._net_pnl_gate_grace_seconds = int(settings["net_pnl_gate_grace_seconds"])
+        if "adaptive_mode" in settings:
+            self._monitor._adaptive_mode = settings["adaptive_mode"]
+
+        # Simulation realism
+        if "spread_persistence_ticks" in settings:
+            self._monitor._spread_persistence_ticks = int(settings["spread_persistence_ticks"])
+        if "event_driven_seller_penalty_pct" in settings:
+            self._monitor._event_driven_seller_penalty = float(settings["event_driven_seller_penalty_pct"])
+        if "max_position_multiplier" in settings:
+            self._monitor._max_position_multiplier = float(settings["max_position_multiplier"])
+
+        # Optimizer settings (no reset — just sync values)
+        if self._optimizer:
+            if "reallocation_cost_horizon" in settings:
+                self._optimizer._reallocation_cost_horizon = float(settings["reallocation_cost_horizon"])
+            if "demotion_cooldown_multiplier" in settings:
+                self._optimizer._demotion_cooldown_multiplier = float(settings["demotion_cooldown_multiplier"])
+                self._optimizer._demotion_cooldown = self._optimizer._demotion_period * self._optimizer._demotion_cooldown_multiplier
+            if "trading_score_threshold" in settings:
+                self._optimizer._trading_threshold = float(settings["trading_score_threshold"])
+            if "strong_score_threshold" in settings:
+                self._optimizer._strong_threshold = float(settings["strong_score_threshold"])
+            if "very_strong_score_threshold" in settings:
+                self._optimizer._very_strong_threshold = float(settings["very_strong_score_threshold"])
+
+        # Anomaly protection
+        anomaly = self._monitor._anomaly
+        if "anomaly_protection_enabled" in settings:
+            anomaly._enabled = settings["anomaly_protection_enabled"]
+        if "circuit_breaker_threshold" in settings:
+            anomaly._cb_threshold = float(settings["circuit_breaker_threshold"])
+        if "drawdown_threshold_pct" in settings:
+            anomaly._dd_threshold_pct = float(settings["drawdown_threshold_pct"])
 
     def _apply_enabled_exchanges(self, fee_data: dict) -> None:
         """Hot-apply exchange enabled/disabled state to monitor/optimizer/balance.

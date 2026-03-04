@@ -165,6 +165,9 @@ class BalanceTracker:
         self._bitfinex_reserve_hard_floor: float = bitfinex_reserve_hard_floor
         self._bitfinex_reserve_hard_floor_amount: float = self._initial_investment * bitfinex_reserve_hard_floor
 
+        # Emergency draw log throttle (avoid 60+ identical messages)
+        self._emergency_draw_log_time: float = 0.0
+
         # Initialization state
         self._initialized: bool = False
 
@@ -826,20 +829,25 @@ class BalanceTracker:
         bitfinex_usdt = self.usdt.get("Bitfinex", 0.0)
         hard_floor = max(5.0, self._bitfinex_reserve_hard_floor_amount)
         available = bitfinex_usdt - hard_floor
+        now_t = time.time()
         if available <= 0:
-            logger.info(
-                f"[Balance] Emergency draw blocked by hard floor: "
-                f"Bitfinex=${bitfinex_usdt:.2f}, floor=${hard_floor:.2f}"
-            )
+            if now_t - self._emergency_draw_log_time >= 30.0:
+                logger.info(
+                    f"[Balance] Emergency draw blocked by hard floor: "
+                    f"Bitfinex=${bitfinex_usdt:.2f}, floor=${hard_floor:.2f}"
+                )
+                self._emergency_draw_log_time = now_t
             return []
 
         amount = min(needed_amount, available)
         if amount < needed_amount:
-            logger.info(
-                f"[Balance] Emergency draw limited by hard floor: "
-                f"requested=${needed_amount:.2f}, available=${amount:.2f} "
-                f"(floor=${hard_floor:.2f})"
-            )
+            if now_t - self._emergency_draw_log_time >= 30.0:
+                logger.info(
+                    f"[Balance] Emergency draw limited by hard floor: "
+                    f"requested=${needed_amount:.2f}, available=${amount:.2f} "
+                    f"(floor=${hard_floor:.2f})"
+                )
+                self._emergency_draw_log_time = now_t
         if amount < self._trade_amount:
             return []  # Not enough for even one trade
 
