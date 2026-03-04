@@ -45,7 +45,13 @@ class BitfinexFetcher(BaseFetcher):
 
     Uses two WebSocket connections to handle the 30-subscription limit
     (splits 60 symbols into two batches of 30).
+
+    Bitfinex is event-driven: updates are sent only when the price changes,
+    not at fixed intervals. High "data age" values (10-20s avg) reflect
+    market inactivity on low-volume alts, not stale/inaccurate data.
     """
+
+    IS_EVENT_DRIVEN: bool = True
 
     def __init__(self, symbols: list[str] | None = None) -> None:
         super().__init__(symbols)

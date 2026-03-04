@@ -74,6 +74,11 @@ class BaseFetcher(abc.ABC):
     # If no fresh data received for this many seconds, force reconnect
     STALENESS_RECONNECT_SECONDS: float = 30.0
 
+    # Event-driven exchanges (e.g., Bitfinex) send updates only on price
+    # changes, not at fixed intervals. Their high "freshness" values (10s+)
+    # reflect market inactivity, not stale/inaccurate data.
+    IS_EVENT_DRIVEN: bool = False
+
     def __init__(self, symbols: list[str] | None = None) -> None:
         self.symbols: list[str] = symbols or SYMBOLS
         self._state: dict[str, PriceState] = {s: PriceState() for s in self.symbols}
@@ -346,11 +351,26 @@ class BaseFetcher(abc.ABC):
                 dormant_str = f", {dormant_count} dormant" if dormant_count > 0 else ""
 
                 msgs_per_sec = count / self._latency_log_interval
-                logger.info(
-                    f"[Latency] [{self.exchange_name}] "
-                    f"proc: avg={avg_ms:.2f}ms min={min_ms:.2f}ms max={max_ms:.2f}ms "
-                    f"({count} msgs, rate={msgs_per_sec:.0f}/s) | "
-                    f"freshness: avg={avg_age_ms:.0f}ms max={max_age_ms:.0f}ms "
-                    f"({len(active_ages)} active{dormant_str} / {len(self.symbols)} symbols)"
-                )
+                if self.IS_EVENT_DRIVEN:
+                    # Event-driven exchanges (e.g., Bitfinex) send updates
+                    # only on price changes. High data_age is expected and
+                    # reflects market inactivity, not stale data.
+                    avg_age_s = avg_age_ms / 1000
+                    max_age_s = max_age_ms / 1000
+                    logger.info(
+                        f"[Latency] [{self.exchange_name}] "
+                        f"proc: avg={avg_ms:.2f}ms min={min_ms:.2f}ms max={max_ms:.2f}ms "
+                        f"({count} msgs, rate={msgs_per_sec:.0f}/s) | "
+                        f"data_age: avg={avg_age_s:.1f}s max={max_age_s:.1f}s "
+                        f"({len(active_ages)} active{dormant_str} / {len(self.symbols)} symbols) "
+                        f"(event-driven)"
+                    )
+                else:
+                    logger.info(
+                        f"[Latency] [{self.exchange_name}] "
+                        f"proc: avg={avg_ms:.2f}ms min={min_ms:.2f}ms max={max_ms:.2f}ms "
+                        f"({count} msgs, rate={msgs_per_sec:.0f}/s) | "
+                        f"freshness: avg={avg_age_ms:.0f}ms max={max_age_ms:.0f}ms "
+                        f"({len(active_ages)} active{dormant_str} / {len(self.symbols)} symbols)"
+                    )
             await asyncio.sleep(self._latency_log_interval)
