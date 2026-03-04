@@ -603,6 +603,157 @@ class DemoExecutor:
         self._pending_orders.clear()
         return recovered
 
+    async def execute_setup_orders(
+        self,
+        allocations: dict[str, dict[str, float]],
+        prices: dict[str, float],
+        crypto_init_time: float,
+        exchange_info: "ExchangeInfoManager | None" = None,
+    ) -> list[TradeResult]:
+        """Place initial buy orders on demo/testnet to establish positions.
+
+        Called once after initialize_crypto() to mirror sim's virtual positions
+        with real demo orders. Each allocation becomes a market buy order.
+
+        Args:
+            allocations: {exchange: {symbol: usd_amount}} from balance._crypto_usd
+            prices: Current prices for all symbols
+            crypto_init_time: Timestamp when initialize_crypto() completed
+            exchange_info: For lot_size rounding
+
+        Returns list of TradeResult for every order attempted.
+        """
+        from decimal import Decimal
+
+        info = exchange_info or self._exchange_info
+        results: list[TradeResult] = []
+        total_sim_alloc = 0.0
+        total_demo_cost = 0.0
+        filled_count = 0
+        partial_count = 0
+        rejected_count = 0
+
+        for exchange, symbols in sorted(allocations.items()):
+            if not self.has_executor(exchange):
+                continue
+
+            executor = self._executors[exchange]
+
+            for symbol, usd_amount in sorted(symbols.items()):
+                if usd_amount <= 0 or symbol not in prices or prices[symbol] <= 0:
+                    continue
+
+                price = prices[symbol]
+                qty = usd_amount / price
+
+                # Round quantity via exchange_info if available
+                if info:
+                    qty_dec = info.round_quantity(exchange, symbol, Decimal(str(qty)))
+                    qty = float(qty_dec)
+
+                if qty <= 0:
+                    continue
+
+                # Check min notional
+                if info:
+                    rules = info.get_rules(exchange, symbol)
+                    if rules and qty * price < float(rules.min_notional):
+                        logger.info(
+                            f"[DemoSetup] {exchange} {symbol} SKIP: "
+                            f"${usd_amount:.2f} below min notional ${float(rules.min_notional):.2f}"
+                        )
+                        continue
+
+                client_id = generate_client_order_id(symbol, "setup")
+
+                # Wait for rate limit
+                if hasattr(executor, '_rate_limiter'):
+                    while not await executor._rate_limiter.acquire():
+                        await asyncio.sleep(0.1)
+
+                t0 = time.time()
+                try:
+                    result = await executor.place_market_order(
+                        symbol, "buy", qty, client_id, expected_price=price,
+                    )
+                except Exception as e:
+                    result = TradeResult(
+                        success=False,
+                        exchange=exchange,
+                        symbol=symbol,
+                        side="buy",
+                        requested_qty=qty,
+                        requested_price=price,
+                        error=str(e),
+                        timestamp=time.time(),
+                    )
+
+                order_time = time.time()
+                setup_delay_ms = (order_time - crypto_init_time) * 1000
+                latency_ms = (order_time - t0) * 1000
+
+                # Compute actual demo cost
+                demo_cost = 0.0
+                if result.success:
+                    demo_cost = result.filled_qty * result.actual_avg_price
+                    if result.fee_currency == "USDT":
+                        demo_cost += result.actual_fee
+                    filled_count += 1
+                    if result.is_partial:
+                        partial_count += 1
+                else:
+                    rejected_count += 1
+
+                total_sim_alloc += usd_amount
+                total_demo_cost += demo_cost
+                diff = usd_amount - demo_cost
+
+                # Per-order log with timing
+                status = "FILLED" if result.success and not result.is_partial else (
+                    "PARTIAL" if result.success else "REJECTED"
+                )
+                fee_info = (
+                    f"fee=${result.actual_fee:.4f} ({result.fee_rate*100:.3f}% {result.fee_currency})"
+                    if result.success else f"error={result.error}"
+                )
+                logger.info(
+                    f"[DemoSetup] {exchange} {symbol} BUY: "
+                    f"qty={qty:.8f} price=${price:.2f} | "
+                    f"status={status} filled={result.filled_qty:.8f} "
+                    f"avg=${result.actual_avg_price:.2f} | "
+                    f"latency={latency_ms:.0f}ms setup_delay={setup_delay_ms:.0f}ms | "
+                    f"{fee_info} | "
+                    f"sim_alloc=${usd_amount:.2f} demo_cost=${demo_cost:.2f} diff=${diff:+.2f}"
+                )
+
+                results.append(result)
+
+        # Summary log
+        total_orders = filled_count + partial_count + rejected_count
+        total_latency = sum(
+            r.latency_ms for r in results if hasattr(r, 'latency_ms') and r.latency_ms > 0
+        )
+        # Compute total latency from timestamps
+        if results:
+            first_t = min(r.timestamp for r in results if r.timestamp > 0)
+            last_t = max(r.timestamp for r in results if r.timestamp > 0)
+            total_span = (last_t - first_t) * 1000 if last_t > first_t else 0
+        else:
+            total_span = 0
+
+        diff_total = total_sim_alloc - total_demo_cost
+        diff_pct = (diff_total / total_sim_alloc * 100) if total_sim_alloc > 0 else 0
+
+        logger.info(
+            f"[DemoSetup] Complete: {filled_count}/{total_orders} filled, "
+            f"{partial_count} partial, {rejected_count} rejected | "
+            f"total_span={total_span:.0f}ms | "
+            f"sim_alloc=${total_sim_alloc:.2f} demo_cost=${total_demo_cost:.2f} "
+            f"diff=${diff_total:+.2f} ({diff_pct:+.2f}%)"
+        )
+
+        return results
+
     def to_state_dict(self) -> dict:
         return {
             "pending_orders": self._pending_orders,

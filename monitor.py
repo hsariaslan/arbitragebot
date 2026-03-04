@@ -236,6 +236,11 @@ class ArbitrageMonitor:
         self._state_mgr: "StateManager | None" = None
         self._demo_fetcher = None  # set via set_executor()
 
+        # Demo setup (initial position establishment)
+        self._demo_setup_complete: bool = False
+        self._demo_setup_running: bool = False
+        self._crypto_init_time: float = 0.0
+
         # Demo accuracy stats (for [Session] summary)
         self._demo_trade_count: int = 0
         self._demo_fill_count: int = 0
@@ -356,6 +361,12 @@ class ArbitrageMonitor:
         hourly_net = recent_profit - recent_fees
         session_hourly_rate = net_profit / elapsed_hours
 
+        referrer_earnings = (
+            self._fee_manager._total_referrer_earnings
+            if self._fee_manager
+            else 0.0
+        )
+
         return {
             "net_profit": round(net_profit, 4),
             "hourly_net": round(hourly_net, 4),
@@ -365,6 +376,7 @@ class ArbitrageMonitor:
             "credited_cashback": round(credited_cashback, 4),
             "pending_cashback": round(pending_cashback, 4),
             "is_profitable": net_profit > 0,
+            "referrer_earnings_total": round(referrer_earnings, 4),
         }
 
     def _should_rebalance(self, buy_ex: str, sell_ex: str) -> tuple[bool, str]:
@@ -579,19 +591,71 @@ class ArbitrageMonitor:
         """Fire real demo orders and compare with sim result.
 
         Called as an asyncio task — does not block the tick loop.
+        Supports single-leg execution: if only one exchange has an executor,
+        only that leg is placed on demo. This maximizes demo coverage.
         Records discrepancies (D-08 through D-13) and saves state immediately.
         """
         if not self._executor:
             return
 
         try:
-            result = await self._executor.execute_arbitrage(
-                buy_ex, sell_ex, symbol, trade_size,
-                buy_price, sell_price, buy_qty, sell_qty,
-            )
+            has_buy = self._executor.has_executor(buy_ex)
+            has_sell = self._executor.has_executor(sell_ex)
 
-            # Update the SimulatedTrade with demo results
-            self._record_demo_comparison(sim_trade, result)
+            if has_buy and has_sell:
+                # Both legs available — use full arbitrage execution
+                result = await self._executor.execute_arbitrage(
+                    buy_ex, sell_ex, symbol, trade_size,
+                    buy_price, sell_price, buy_qty, sell_qty,
+                )
+                self._record_demo_comparison(sim_trade, result)
+            else:
+                # Single-leg execution
+                from executor import generate_client_order_id
+
+                buy_result = None
+                sell_result = None
+                t0 = time.time()
+
+                if has_buy:
+                    client_id = generate_client_order_id(symbol, "buy")
+                    executor = self._executor._executors[buy_ex]
+                    try:
+                        buy_result = await executor.place_market_order(
+                            symbol, "buy", buy_qty, client_id,
+                            expected_price=buy_price,
+                        )
+                    except Exception as e:
+                        from executor import TradeResult
+                        buy_result = TradeResult(
+                            success=False, exchange=buy_ex, symbol=symbol,
+                            side="buy", requested_qty=buy_qty,
+                            requested_price=buy_price, error=str(e),
+                            timestamp=time.time(),
+                        )
+
+                if has_sell:
+                    client_id = generate_client_order_id(symbol, "sell")
+                    executor = self._executor._executors[sell_ex]
+                    try:
+                        sell_result = await executor.place_market_order(
+                            symbol, "sell", sell_qty, client_id,
+                            expected_price=sell_price,
+                        )
+                    except Exception as e:
+                        from executor import TradeResult
+                        sell_result = TradeResult(
+                            success=False, exchange=sell_ex, symbol=symbol,
+                            side="sell", requested_qty=sell_qty,
+                            requested_price=sell_price, error=str(e),
+                            timestamp=time.time(),
+                        )
+
+                total_latency = (time.time() - t0) * 1000.0
+                self._record_single_leg_comparison(
+                    sim_trade, buy_result, sell_result,
+                    buy_ex, sell_ex, total_latency,
+                )
 
             # Immediate state save (crash safety for real trades)
             if self._state_mgr and self._balance and self._optimizer:
@@ -601,6 +665,69 @@ class ArbitrageMonitor:
 
         except Exception as e:
             logger.error(f"[Monitor] Demo trade execution failed: {e}")
+
+    async def _run_demo_setup(self) -> None:
+        """Place initial buy orders on demo/testnet to establish positions.
+
+        Called once after initialize_crypto() to mirror sim's virtual crypto
+        allocations with real demo market buy orders. Runs as asyncio.create_task
+        so it doesn't block the tick loop.
+        """
+        if self._demo_setup_complete or self._demo_setup_running:
+            return
+        if not self._executor or self._execution_mode == "simulation":
+            return
+        if not self._balance:
+            return
+
+        self._demo_setup_running = True
+        logger.info("[DemoSetup] Starting position establishment...")
+
+        try:
+            # Build allocations from balance._crypto_usd (per-exchange-per-symbol USD)
+            allocations: dict[str, dict[str, float]] = {}
+            for ex in self._balance._exchanges:
+                if not self._executor.has_executor(ex):
+                    continue
+                ex_allocs: dict[str, float] = {}
+                for sym in self._balance._symbols:
+                    usd = self._balance._crypto_usd.get(ex, {}).get(sym, 0.0)
+                    if usd > 0:
+                        ex_allocs[sym] = usd
+                if ex_allocs:
+                    allocations[ex] = ex_allocs
+
+            if not allocations:
+                logger.info("[DemoSetup] No crypto allocations to establish — skipping")
+                self._demo_setup_complete = True
+                self._demo_setup_running = False
+                return
+
+            total_orders = sum(len(syms) for syms in allocations.values())
+            exchanges = list(allocations.keys())
+            logger.info(
+                f"[DemoSetup] Placing {total_orders} buy orders on {exchanges}"
+            )
+
+            prices = self._get_current_prices()
+            exchange_info = self._balance._exchange_info if self._balance else None
+
+            results = await self._executor.execute_setup_orders(
+                allocations, prices, self._crypto_init_time, exchange_info,
+            )
+
+            self._demo_setup_complete = True
+            self._demo_setup_running = False
+
+            # Save state immediately
+            if self._state_mgr and self._balance and self._optimizer:
+                self._state_mgr.save(
+                    self._balance, self, self._optimizer, self._demo_fetcher,
+                )
+
+        except Exception as e:
+            logger.error(f"[DemoSetup] Position establishment failed: {e}")
+            self._demo_setup_running = False
 
     def _record_demo_comparison(
         self,
@@ -767,6 +894,145 @@ class ArbitrageMonitor:
             f"data_age={sim_trade.data_age_ms:.0f}ms"
         )
 
+    def _record_single_leg_comparison(
+        self,
+        sim_trade: SimulatedTrade,
+        buy_result: "TradeResult | None",
+        sell_result: "TradeResult | None",
+        buy_ex: str,
+        sell_ex: str,
+        total_latency_ms: float,
+    ) -> None:
+        """Record demo comparison when only one leg was executed on demo.
+
+        Logs per-leg discrepancies and updates SimulatedTrade demo fields
+        for whichever leg(s) were executed.
+        """
+        sym = sim_trade.symbol
+        demo_legs: list[str] = []
+
+        # Update SimulatedTrade fields for executed legs
+        if buy_result:
+            sim_trade.demo_buy_price = buy_result.actual_avg_price
+            sim_trade.demo_buy_qty = buy_result.filled_qty
+            demo_legs.append(f"buy@{buy_ex}")
+        if sell_result:
+            sim_trade.demo_sell_price = sell_result.actual_avg_price
+            sim_trade.demo_sell_qty = sell_result.filled_qty
+            demo_legs.append(f"sell@{sell_ex}")
+
+        sim_trade.demo_latency_ms = total_latency_ms
+
+        # Determine status based on executed legs
+        executed = [r for r in (buy_result, sell_result) if r is not None]
+        if all(r.success for r in executed):
+            if any(r.is_partial for r in executed):
+                sim_trade.demo_status = "partial"
+            else:
+                sim_trade.demo_status = "filled"
+        elif any(r.success for r in executed):
+            sim_trade.demo_status = "partial"
+        else:
+            sim_trade.demo_status = "rejected"
+
+        # Per-leg discrepancy checks
+        for leg in executed:
+            side = leg.side
+
+            # D-08: Slippage
+            if leg.success and leg.slippage_pct > 0.01:
+                logger.info(
+                    f"[D-08] {sym} {side} slippage on {leg.exchange}: "
+                    f"{leg.slippage_pct:+.4f}%"
+                )
+
+            # D-09: Partial fill
+            if leg.is_partial:
+                logger.warning(
+                    f"[D-09] {sym} partial fill on {leg.exchange}: "
+                    f"requested={leg.requested_qty:.8f} filled={leg.filled_qty:.8f} "
+                    f"ratio={leg.fill_ratio:.2%}"
+                )
+
+            # D-10: Rejection
+            if not leg.success:
+                logger.warning(
+                    f"[D-10] {sym} {side} rejected on {leg.exchange}: {leg.error}"
+                )
+
+            # D-12: High latency
+            if leg.latency_ms > 500:
+                logger.warning(
+                    f"[D-12] {sym} {side} high latency on {leg.exchange}: "
+                    f"{leg.latency_ms:.0f}ms"
+                )
+
+            # D-13: Maker fill
+            if leg.is_maker:
+                logger.info(f"[D-13] {sym} {side} filled as MAKER on {leg.exchange}")
+
+            # D-05: Fee currency mismatch
+            if leg.success and leg.fee_currency:
+                expected_ccy = "USDT" if side == "sell" else sym.replace("USDT", "")
+                if leg.fee_currency not in (expected_ccy, "USDT", "BNB", "BGB", "KCS"):
+                    logger.warning(
+                        f"[D-05] {sym} {side} fee in unexpected currency: "
+                        f"{leg.fee_currency} on {leg.exchange}"
+                    )
+
+            # D-04b: Fee rate validation
+            if leg.success and leg.fee_rate > 0 and self._fee_manager:
+                configured_rate = self._fee_manager.get_taker_fee(leg.exchange)
+                if abs(leg.fee_rate - configured_rate) > 0.00005:
+                    self._demo_fee_mismatches += 1
+                    logger.warning(
+                        f"[DemoTrade] {sym} {side} fee rate mismatch on {leg.exchange}: "
+                        f"configured={configured_rate*100:.3f}% "
+                        f"actual={leg.fee_rate*100:.3f}%"
+                    )
+
+        # Update counters
+        self._demo_trade_count += 1
+        self._demo_total_latency_ms += total_latency_ms
+        if sim_trade.demo_status == "filled":
+            self._demo_fill_count += 1
+        elif sim_trade.demo_status == "rejected":
+            self._demo_reject_count += 1
+        elif sim_trade.demo_status == "partial":
+            self._demo_partial_count += 1
+
+        # Build per-leg summary parts
+        parts = []
+        for leg in executed:
+            side = leg.side
+            status = "OK" if leg.success else "FAIL"
+            if leg.success:
+                parts.append(
+                    f"{side}@{leg.exchange}={status} "
+                    f"price={leg.actual_avg_price:.6f} "
+                    f"fill={leg.fill_ratio:.2%} "
+                    f"fee={leg.actual_fee:.6f}({leg.fee_currency}) "
+                    f"latency={leg.latency_ms:.0f}ms"
+                )
+            else:
+                parts.append(f"{side}@{leg.exchange}={status} err={leg.error}")
+
+        sim_only_legs = []
+        if buy_result is None:
+            sim_only_legs.append(f"buy@{buy_ex}")
+        if sell_result is None:
+            sim_only_legs.append(f"sell@{sell_ex}")
+
+        sim_note = f" sim_only=[{','.join(sim_only_legs)}]" if sim_only_legs else ""
+
+        logger.info(
+            f"[DemoTrade] {sym} {buy_ex}→{sell_ex} "
+            f"single_leg status={sim_trade.demo_status} "
+            f"{' | '.join(parts)}{sim_note} "
+            f"total_latency={total_latency_ms:.0f}ms "
+            f"data_age={sim_trade.data_age_ms:.0f}ms"
+        )
+
     def stop(self) -> None:
         """Signal the monitor to stop."""
         self._running = False
@@ -860,6 +1126,16 @@ class ArbitrageMonitor:
         # Initialize balance tracker as soon as prices are available
         if self._balance and not self._balance.initialized:
             self._balance.initialize_crypto(self._get_current_prices())
+            if self._balance.initialized:
+                self._crypto_init_time = time.time()
+
+        # After initialize_crypto, place demo setup orders (one-shot)
+        if (self._balance and self._balance.initialized
+                and not self._demo_setup_complete
+                and not self._demo_setup_running
+                and self._execution_mode in ("demo", "demo_only")
+                and self._executor):
+            asyncio.create_task(self._run_demo_setup())
 
         # D-17: Deliver in-transit funds that have arrived
         if self._balance and self._balance._in_transit:
@@ -1235,6 +1511,18 @@ class ArbitrageMonitor:
                                         f"[Fee] Referral pending: "
                                         f"{buy_ex}=${buy_cb:.4f} {sell_ex}=${sell_cb:.4f}"
                                     )
+                                # Record referrer commission (display-only)
+                                buy_rc = self._fee_manager.record_referrer_commission(
+                                    buy_ex, sym, trade_size, buy_fee_rate
+                                )
+                                sell_rc = self._fee_manager.record_referrer_commission(
+                                    sell_ex, sym, trade_size, sell_fee_rate
+                                )
+                                if buy_rc > 0 or sell_rc > 0:
+                                    logger.info(
+                                        f"[Fee] Referrer commission: "
+                                        f"{buy_ex}=${buy_rc:.4f} {sell_ex}=${sell_rc:.4f}"
+                                    )
                         else:
                             trade_adj = None
                             self._balance.skipped_trades += 1
@@ -1319,10 +1607,12 @@ class ArbitrageMonitor:
                                     f"impact=${rnd:+.4f}"
                                 )
 
-                        # Phase 2: Fire demo orders in parallel (non-blocking)
+                        # Phase 2: Fire demo orders (non-blocking)
+                        # Execute on ANY leg that has a demo executor (not just both)
                         if (self._execution_mode in ("demo", "demo_only")
                                 and self._executor
-                                and self._executor.can_execute(buy_ex, sell_ex)):
+                                and (self._executor.has_executor(buy_ex)
+                                     or self._executor.has_executor(sell_ex))):
                             asyncio.create_task(self._execute_demo_trade(
                                 buy_ex, sell_ex, sym, trade_size,
                                 ask_p, bid_p,
@@ -1452,6 +1742,11 @@ class ArbitrageMonitor:
             )
             net = trading_pnl - xfer_fees + credited_cb
             hourly = net / hours if hours > 0 else 0.0
+            ref_earn = (
+                self._fee_manager._total_referrer_earnings
+                if self._fee_manager
+                else 0.0
+            )
             size_zero_total = sum(self._size_zero_log_count.values())
             rebal_blocked_total = sum(self._rebalance_block_log_count.values())
             logger.info(
@@ -1460,6 +1755,7 @@ class ArbitrageMonitor:
                 f"cashback=${credited_cb + pending_cb:.2f} "
                 f"(credited=${credited_cb:.2f} pending=${pending_cb:.2f}), "
                 f"net=${net:.2f}, $/hr=${hourly:.2f}, "
+                f"ref_earn=${ref_earn:.2f}, "
                 f"sz0={size_zero_total}, rebal_blocked={rebal_blocked_total}, "
                 f"phantom={self._phantom_spread_count}, "
                 f"evd_sell={self._event_driven_seller_penalties}/demoted={self._event_driven_seller_demoted}, "
@@ -1806,6 +2102,8 @@ class ArbitrageMonitor:
             "_demo_total_actual_slippage": self._demo_total_actual_slippage,
             "_demo_total_latency_ms": self._demo_total_latency_ms,
             "_demo_fee_mismatches": self._demo_fee_mismatches,
+            # Demo setup
+            "_demo_setup_complete": self._demo_setup_complete,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -1863,3 +2161,5 @@ class ArbitrageMonitor:
         self._demo_total_actual_slippage = data.get("_demo_total_actual_slippage", 0.0)
         self._demo_total_latency_ms = data.get("_demo_total_latency_ms", 0.0)
         self._demo_fee_mismatches = data.get("_demo_fee_mismatches", 0)
+        # Demo setup
+        self._demo_setup_complete = data.get("_demo_setup_complete", False)
