@@ -158,6 +158,7 @@ export function useWebSocket() {
 
         // Result callbacks (export, hard stop, distribute)
         if (data.type === 'export_bot_logs_result' || data.type === 'export_auth_logs_result'
+            || data.type === 'all_bot_logs_result'
             || data.type === 'hard_stop_result' || data.type === 'distribute_result' || data.type === 'distribute_error') {
           exportCallbackRef.current?.(data);
           exportCallbackRef.current = null;

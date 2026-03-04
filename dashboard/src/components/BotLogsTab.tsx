@@ -1,9 +1,10 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import type { BotLogEntry } from '../types';
 import ExportLogsModal from './ExportLogsModal';
 
 interface BotLogsTabProps {
   logs: BotLogEntry[];
+  totalCount: number;
   sendWithCallback: (msg: object, callback: (data: any) => void) => void;
   uptimeSeconds: number;
 }
@@ -15,8 +16,8 @@ const LEVEL_OPTIONS = [
   { value: 'ERROR', label: 'ERROR' },
 ];
 
-const COMPONENT_OPTIONS = [
-  { value: 'all', label: 'All Components' },
+// Base components always shown in filter dropdown
+const BASE_COMPONENTS = [
   { value: 'Monitor', label: 'Monitor' },
   { value: 'Optimizer', label: 'Optimizer' },
   { value: 'Balance', label: 'Balance' },
@@ -26,7 +27,7 @@ const COMPONENT_OPTIONS = [
   { value: 'Bitget', label: 'Bitget' },
   { value: 'KuCoin', label: 'KuCoin' },
   { value: 'MEXC', label: 'MEXC' },
-  { value: 'Gate', label: 'Gate.io' },
+  { value: 'Gate.io', label: 'Gate.io' },
   { value: 'Pionex', label: 'Pionex' },
   { value: 'Bitfinex', label: 'Bitfinex' },
   { value: 'Latency', label: 'Latency' },
@@ -34,9 +35,19 @@ const COMPONENT_OPTIONS = [
   { value: 'Auth', label: 'Auth' },
   { value: 'Email', label: 'Email' },
   { value: 'Settings', label: 'Settings' },
+  { value: 'Config', label: 'Config' },
   { value: 'Fee', label: 'Fee' },
   { value: 'Transfer', label: 'Transfer' },
   { value: 'Candidate', label: 'Candidate' },
+  { value: 'Trade', label: 'Trade' },
+  { value: 'Rebalance', label: 'Rebalance' },
+  { value: 'Anomaly', label: 'Anomaly' },
+  { value: 'Session', label: 'Session' },
+  { value: 'State', label: 'State' },
+  { value: 'DemoCompare', label: 'DemoCompare' },
+  { value: 'DemoTrade', label: 'DemoTrade' },
+  { value: 'FeeValidation', label: 'FeeValidation' },
+  { value: 'Uptime', label: 'Uptime' },
 ];
 
 const LEVEL_STYLES: Record<string, { text: string }> = {
@@ -86,20 +97,76 @@ function downloadFile(filename: string, content: string, mime: string) {
   URL.revokeObjectURL(url);
 }
 
-export default function BotLogsTab({ logs, sendWithCallback, uptimeSeconds }: BotLogsTabProps) {
+export default function BotLogsTab({ logs, totalCount, sendWithCallback, uptimeSeconds }: BotLogsTabProps) {
   const [levelFilter, setLevelFilter] = useState('all');
   const [componentFilter, setComponentFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
   const [showExportModal, setShowExportModal] = useState(false);
+  const [allSessionLogs, setAllSessionLogs] = useState<BotLogEntry[] | null>(null);
+  const [fetchingAll, setFetchingAll] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  const filtered = useMemo(
-    () => applyBotLogFilters(logs, levelFilter, componentFilter, search),
-    [logs, levelFilter, componentFilter, search]
-  );
+  const lastFetchedTotal = useRef(0);
 
   const hasActiveFilters = levelFilter !== 'all' || componentFilter !== 'all' || search.trim() !== '';
+
+  // Build dynamic component options from base list + any extra components seen in logs
+  const componentOptions = useMemo(() => {
+    const baseValues = new Set(BASE_COMPONENTS.map(c => c.value));
+    const extra: { value: string; label: string }[] = [];
+    const source = allSessionLogs ?? logs;
+    for (const entry of source) {
+      if (entry.component && !baseValues.has(entry.component)) {
+        baseValues.add(entry.component);
+        extra.push({ value: entry.component, label: entry.component });
+      }
+    }
+    extra.sort((a, b) => a.label.localeCompare(b.label));
+    return [{ value: 'all', label: 'All Components' }, ...BASE_COMPONENTS, ...extra];
+  }, [logs, allSessionLogs]);
+
+  // When filter is active and we have more logs on server than in broadcast, fetch all session logs
+  const fetchAllLogs = useCallback(() => {
+    if (fetchingAll) return;
+    setFetchingAll(true);
+    sendWithCallback({ type: 'request_all_bot_logs' }, (data: any) => {
+      const entries: BotLogEntry[] = data.logs || [];
+      setAllSessionLogs(entries);
+      lastFetchedTotal.current = entries.length;
+      setFetchingAll(false);
+    });
+  }, [sendWithCallback, fetchingAll]);
+
+  // Auto-fetch all logs when filter becomes active and there are more logs on server
+  useEffect(() => {
+    if (hasActiveFilters && totalCount > logs.length && !allSessionLogs) {
+      fetchAllLogs();
+    }
+  }, [hasActiveFilters, totalCount, logs.length, allSessionLogs, fetchAllLogs]);
+
+  // When filter is active, keep fetching if new logs arrived on server since last fetch
+  useEffect(() => {
+    if (hasActiveFilters && allSessionLogs && totalCount > lastFetchedTotal.current) {
+      fetchAllLogs();
+    }
+  }, [hasActiveFilters, allSessionLogs, totalCount, fetchAllLogs]);
+
+  // Clear cached all-logs when filter is removed (back to broadcast mode)
+  useEffect(() => {
+    if (!hasActiveFilters) {
+      setAllSessionLogs(null);
+      lastFetchedTotal.current = 0;
+    }
+  }, [hasActiveFilters]);
+
+  // Use all session logs when filtering (if available), otherwise broadcast logs
+  const sourceLogs = hasActiveFilters && allSessionLogs ? allSessionLogs : logs;
+
+  const filtered = useMemo(
+    () => applyBotLogFilters(sourceLogs, levelFilter, componentFilter, search),
+    [sourceLogs, levelFilter, componentFilter, search]
+  );
+
   const sessionStart = Math.floor(Date.now() / 1000) - uptimeSeconds;
 
   // Auto-scroll to bottom when new logs arrive
@@ -128,7 +195,11 @@ export default function BotLogsTab({ logs, sendWithCallback, uptimeSeconds }: Bo
     <div className="space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
         <h2 className="text-lg font-semibold text-white">Bot Logs</h2>
-        <span className="text-xs text-slate-500">{logs.length} total entries</span>
+        <span className="text-xs text-slate-500">
+          {hasActiveFilters && allSessionLogs
+            ? `${filtered.length} matched / ${allSessionLogs.length} total session entries`
+            : `${logs.length} recent / ${totalCount} total entries`}
+        </span>
       </div>
 
       {/* Filters row */}
@@ -147,7 +218,7 @@ export default function BotLogsTab({ logs, sendWithCallback, uptimeSeconds }: Bo
           onChange={e => setComponentFilter(e.target.value)}
           className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500"
         >
-          {COMPONENT_OPTIONS.map(opt => (
+          {componentOptions.map(opt => (
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
@@ -186,7 +257,8 @@ export default function BotLogsTab({ logs, sendWithCallback, uptimeSeconds }: Bo
       >
         {filtered.length === 0 ? (
           <div className="text-center text-slate-500 py-8">
-            {logs.length === 0 ? 'No bot logs yet' : 'No matching log entries'}
+            {fetchingAll ? 'Loading full session logs...' :
+             sourceLogs.length === 0 ? 'No bot logs yet' : 'No matching log entries'}
           </div>
         ) : (
           <div className="p-3 space-y-0.5">

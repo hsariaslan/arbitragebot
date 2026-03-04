@@ -525,6 +525,7 @@ export interface DashboardState {
   profit_stats: ProfitStats;
   auth_logs?: AuthLogEntry[];
   bot_logs?: BotLogEntry[];
+  bot_logs_total?: number;
   demo_comparison?: DemoComparisonState | null;
   // Fee management
   fee_configs?: Record<string, ExchangeFeeConfig>;

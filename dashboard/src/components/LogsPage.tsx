@@ -5,6 +5,7 @@ import AuthLogPage from './AuthLogPage';
 
 interface LogsPageProps {
   botLogs: BotLogEntry[];
+  botLogsTotal: number;
   authLogs: AuthLogEntry[];
   sendWithCallback: (msg: object, callback: (data: any) => void) => void;
   uptimeSeconds: number;
@@ -17,7 +18,7 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
       : 'border-transparent text-slate-400 hover:text-slate-200'
   }`;
 
-export default function LogsPage({ botLogs, authLogs, sendWithCallback, uptimeSeconds }: LogsPageProps) {
+export default function LogsPage({ botLogs, botLogsTotal, authLogs, sendWithCallback, uptimeSeconds }: LogsPageProps) {
   const { subTab } = useParams<{ subTab?: string }>();
   const activeSubTab = subTab === 'auth' ? 'auth' : 'bot';
 
@@ -31,7 +32,7 @@ export default function LogsPage({ botLogs, authLogs, sendWithCallback, uptimeSe
 
       {/* Sub-tab content */}
       {activeSubTab === 'bot' ? (
-        <BotLogsTab logs={botLogs} sendWithCallback={sendWithCallback} uptimeSeconds={uptimeSeconds} />
+        <BotLogsTab logs={botLogs} totalCount={botLogsTotal} sendWithCallback={sendWithCallback} uptimeSeconds={uptimeSeconds} />
       ) : (
         <AuthLogPage authLogs={authLogs} sendWithCallback={sendWithCallback} uptimeSeconds={uptimeSeconds} />
       )}

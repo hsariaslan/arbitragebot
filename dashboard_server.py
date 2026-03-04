@@ -51,9 +51,9 @@ logger = logging.getLogger(__name__)
 class DashboardLogHandler(logging.Handler):
     """Captures recent log entries in memory for dashboard broadcast and export."""
 
-    _COMPONENT_RE = re.compile(r"^\[(\w+)\]\s*(.*)$", re.DOTALL)
+    _COMPONENT_RE = re.compile(r"^\[([\w.]+)\]\s*(.*)$", re.DOTALL)
 
-    def __init__(self, maxlen: int = 500):
+    def __init__(self, maxlen: int = 2000):
         super().__init__()
         self._entries: deque[dict] = deque(maxlen=maxlen)
         self._all_entries: list[dict] = []  # full session for export
@@ -80,6 +80,14 @@ class DashboardLogHandler(logging.Handler):
     def get_recent(self) -> list[dict]:
         """Return last N entries for live broadcast."""
         return list(self._entries)
+
+    def get_all(self) -> list[dict]:
+        """Return all session entries (for filtered views)."""
+        return list(self._all_entries)
+
+    def total_count(self) -> int:
+        """Return total session entry count."""
+        return len(self._all_entries)
 
     def get_entries_range(self, start: float, end: float) -> list[dict]:
         """Return all session entries within a time range (for export)."""
@@ -902,7 +910,7 @@ class DashboardServer:
     }
 
     _SETTINGS_ENUMS: dict[str, list[str]] = {
-        "execution_mode": ["simulation", "demo"],
+        "execution_mode": ["simulation", "demo", "demo_only"],
     }
 
     @classmethod
@@ -1175,6 +1183,11 @@ class DashboardServer:
                 self._transfer_fee_mgr.update_from_settings(transfer_data)
             await ws.send(json.dumps({"type": "transfer_settings_saved", "ok": True}))
             logger.info("[Transfer] Transfer fee settings saved and applied")
+
+        elif msg_type == "request_all_bot_logs":
+            # Return ALL in-memory session logs (for filtered views)
+            entries = self._log_handler.get_all() if self._log_handler else []
+            await ws.send(json.dumps({"type": "all_bot_logs_result", "logs": entries}))
 
         elif msg_type == "export_bot_logs":
             start_ts = msg.get("start", 0)
@@ -2354,6 +2367,7 @@ class DashboardServer:
             "profit_stats": self._monitor.get_net_profit_stats(),
             "auth_logs": self._auth_events,
             "bot_logs": self._log_handler.get_recent() if self._log_handler else [],
+            "bot_logs_total": self._log_handler.total_count() if self._log_handler else 0,
             "demo_comparison": self._build_demo_state() if self._demo_fetcher and self._demo_fetcher.enabled else None,
             **(self._fee_manager.to_broadcast_dict() if self._fee_manager else {}),
             **(self._transfer_fee_mgr.to_broadcast_dict() if self._transfer_fee_mgr else {}),

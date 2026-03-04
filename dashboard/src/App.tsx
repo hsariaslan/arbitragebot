@@ -265,6 +265,7 @@ export default function App() {
             <Route path="/logs" element={
               <LogsPage
                 botLogs={state.bot_logs ?? []}
+                botLogsTotal={state.bot_logs_total ?? 0}
                 authLogs={state.auth_logs ?? []}
                 sendWithCallback={sendWithCallback}
                 uptimeSeconds={state.uptime_seconds}
@@ -273,6 +274,7 @@ export default function App() {
             <Route path="/logs/:subTab" element={
               <LogsPage
                 botLogs={state.bot_logs ?? []}
+                botLogsTotal={state.bot_logs_total ?? 0}
                 authLogs={state.auth_logs ?? []}
                 sendWithCallback={sendWithCallback}
                 uptimeSeconds={state.uptime_seconds}
