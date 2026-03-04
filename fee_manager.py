@@ -30,6 +30,7 @@ class ExchangeFeeConfig:
     referral_cashback_pct: float  # 0.0 = disabled/ignored
     referral_settlement_minutes: float  # avg delay until cashback credited
     referral_paid_in: str  # "same_as_fee" | "USDT"
+    referrer_commission_pct: float = 0.0  # % of fee earned by referrer (user's account)
     zero_fee_pairs: list[str] = field(default_factory=list)
     enabled: bool = True  # Whether this exchange is active for trading
 
@@ -63,6 +64,7 @@ class ExchangeFeeConfig:
             "referral_cashback_pct": self.referral_cashback_pct,
             "referral_settlement_minutes": self.referral_settlement_minutes,
             "referral_paid_in": self.referral_paid_in,
+            "referrer_commission_pct": self.referrer_commission_pct,
             "zero_fee_pairs": list(self.zero_fee_pairs),
             "enabled": self.enabled,
         }
@@ -82,6 +84,7 @@ class ExchangeFeeConfig:
                 data.get("referral_settlement_minutes", 0)
             ),
             referral_paid_in=str(data.get("referral_paid_in", "same_as_fee")),
+            referrer_commission_pct=float(data.get("referrer_commission_pct", 0.0)),
             zero_fee_pairs=list(data.get("zero_fee_pairs", [])),
             enabled=bool(data.get("enabled", True)),
         )
@@ -116,6 +119,9 @@ class FeeManager:
         self._pending_cashbacks: list[PendingCashback] = []
         self._total_pending_cashback: float = 0.0
         self._total_credited_cashback: float = 0.0
+        # Referrer commission tracking (display-only, user's personal account)
+        self._total_referrer_earnings: float = 0.0
+        self._referrer_earnings_per_exchange: dict[str, float] = {}
 
         if not self._configs:
             self._configs = self._build_defaults()
@@ -235,6 +241,33 @@ class FeeManager:
         self._total_pending_cashback += cashback_usd
         return cashback_usd
 
+    def record_referrer_commission(
+        self,
+        exchange: str,
+        symbol: str,
+        trade_amount: float,
+        fee_rate: float,
+    ) -> float:
+        """Track referrer commission earned on the user's personal account.
+
+        Display-only — never touches balance, P&L, scoring, or gating.
+        Returns the commission amount in USD (0 if referral disabled or rate is 0).
+        """
+        cfg = self._configs.get(exchange)
+        if cfg is None or not cfg.referral_enabled or cfg.referrer_commission_pct <= 0:
+            return 0.0
+
+        fee_usd = trade_amount * fee_rate
+        commission_usd = fee_usd * cfg.referrer_commission_pct
+        if commission_usd <= 0:
+            return 0.0
+
+        self._total_referrer_earnings += commission_usd
+        self._referrer_earnings_per_exchange[exchange] = (
+            self._referrer_earnings_per_exchange.get(exchange, 0.0) + commission_usd
+        )
+        return commission_usd
+
     def credit_due_cashbacks(self) -> list[PendingCashback]:
         """Credit any pending cashbacks whose settlement time has passed.
 
@@ -336,6 +369,10 @@ class FeeManager:
         return {
             "pending_cashbacks": pending,
             "total_credited_cashback": self._total_credited_cashback,
+            "total_referrer_earnings": self._total_referrer_earnings,
+            "referrer_earnings_per_exchange": dict(
+                self._referrer_earnings_per_exchange
+            ),
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -345,6 +382,13 @@ class FeeManager:
         self._total_credited_cashback = float(
             data.get("total_credited_cashback", 0.0)
         )
+        self._total_referrer_earnings = float(
+            data.get("total_referrer_earnings", 0.0)
+        )
+        self._referrer_earnings_per_exchange = {
+            k: float(v)
+            for k, v in data.get("referrer_earnings_per_exchange", {}).items()
+        }
         for cb_data in data.get("pending_cashbacks", []):
             cb = PendingCashback(
                 timestamp=float(cb_data["timestamp"]),
@@ -381,6 +425,14 @@ class FeeManager:
                 "pending_count": sum(
                     1 for cb in self._pending_cashbacks if not cb.credited
                 ),
+                "referrer_earnings_total": round(
+                    self._total_referrer_earnings, 4
+                ),
+                "referrer_earnings_per_exchange": {
+                    ex: round(val, 4)
+                    for ex, val in self._referrer_earnings_per_exchange.items()
+                    if val > 0
+                },
             },
         }
 
@@ -412,9 +464,10 @@ class FeeManager:
                 fee_mechanism="instant",
                 fee_model="token",
                 referral_enabled=True,
-                referral_cashback_pct=0.20,
+                referral_cashback_pct=0.10,
                 referral_settlement_minutes=60,
                 referral_paid_in="same_as_fee",
+                referrer_commission_pct=0.10,
                 zero_fee_pairs=[],
             ),
             "OKX": ExchangeFeeConfig(
@@ -428,6 +481,7 @@ class FeeManager:
                 referral_cashback_pct=0.20,
                 referral_settlement_minutes=90,
                 referral_paid_in="same_as_fee",
+                referrer_commission_pct=0.10,
                 zero_fee_pairs=[],
             ),
             "Bybit": ExchangeFeeConfig(
@@ -441,6 +495,7 @@ class FeeManager:
                 referral_cashback_pct=0.20,
                 referral_settlement_minutes=1440,
                 referral_paid_in="USDT",
+                referrer_commission_pct=0.20,
                 zero_fee_pairs=[],
             ),
             "MEXC": ExchangeFeeConfig(
@@ -451,9 +506,10 @@ class FeeManager:
                 fee_mechanism="instant",
                 fee_model="received",
                 referral_enabled=True,
-                referral_cashback_pct=0.20,
+                referral_cashback_pct=0.10,
                 referral_settlement_minutes=1440,
                 referral_paid_in="same_as_fee",
+                referrer_commission_pct=0.40,
                 zero_fee_pairs=[],
             ),
             "Bitget": ExchangeFeeConfig(
@@ -467,6 +523,7 @@ class FeeManager:
                 referral_cashback_pct=0.20,
                 referral_settlement_minutes=0,
                 referral_paid_in="same_as_fee",
+                referrer_commission_pct=0.20,
                 zero_fee_pairs=[],
             ),
             "KuCoin": ExchangeFeeConfig(
@@ -490,9 +547,10 @@ class FeeManager:
                 fee_mechanism="instant",
                 fee_model="token",
                 referral_enabled=True,
-                referral_cashback_pct=0.20,
+                referral_cashback_pct=0.30,
                 referral_settlement_minutes=1440,
                 referral_paid_in="same_as_fee",
+                referrer_commission_pct=0.10,
                 zero_fee_pairs=["BTCUSDT"],
             ),
             "Pionex": ExchangeFeeConfig(
@@ -506,6 +564,7 @@ class FeeManager:
                 referral_cashback_pct=0.20,
                 referral_settlement_minutes=60,
                 referral_paid_in="same_as_fee",
+                referrer_commission_pct=0.0,
                 zero_fee_pairs=[],
             ),
             "Bitfinex": ExchangeFeeConfig(

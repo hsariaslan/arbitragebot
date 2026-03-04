@@ -6,7 +6,7 @@ All symbols, exchange settings, and operational parameters.
 
 import os
 
-__version__ = "0.23.1-alpha"
+__version__ = "0.24.0-alpha"
 
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
@@ -163,9 +163,10 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "fee_mechanism": "instant",
         "fee_model": "token",
         "referral_enabled": True,
-        "referral_cashback_pct": 0.20,  # 20% cashback, hourly settlement
+        "referral_cashback_pct": 0.10,  # 10% invitee kickback (max at base tier), hourly settlement
         "referral_settlement_minutes": 60,
         "referral_paid_in": "same_as_fee",
+        "referrer_commission_pct": 0.10,  # 10% referrer commission (20% pool - 10% invitee)
         "zero_fee_pairs": [],
         "enabled": True,
     },
@@ -176,9 +177,10 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "fee_mechanism": "tier",
         "fee_model": "received",
         "referral_enabled": True,
-        "referral_cashback_pct": 0.20,  # 20% cashback, ~90min settlement
+        "referral_cashback_pct": 0.20,  # 20% invitee kickback (max), ~90min settlement
         "referral_settlement_minutes": 90,
         "referral_paid_in": "same_as_fee",
+        "referrer_commission_pct": 0.10,  # 10% referrer commission (30% pool - 20% invitee)
         "zero_fee_pairs": [],
         "enabled": True,
     },
@@ -189,9 +191,10 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "fee_mechanism": "tier",
         "fee_model": "received",
         "referral_enabled": True,
-        "referral_cashback_pct": 0.20,  # 20% cashback, daily settlement
+        "referral_cashback_pct": 0.20,  # 20% invitee kickback (fixed), daily settlement
         "referral_settlement_minutes": 1440,
         "referral_paid_in": "USDT",
+        "referrer_commission_pct": 0.20,  # 20% referrer commission (independent, 365 days)
         "zero_fee_pairs": [],
         "enabled": True,
     },
@@ -202,9 +205,10 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "fee_mechanism": "instant",
         "fee_model": "received",
         "referral_enabled": True,
-        "referral_cashback_pct": 0.20,  # 20% cashback, daily settlement
+        "referral_cashback_pct": 0.10,  # 10% invitee kickback (fixed, lifetime), daily settlement
         "referral_settlement_minutes": 1440,
         "referral_paid_in": "same_as_fee",
+        "referrer_commission_pct": 0.40,  # 40% referrer commission (independent, 1080 days)
         "zero_fee_pairs": [],
         "enabled": True,
     },
@@ -215,9 +219,10 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "fee_mechanism": "instant",
         "fee_model": "token",
         "referral_enabled": True,
-        "referral_cashback_pct": 0.20,  # 20% instant fee discount
+        "referral_cashback_pct": 0.20,  # 20% invitee kickback (estimated), instant
         "referral_settlement_minutes": 0,
         "referral_paid_in": "same_as_fee",
+        "referrer_commission_pct": 0.20,  # 20% referrer commission (estimated, verify manually)
         "zero_fee_pairs": [],
         "enabled": True,
     },
@@ -228,9 +233,10 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "fee_mechanism": "rebate",
         "fee_model": "token",
         "referral_enabled": True,
-        "referral_cashback_pct": 0.20,  # 20% cashback, daily settlement
+        "referral_cashback_pct": 0.20,  # 20% invitee kickback (max from 20% pool), daily settlement
         "referral_settlement_minutes": 1440,
         "referral_paid_in": "same_as_fee",
+        "referrer_commission_pct": 0.0,  # 0% referrer (full 20% pool given to invitee)
         "zero_fee_pairs": [],
         "enabled": True,
     },
@@ -241,9 +247,10 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "fee_mechanism": "instant",
         "fee_model": "token",  # GT debit: fee paid from GT balance
         "referral_enabled": True,
-        "referral_cashback_pct": 0.20,  # 20% cashback, daily settlement
+        "referral_cashback_pct": 0.30,  # 30% invitee kickback (max from 40% pool), daily settlement
         "referral_settlement_minutes": 1440,
         "referral_paid_in": "same_as_fee",
+        "referrer_commission_pct": 0.10,  # 10% referrer (40% pool - 30% invitee)
         "zero_fee_pairs": ["BTCUSDT"],
         "enabled": True,
     },
@@ -254,9 +261,10 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "fee_mechanism": "instant",
         "fee_model": "received",
         "referral_enabled": True,
-        "referral_cashback_pct": 0.20,  # 20% cashback, hourly settlement
+        "referral_cashback_pct": 0.20,  # 20% invitee kickback (max from 20% pool), hourly settlement
         "referral_settlement_minutes": 60,
         "referral_paid_in": "same_as_fee",
+        "referrer_commission_pct": 0.0,  # 0% referrer (full 20% pool given to invitee)
         "zero_fee_pairs": [],
         "enabled": True,
     },
@@ -270,6 +278,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_cashback_pct": 0.0,
         "referral_settlement_minutes": 0,
         "referral_paid_in": "same_as_fee",
+        "referrer_commission_pct": 0.0,
         "zero_fee_pairs": [],
         "enabled": True,
     },

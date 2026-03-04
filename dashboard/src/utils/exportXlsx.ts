@@ -66,6 +66,7 @@ export function exportXlsx(
     ['Transfer Fees $', portfolio?.transfer_fees ?? ''],
     ['Credited Cashback $', profitStats?.credited_cashback ?? ''],
     ['Pending Cashback $', profitStats?.pending_cashback ?? ''],
+    ['Referrer Earnings $', profitStats?.referrer_earnings_total ?? ''],
     ['Net Trading P&L $', portfolio && profitStats ? (portfolio.trading_pnl - portfolio.transfer_fees + (profitStats.credited_cashback ?? 0)) : (portfolio ? (portfolio.trading_pnl - portfolio.transfer_fees) : '')],
     ['Fee/Profit Ratio', portfolio && portfolio.trading_pnl > 0 ? (portfolio.transfer_fees / portfolio.trading_pnl * 100).toFixed(1) + '%' : ''],
     ['Net $/hr', profitStats?.session_hourly_rate ?? ''],
@@ -389,6 +390,7 @@ export function exportXlsx(
       'Referral': cfg.referral_enabled ? 'ON' : 'OFF',
       'Referral %': (cfg.referral_cashback_pct * 100).toFixed(1),
       'Settlement (min)': cfg.referral_settlement_minutes,
+      'Referrer Commission %': ((cfg.referrer_commission_pct ?? 0) * 100).toFixed(1),
       'After Referral %': (cfg.effective_rate_after_referral * 100).toFixed(4),
       'Zero-Fee Pairs': cfg.zero_fee_pairs.join(', '),
     }));

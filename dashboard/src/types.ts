@@ -331,6 +331,7 @@ export interface ProfitStats {
   credited_cashback: number;
   pending_cashback: number;
   is_profitable: boolean;
+  referrer_earnings_total: number;
 }
 
 export interface AuthLogEntry {
@@ -447,6 +448,7 @@ export interface ExchangeFeeConfig {
   referral_cashback_pct: number;
   referral_settlement_minutes: number;
   referral_paid_in: 'same_as_fee' | 'USDT';
+  referrer_commission_pct: number;
   zero_fee_pairs: string[];
   enabled: boolean;
 }
@@ -455,6 +457,8 @@ export interface FeeStats {
   pending_cashback_total: number;
   credited_cashback_total: number;
   pending_count: number;
+  referrer_earnings_total: number;
+  referrer_earnings_per_exchange: Record<string, number>;
 }
 
 // ── Transfer Fee Management ─────────────────────────────────────────

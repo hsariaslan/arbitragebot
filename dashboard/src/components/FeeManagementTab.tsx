@@ -8,63 +8,63 @@ const DEFAULT_CONFIGS: Record<string, ExchangeFeeConfig> = {
     effective_taker_rate: 0.00075, effective_rate_after_referral: 0.00075,
     fee_mechanism: 'instant', fee_model: 'token',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 30,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
+    referral_paid_in: 'same_as_fee', referrer_commission_pct: 0, zero_fee_pairs: [], enabled: true,
   },
   OKX: {
     base_taker_rate: 0.001, token_discount_enabled: false, token_discount_pct: 0,
     effective_taker_rate: 0.001, effective_rate_after_referral: 0.001,
     fee_mechanism: 'tier', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 90,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
+    referral_paid_in: 'same_as_fee', referrer_commission_pct: 0, zero_fee_pairs: [], enabled: true,
   },
   Bybit: {
     base_taker_rate: 0.001, token_discount_enabled: false, token_discount_pct: 0,
     effective_taker_rate: 0.001, effective_rate_after_referral: 0.001,
     fee_mechanism: 'tier', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 720,
-    referral_paid_in: 'USDT', zero_fee_pairs: [], enabled: true,
+    referral_paid_in: 'USDT', referrer_commission_pct: 0, zero_fee_pairs: [], enabled: true,
   },
   MEXC: {
     base_taker_rate: 0.0005, token_discount_enabled: false, token_discount_pct: 0.20,
     effective_taker_rate: 0.0005, effective_rate_after_referral: 0.0005,
     fee_mechanism: 'instant', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 720,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
+    referral_paid_in: 'same_as_fee', referrer_commission_pct: 0, zero_fee_pairs: [], enabled: true,
   },
   Bitget: {
     base_taker_rate: 0.001, token_discount_enabled: true, token_discount_pct: 0.20,
     effective_taker_rate: 0.0008, effective_rate_after_referral: 0.0008,
     fee_mechanism: 'instant', fee_model: 'token',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 1080,
-    referral_paid_in: 'USDT', zero_fee_pairs: [], enabled: true,
+    referral_paid_in: 'USDT', referrer_commission_pct: 0, zero_fee_pairs: [], enabled: true,
   },
   KuCoin: {
     base_taker_rate: 0.001, token_discount_enabled: true, token_discount_pct: 0.20,
     effective_taker_rate: 0.0008, effective_rate_after_referral: 0.0008,
     fee_mechanism: 'rebate', fee_model: 'token',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 1080,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
+    referral_paid_in: 'same_as_fee', referrer_commission_pct: 0, zero_fee_pairs: [], enabled: true,
   },
   'Gate.io': {
     base_taker_rate: 0.001, token_discount_enabled: false, token_discount_pct: 0.10,
     effective_taker_rate: 0.001, effective_rate_after_referral: 0.001,
     fee_mechanism: 'instant', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 0,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: ['BTCUSDT'], enabled: true,
+    referral_paid_in: 'same_as_fee', referrer_commission_pct: 0, zero_fee_pairs: ['BTCUSDT'], enabled: true,
   },
   Pionex: {
     base_taker_rate: 0.0005, token_discount_enabled: false, token_discount_pct: 0,
     effective_taker_rate: 0.0005, effective_rate_after_referral: 0.0005,
     fee_mechanism: 'instant', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 0,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
+    referral_paid_in: 'same_as_fee', referrer_commission_pct: 0, zero_fee_pairs: [], enabled: true,
   },
   Bitfinex: {
     base_taker_rate: 0, token_discount_enabled: false, token_discount_pct: 0,
     effective_taker_rate: 0, effective_rate_after_referral: 0,
     fee_mechanism: 'instant', fee_model: 'received',
     referral_enabled: false, referral_cashback_pct: 0, referral_settlement_minutes: 0,
-    referral_paid_in: 'same_as_fee', zero_fee_pairs: [], enabled: true,
+    referral_paid_in: 'same_as_fee', referrer_commission_pct: 0, zero_fee_pairs: [], enabled: true,
   },
 };
 
@@ -91,6 +91,7 @@ type EditableConfig = {
   referral_cashback_pct: number;
   referral_settlement_minutes: number;
   referral_paid_in: 'same_as_fee' | 'USDT';
+  referrer_commission_pct: number;
   zero_fee_pairs: string;
   enabled: boolean;
 };
@@ -106,6 +107,7 @@ function toEditable(cfg: ExchangeFeeConfig): EditableConfig {
     referral_cashback_pct: cfg.referral_cashback_pct,
     referral_settlement_minutes: cfg.referral_settlement_minutes,
     referral_paid_in: cfg.referral_paid_in,
+    referrer_commission_pct: cfg.referrer_commission_pct ?? 0,
     zero_fee_pairs: cfg.zero_fee_pairs.join(', '),
     enabled: cfg.enabled ?? true,
   };
@@ -171,6 +173,7 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
         referral_cashback_pct: cfg.referral_cashback_pct,
         referral_settlement_minutes: cfg.referral_settlement_minutes,
         referral_paid_in: cfg.referral_paid_in,
+        referrer_commission_pct: cfg.referrer_commission_pct,
         zero_fee_pairs: cfg.zero_fee_pairs.split(',').map(s => s.trim()).filter(Boolean),
         enabled: cfg.enabled,
       };
@@ -215,6 +218,32 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
                 ${(feeStats.pending_cashback_total + feeStats.credited_cashback_total).toFixed(4)}
               </p>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Referrer earnings stats */}
+      {feeStats && feeStats.referrer_earnings_total > 0 && (
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-4">
+          <h3 className="text-xs font-semibold text-purple-400 uppercase tracking-wider mb-1">
+            Your Referrer Earnings
+          </h3>
+          <p className="text-xs text-slate-500 mb-2">Earned on your personal account (not included in bot P&L)</p>
+          <div className="text-lg font-semibold text-purple-300 mb-2">
+            ${feeStats.referrer_earnings_total.toFixed(2)}
+          </div>
+          <div className="grid grid-cols-3 sm:grid-cols-5 gap-2 text-xs">
+            {Object.entries(feeStats.referrer_earnings_per_exchange)
+              .sort(([, a], [, b]) => b - a)
+              .map(([ex, amount]) => (
+                <div key={ex} className="bg-slate-700/50 rounded p-2">
+                  <span className="text-slate-400">{ex}</span>
+                  <p className="text-purple-300 font-mono">${amount.toFixed(4)}</p>
+                  {amount >= 10 && (
+                    <span className="text-amber-400 text-[10px]">Transfer to Bitfinex</span>
+                  )}
+                </div>
+              ))}
           </div>
         </div>
       )}
@@ -307,7 +336,7 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
                 </label>
               </div>
               {cfg.referral_enabled && (
-                <div className="ml-5 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="ml-5 grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div>
                     <label className="block text-xs text-slate-500 mb-1">Cashback (%)</label>
                     <input type="number" step="1" min="0" max="100"
@@ -330,6 +359,13 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
                       <option value="same_as_fee">Same as Fee</option>
                       <option value="USDT">USDT</option>
                     </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-500 mb-1">Your Commission (%)</label>
+                    <input type="number" step="1" min="0" max="100"
+                      value={(cfg.referrer_commission_pct * 100).toFixed(0)}
+                      onChange={e => updateField(exchange, 'referrer_commission_pct', (Number(e.target.value) || 0) / 100)}
+                      className={inputCls} />
                   </div>
                 </div>
               )}

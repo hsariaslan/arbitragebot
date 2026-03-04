@@ -1010,6 +1010,7 @@ class DashboardServer:
         "referral_cashback_pct": (float, 0.0, 1.0),
         "referral_settlement_minutes": (float, 0, 10080),
         "referral_paid_in": (str, None, None),
+        "referrer_commission_pct": (float, 0.0, 1.0),
         "zero_fee_pairs": (list, None, None),
         "enabled": (bool, None, None),
     }
@@ -2080,7 +2081,9 @@ class DashboardServer:
             short = {"Binance": "BIN", "OKX": "OKX", "Bybit": "BYB", "MEXC": "MEX",
                      "Bitget": "BGT", "KuCoin": "KUC", "Gate.io": "GAT",
                      "Pionex": "PIO", "Bitfinex": "BFX"}.get(ex_name, ex_name[:3])
-            fee_parts.append(f"{short}={eff * 100:.3f}%")
+            ref_comm = cfg.get("referrer_commission_pct", 0)
+            ref_str = f"+ref{ref_comm * 100:.0f}%" if ref_comm > 0 else ""
+            fee_parts.append(f"{short}={eff * 100:.3f}%{ref_str}")
 
         # Anomaly settings
         ano_enabled = s.get("anomaly_protection_enabled", True)

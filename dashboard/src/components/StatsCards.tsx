@@ -95,16 +95,26 @@ export default function StatsCards({ portfolio, simulation, profitStats, demoCom
       sub: <span className="text-amber-400">-${Math.abs(portfolio.transfer_fees).toFixed(2)} fees</span>,
       subLabel: 'Net',
       accent: 'border-cyan-500',
-      extra: (profitStats.credited_cashback > 0 || profitStats.pending_cashback > 0) ? (
+      extra: (profitStats.credited_cashback > 0 || profitStats.pending_cashback > 0 || profitStats.referrer_earnings_total > 0) ? (
         <div className="mt-2 pt-2 border-t border-slate-700/50">
-          <div className="text-xs">
-            <span className="text-slate-500 mr-1">Cashback:</span>
-            <span className="text-emerald-400">+${profitStats.credited_cashback.toFixed(4)}</span>
-          </div>
-          {profitStats.pending_cashback > 0 && (
-            <div className="text-xs mt-0.5">
-              <span className="text-slate-500 mr-1">Pending:</span>
-              <span className="text-amber-400">${profitStats.pending_cashback.toFixed(4)}</span>
+          {(profitStats.credited_cashback > 0 || profitStats.pending_cashback > 0) && (
+            <>
+              <div className="text-xs">
+                <span className="text-slate-500 mr-1">Cashback:</span>
+                <span className="text-emerald-400">+${profitStats.credited_cashback.toFixed(4)}</span>
+              </div>
+              {profitStats.pending_cashback > 0 && (
+                <div className="text-xs mt-0.5">
+                  <span className="text-slate-500 mr-1">Pending:</span>
+                  <span className="text-amber-400">${profitStats.pending_cashback.toFixed(4)}</span>
+                </div>
+              )}
+            </>
+          )}
+          {profitStats.referrer_earnings_total > 0 && (
+            <div className="text-xs mt-1.5 pt-1.5 border-t border-slate-700/30">
+              <span className="text-slate-500 mr-1">Your Earnings:</span>
+              <span className="text-purple-400">+${profitStats.referrer_earnings_total.toFixed(2)}</span>
             </div>
           )}
         </div>
