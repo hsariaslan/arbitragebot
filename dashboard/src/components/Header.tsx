@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import type { Portfolio, Simulation, ProfitStats, UptimeInfo, ProxyUptimeInfo, AnomalyProtectionState } from '../types';
 
@@ -59,8 +60,183 @@ const mobileNavClass = ({ isActive }: { isActive: boolean }) =>
     isActive ? 'bg-slate-700 text-white' : 'text-slate-500'
   }`;
 
+const mobileBadge = "flex items-center gap-1 px-2 py-1 rounded-full bg-slate-800 border border-slate-700 active:bg-slate-700 transition-colors";
+
+// Shared tooltip content components (reused by desktop hover and mobile popup)
+function ProxyTooltipContent({ proxyUptimeInfo }: { proxyUptimeInfo: ProxyUptimeInfo }) {
+  return (
+    <>
+      <div className="mb-2 flex items-center gap-2">
+        <div className={`w-2 h-2 rounded-full ${proxyUptimeInfo.is_connected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
+        <span className="text-slate-500">Zurich Proxy:</span>{' '}
+        <span className={proxyUptimeInfo.is_connected ? 'text-emerald-400' : 'text-amber-400'}>
+          {proxyUptimeInfo.is_connected ? 'Connected' : 'Disconnected'}
+        </span>
+      </div>
+      {proxyUptimeInfo.first_connected > 0 && (
+        <div className="mb-2">
+          <span className="text-slate-500">Running since:</span>{' '}
+          <span className="text-white">{formatDateUTC(proxyUptimeInfo.first_connected)}</span>
+        </div>
+      )}
+      <div className="mb-2">
+        <span className="text-slate-500">Total downtime:</span>{' '}
+        {proxyUptimeInfo.total_downtime > 0 ? (
+          <span className="text-amber-400">{formatDuration(proxyUptimeInfo.total_downtime)} ({proxyUptimeInfo.outage_count} outage{proxyUptimeInfo.outage_count !== 1 ? 's' : ''})</span>
+        ) : (
+          <span className="text-emerald-400">None</span>
+        )}
+      </div>
+      {proxyUptimeInfo.downtimes.length > 0 && (
+        <div className="border-t border-slate-700 pt-2 mt-2 space-y-1 max-h-40 overflow-y-auto">
+          <div className="text-slate-500 font-medium mb-1">Outage log:</div>
+          {[...proxyUptimeInfo.downtimes].reverse().map((d, i) => (
+            <div key={i} className="flex justify-between">
+              <span className="text-slate-400">{formatDateUTC(d.start)}</span>
+              <span className="text-amber-400">{formatDuration(d.duration)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function UptimeTooltipContent({ uptimeInfo }: { uptimeInfo: UptimeInfo }) {
+  return (
+    <>
+      <div className="mb-2">
+        <span className="text-slate-500">Running since:</span>{' '}
+        <span className="text-white">{formatDateUTC(uptimeInfo.first_start)}</span>
+      </div>
+      <div className="mb-2">
+        <span className="text-slate-500">Total downtime:</span>{' '}
+        {uptimeInfo.total_downtime > 0 ? (
+          <span className="text-amber-400">{formatDuration(uptimeInfo.total_downtime)} ({uptimeInfo.restart_count} restart{uptimeInfo.restart_count !== 1 ? 's' : ''})</span>
+        ) : (
+          <span className="text-emerald-400">None</span>
+        )}
+      </div>
+      {uptimeInfo.downtimes.length > 0 && (
+        <div className="border-t border-slate-700 pt-2 mt-2 space-y-1 max-h-40 overflow-y-auto">
+          <div className="text-slate-500 font-medium mb-1">Downtime log:</div>
+          {[...uptimeInfo.downtimes].reverse().map((d, i) => (
+            <div key={i} className="flex justify-between">
+              <span className="text-slate-400">{formatDateUTC(d.start)}</span>
+              <span className="text-amber-400">{formatDuration(d.duration)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function AnomalyTooltipContent({ anomalyProtection, manualStopped, manualStopTimestamp, portfolio }: {
+  anomalyProtection?: AnomalyProtectionState;
+  manualStopped?: boolean;
+  manualStopTimestamp?: number;
+  portfolio: Portfolio | null;
+}) {
+  if (manualStopped) {
+    return (
+      <>
+        <div className="text-red-400 font-medium mb-2">Trading Manually Stopped</div>
+        {manualStopTimestamp != null && manualStopTimestamp > 0 && (
+          <div className="mb-1"><span className="text-slate-500">Stopped for:</span> <span className="text-white font-mono">{formatDuration(Date.now() / 1000 - manualStopTimestamp)}</span></div>
+        )}
+        {portfolio && (
+          <>
+            <div className="mb-1"><span className="text-slate-500">Portfolio:</span> <span className="text-white font-mono">${portfolio.total_value.toFixed(2)}</span></div>
+            <div><span className="text-slate-500">Session P&L:</span> <PnlText value={portfolio.net_pnl} /></div>
+          </>
+        )}
+      </>
+    );
+  }
+  if (anomalyProtection?.emergency_triggered) {
+    return (
+      <>
+        <div className="text-red-400 font-medium mb-2">Emergency Sell-All Triggered</div>
+        <div className="text-slate-400 mb-2">{anomalyProtection.pause_reason}</div>
+        {anomalyProtection.pause_timestamp > 0 && (
+          <div className="mb-1"><span className="text-slate-500">Duration:</span> <span className="text-white font-mono">{formatDuration(Date.now() / 1000 - anomalyProtection.pause_timestamp)}</span></div>
+        )}
+        <div className="mb-1"><span className="text-slate-500">Drawdown:</span> <span className="text-red-400 font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span></div>
+        <div className="text-amber-400 mt-2 font-medium">Requires manual resume</div>
+      </>
+    );
+  }
+  if (anomalyProtection?.paused) {
+    return (
+      <>
+        <div className="text-red-400 font-medium mb-1">Trading Paused ({anomalyProtection.pause_layer})</div>
+        <div className="text-slate-400 mb-2">{anomalyProtection.pause_reason}</div>
+        {anomalyProtection.pause_timestamp > 0 && (
+          <div className="mb-1"><span className="text-slate-500">Paused for:</span> <span className="text-white font-mono">{formatDuration(Date.now() / 1000 - anomalyProtection.pause_timestamp)}</span></div>
+        )}
+        <div className="mb-1"><span className="text-slate-500">Rolling P&L:</span> <span className="font-mono text-red-400">${anomalyProtection.rolling_pnl.toFixed(2)}</span> <span className="text-slate-600">/ threshold ${anomalyProtection.circuit_breaker_threshold.toFixed(2)}</span></div>
+        <div className="mb-1"><span className="text-slate-500">Drawdown:</span> <span className="font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span> <span className="text-slate-600">/ threshold {anomalyProtection.drawdown_threshold_pct.toFixed(1)}%</span></div>
+        <div className="mb-1"><span className="text-slate-500">Trades in window:</span> <span className="font-mono">{anomalyProtection.trades_in_window}</span> <span className="text-slate-600">({anomalyProtection.loss_rate.toFixed(1)}% loss rate)</span></div>
+        {Object.keys(anomalyProtection.symbol_blocks).length > 0 && (
+          <div className="mb-1"><span className="text-slate-500">Blocked symbols:</span> <span className="text-amber-400">{Object.keys(anomalyProtection.symbol_blocks).join(', ')}</span></div>
+        )}
+        {anomalyProtection.events.length > 0 && (
+          <div className="border-t border-slate-700 pt-2 mt-2 space-y-1">
+            <div className="text-slate-500 font-medium">Recent events:</div>
+            {anomalyProtection.events.slice(-3).reverse().map((e, i) => (
+              <div key={i} className="text-slate-400 truncate">{e.level}: {e.reason}</div>
+            ))}
+          </div>
+        )}
+      </>
+    );
+  }
+  if (anomalyProtection?.warning_active) {
+    return (
+      <>
+        <div className="text-amber-400 font-medium mb-1">Trade Size Reduced (x{anomalyProtection.trade_size_multiplier})</div>
+        <div className="text-slate-400 mb-2">{anomalyProtection.warning_reason}</div>
+        <div className="mb-1"><span className="text-slate-500">Rolling P&L:</span> <span className="font-mono text-amber-400">${anomalyProtection.rolling_pnl.toFixed(2)}</span> <span className="text-slate-600">/ threshold ${anomalyProtection.circuit_breaker_threshold.toFixed(2)}</span></div>
+        <div className="mb-1"><span className="text-slate-500">Trades in window:</span> <span className="font-mono">{anomalyProtection.trades_in_window}</span> <span className="text-slate-600">({anomalyProtection.loss_rate.toFixed(1)}% loss rate)</span></div>
+        <div><span className="text-slate-500">Drawdown:</span> <span className="font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span></div>
+      </>
+    );
+  }
+  if (anomalyProtection?.enabled) {
+    return (
+      <>
+        <div className="text-emerald-400 font-medium mb-2">Anomaly Protection Active</div>
+        <div className="mb-1"><span className="text-slate-500">Rolling P&L:</span> <span className="font-mono">${anomalyProtection.rolling_pnl.toFixed(2)}</span> <span className="text-slate-600">/ threshold ${anomalyProtection.circuit_breaker_threshold.toFixed(2)}</span></div>
+        <div className="mb-1"><span className="text-slate-500">Peak portfolio:</span> <span className="font-mono">${anomalyProtection.peak_portfolio.toFixed(2)}</span></div>
+        <div className="mb-1"><span className="text-slate-500">Drawdown:</span> <span className="font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span> <span className="text-slate-600">/ threshold {anomalyProtection.drawdown_threshold_pct.toFixed(1)}%</span></div>
+        {Object.keys(anomalyProtection.symbol_blocks).length > 0 && (
+          <div className="mb-1"><span className="text-slate-500">Blocked symbols:</span> <span className="text-amber-400">{Object.keys(anomalyProtection.symbol_blocks).join(', ')}</span></div>
+        )}
+        <div className="border-t border-slate-700 pt-2 mt-2">
+          <span className="text-slate-500">Session:</span>{' '}
+          <span className="text-slate-400">{anomalyProtection.total_pauses}p / {anomalyProtection.total_warnings}w / {anomalyProtection.total_symbol_blocks}sb</span>
+        </div>
+      </>
+    );
+  }
+  return <div className="text-slate-500">Anomaly protection disabled</div>;
+}
+
+// Get anomaly status label and colors
+function getAnomalyStatus(anomalyProtection?: AnomalyProtectionState, manualStopped?: boolean): { label: string; dotClass: string; textClass: string } {
+  if (manualStopped) return { label: 'STOPPED', dotClass: 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.5)]', textClass: 'text-red-400' };
+  if (anomalyProtection?.emergency_triggered) return { label: 'EMERGENCY', dotClass: 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.5)]', textClass: 'text-red-400' };
+  if (anomalyProtection?.paused) return { label: 'PAUSED', dotClass: 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.5)] animate-pulse', textClass: 'text-red-400' };
+  if (anomalyProtection?.warning_active) return { label: 'WARNING', dotClass: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)] animate-pulse', textClass: 'text-amber-400' };
+  if (anomalyProtection?.enabled) return { label: 'Protected', dotClass: 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.3)]', textClass: 'text-emerald-400' };
+  return { label: 'Off', dotClass: 'bg-slate-500', textClass: 'text-slate-500' };
+}
+
 export default function Header({ connected, uptimeSeconds, uptimeInfo, connectedExchanges, totalExchanges, proxyUptimeInfo, portfolio, simulation, profitStats, anomalyProtection, manualStopped, manualStopTimestamp, onLogout }: HeaderProps) {
-  // Connection state: connected, reconnecting (disconnected but was authed), or disconnected
+  const [mobilePopup, setMobilePopup] = useState<string | null>(null);
+
+  // Connection state
   const proxyDown = connected && proxyUptimeInfo && !proxyUptimeInfo.is_connected;
   const connectionDot = !connected
     ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)] animate-pulse'
@@ -69,6 +245,7 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
       : 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]';
   const connectionText = !connected ? 'Reconnecting...' : proxyDown ? 'Disconnected (Zurich)' : 'Connected';
   const connectionColor = !connected ? 'text-amber-400' : proxyDown ? 'text-amber-400' : 'text-emerald-400';
+  const anomalyStatus = getAnomalyStatus(anomalyProtection, manualStopped);
 
   return (
     <>
@@ -85,97 +262,38 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
           </nav>
         </div>
         <div className="flex items-center gap-3 sm:gap-6 text-sm">
+          {/* Desktop: Exchanges with hover tooltip */}
           <span className="text-slate-400 hidden sm:inline relative group/ex cursor-default">
             Exchanges: <span className="text-white font-medium">{connectedExchanges}/{totalExchanges}</span>
             {proxyUptimeInfo && (
               <div className="absolute left-0 top-full mt-2 w-72 bg-slate-800 border border-slate-600 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/ex:opacity-100 group-hover/ex:visible transition-all duration-150 z-50">
-                <div className="mb-2 flex items-center gap-2">
-                  <div className={`w-2 h-2 rounded-full ${proxyUptimeInfo.is_connected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
-                  <span className="text-slate-500">Zurich Proxy:</span>{' '}
-                  <span className={proxyUptimeInfo.is_connected ? 'text-emerald-400' : 'text-amber-400'}>
-                    {proxyUptimeInfo.is_connected ? 'Connected' : 'Disconnected'}
-                  </span>
-                </div>
-                {proxyUptimeInfo.first_connected > 0 && (
-                  <div className="mb-2">
-                    <span className="text-slate-500">Running since:</span>{' '}
-                    <span className="text-white">{formatDateUTC(proxyUptimeInfo.first_connected)}</span>
-                  </div>
-                )}
-                <div className="mb-2">
-                  <span className="text-slate-500">Total downtime:</span>{' '}
-                  {proxyUptimeInfo.total_downtime > 0 ? (
-                    <span className="text-amber-400">{formatDuration(proxyUptimeInfo.total_downtime)} ({proxyUptimeInfo.outage_count} outage{proxyUptimeInfo.outage_count !== 1 ? 's' : ''})</span>
-                  ) : (
-                    <span className="text-emerald-400">None</span>
-                  )}
-                </div>
-                {proxyUptimeInfo.downtimes.length > 0 && (
-                  <div className="border-t border-slate-700 pt-2 mt-2 space-y-1 max-h-40 overflow-y-auto">
-                    <div className="text-slate-500 font-medium mb-1">Outage log:</div>
-                    {[...proxyUptimeInfo.downtimes].reverse().map((d, i) => (
-                      <div key={i} className="flex justify-between">
-                        <span className="text-slate-400">{formatDateUTC(d.start)}</span>
-                        <span className="text-amber-400">{formatDuration(d.duration)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <ProxyTooltipContent proxyUptimeInfo={proxyUptimeInfo} />
               </div>
             )}
           </span>
+          {/* Desktop: Uptime with hover tooltip */}
           <span className="text-slate-400 hidden sm:inline relative group cursor-default">
             Uptime: <span className="text-white font-medium">{formatUptime(uptimeSeconds)}</span>
             {uptimeInfo && (
               <div className="absolute right-0 top-full mt-2 w-72 bg-slate-800 border border-slate-600 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 z-50">
-                <div className="mb-2">
-                  <span className="text-slate-500">Running since:</span>{' '}
-                  <span className="text-white">{formatDateUTC(uptimeInfo.first_start)}</span>
-                </div>
-                <div className="mb-2">
-                  <span className="text-slate-500">Total downtime:</span>{' '}
-                  {uptimeInfo.total_downtime > 0 ? (
-                    <span className="text-amber-400">{formatDuration(uptimeInfo.total_downtime)} ({uptimeInfo.restart_count} restart{uptimeInfo.restart_count !== 1 ? 's' : ''})</span>
-                  ) : (
-                    <span className="text-emerald-400">None</span>
-                  )}
-                </div>
-                {uptimeInfo.downtimes.length > 0 && (
-                  <div className="border-t border-slate-700 pt-2 mt-2 space-y-1 max-h-40 overflow-y-auto">
-                    <div className="text-slate-500 font-medium mb-1">Downtime log:</div>
-                    {[...uptimeInfo.downtimes].reverse().map((d, i) => (
-                      <div key={i} className="flex justify-between">
-                        <span className="text-slate-400">{formatDateUTC(d.start)}</span>
-                        <span className="text-amber-400">{formatDuration(d.duration)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <UptimeTooltipContent uptimeInfo={uptimeInfo} />
               </div>
             )}
           </span>
+          {/* Connection status (visible on all sizes) */}
           <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${connectionDot}`} />
-            <span className={connectionColor}>
+            <span className={`hidden sm:inline ${connectionColor}`}>
               {connectionText}
             </span>
           </div>
-          {/* Anomaly protection / manual stop indicator */}
+          {/* Desktop: Anomaly protection indicators */}
           {manualStopped && (
             <div className="hidden sm:flex items-center gap-1.5 relative group/anomaly cursor-default">
               <div className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.5)]" />
               <span className="text-red-400 text-xs font-medium">STOPPED</span>
               <div className="absolute right-0 top-full mt-2 w-72 bg-slate-800 border border-red-900/50 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/anomaly:opacity-100 group-hover/anomaly:visible transition-all duration-150 z-50">
-                <div className="text-red-400 font-medium mb-2">Trading Manually Stopped</div>
-                {manualStopTimestamp != null && manualStopTimestamp > 0 && (
-                  <div className="mb-1"><span className="text-slate-500">Stopped for:</span> <span className="text-white font-mono">{formatDuration(Date.now() / 1000 - manualStopTimestamp)}</span></div>
-                )}
-                {portfolio && (
-                  <>
-                    <div className="mb-1"><span className="text-slate-500">Portfolio:</span> <span className="text-white font-mono">${portfolio.total_value.toFixed(2)}</span></div>
-                    <div><span className="text-slate-500">Session P&L:</span> <PnlText value={portfolio.net_pnl} /></div>
-                  </>
-                )}
+                <AnomalyTooltipContent anomalyProtection={anomalyProtection} manualStopped={manualStopped} manualStopTimestamp={manualStopTimestamp} portfolio={portfolio} />
               </div>
             </div>
           )}
@@ -184,13 +302,7 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
               <div className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.5)]" />
               <span className="text-red-400 text-xs font-medium">EMERGENCY</span>
               <div className="absolute right-0 top-full mt-2 w-72 bg-slate-800 border border-red-900/50 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/anomaly:opacity-100 group-hover/anomaly:visible transition-all duration-150 z-50">
-                <div className="text-red-400 font-medium mb-2">Emergency Sell-All Triggered</div>
-                <div className="text-slate-400 mb-2">{anomalyProtection.pause_reason}</div>
-                {anomalyProtection.pause_timestamp > 0 && (
-                  <div className="mb-1"><span className="text-slate-500">Duration:</span> <span className="text-white font-mono">{formatDuration(Date.now() / 1000 - anomalyProtection.pause_timestamp)}</span></div>
-                )}
-                <div className="mb-1"><span className="text-slate-500">Drawdown:</span> <span className="text-red-400 font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span></div>
-                <div className="text-amber-400 mt-2 font-medium">Requires manual resume</div>
+                <AnomalyTooltipContent anomalyProtection={anomalyProtection} manualStopped={manualStopped} manualStopTimestamp={manualStopTimestamp} portfolio={portfolio} />
               </div>
             </div>
           )}
@@ -199,25 +311,7 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
               <div className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.5)] animate-pulse" />
               <span className="text-red-400 text-xs font-medium">PAUSED</span>
               <div className="absolute right-0 top-full mt-2 w-80 bg-slate-800 border border-red-900/50 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/anomaly:opacity-100 group-hover/anomaly:visible transition-all duration-150 z-50">
-                <div className="text-red-400 font-medium mb-1">Trading Paused ({anomalyProtection.pause_layer})</div>
-                <div className="text-slate-400 mb-2">{anomalyProtection.pause_reason}</div>
-                {anomalyProtection.pause_timestamp > 0 && (
-                  <div className="mb-1"><span className="text-slate-500">Paused for:</span> <span className="text-white font-mono">{formatDuration(Date.now() / 1000 - anomalyProtection.pause_timestamp)}</span></div>
-                )}
-                <div className="mb-1"><span className="text-slate-500">Rolling P&L:</span> <span className="font-mono text-red-400">${anomalyProtection.rolling_pnl.toFixed(2)}</span> <span className="text-slate-600">/ threshold ${anomalyProtection.circuit_breaker_threshold.toFixed(2)}</span></div>
-                <div className="mb-1"><span className="text-slate-500">Drawdown:</span> <span className="font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span> <span className="text-slate-600">/ threshold {anomalyProtection.drawdown_threshold_pct.toFixed(1)}%</span></div>
-                <div className="mb-1"><span className="text-slate-500">Trades in window:</span> <span className="font-mono">{anomalyProtection.trades_in_window}</span> <span className="text-slate-600">({anomalyProtection.loss_rate.toFixed(1)}% loss rate)</span></div>
-                {Object.keys(anomalyProtection.symbol_blocks).length > 0 && (
-                  <div className="mb-1"><span className="text-slate-500">Blocked symbols:</span> <span className="text-amber-400">{Object.keys(anomalyProtection.symbol_blocks).join(', ')}</span></div>
-                )}
-                {anomalyProtection.events.length > 0 && (
-                  <div className="border-t border-slate-700 pt-2 mt-2 space-y-1">
-                    <div className="text-slate-500 font-medium">Recent events:</div>
-                    {anomalyProtection.events.slice(-3).reverse().map((e, i) => (
-                      <div key={i} className="text-slate-400 truncate">{e.level}: {e.reason}</div>
-                    ))}
-                  </div>
-                )}
+                <AnomalyTooltipContent anomalyProtection={anomalyProtection} manualStopped={manualStopped} manualStopTimestamp={manualStopTimestamp} portfolio={portfolio} />
               </div>
             </div>
           )}
@@ -226,11 +320,7 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
               <div className="w-2 h-2 rounded-full bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)] animate-pulse" />
               <span className="text-amber-400 text-xs font-medium">WARNING</span>
               <div className="absolute right-0 top-full mt-2 w-80 bg-slate-800 border border-amber-900/50 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/anomaly:opacity-100 group-hover/anomaly:visible transition-all duration-150 z-50">
-                <div className="text-amber-400 font-medium mb-1">Trade Size Reduced (x{anomalyProtection.trade_size_multiplier})</div>
-                <div className="text-slate-400 mb-2">{anomalyProtection.warning_reason}</div>
-                <div className="mb-1"><span className="text-slate-500">Rolling P&L:</span> <span className="font-mono text-amber-400">${anomalyProtection.rolling_pnl.toFixed(2)}</span> <span className="text-slate-600">/ threshold ${anomalyProtection.circuit_breaker_threshold.toFixed(2)}</span></div>
-                <div className="mb-1"><span className="text-slate-500">Trades in window:</span> <span className="font-mono">{anomalyProtection.trades_in_window}</span> <span className="text-slate-600">({anomalyProtection.loss_rate.toFixed(1)}% loss rate)</span></div>
-                <div><span className="text-slate-500">Drawdown:</span> <span className="font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span></div>
+                <AnomalyTooltipContent anomalyProtection={anomalyProtection} manualStopped={manualStopped} manualStopTimestamp={manualStopTimestamp} portfolio={portfolio} />
               </div>
             </div>
           )}
@@ -239,17 +329,7 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
               <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.3)]" />
               <span className="text-emerald-400 text-xs font-medium">Protected</span>
               <div className="absolute right-0 top-full mt-2 w-80 bg-slate-800 border border-emerald-900/50 rounded-lg shadow-xl p-3 text-xs text-slate-300 opacity-0 invisible group-hover/anomaly:opacity-100 group-hover/anomaly:visible transition-all duration-150 z-50">
-                <div className="text-emerald-400 font-medium mb-2">Anomaly Protection Active</div>
-                <div className="mb-1"><span className="text-slate-500">Rolling P&L:</span> <span className="font-mono">${anomalyProtection.rolling_pnl.toFixed(2)}</span> <span className="text-slate-600">/ threshold ${anomalyProtection.circuit_breaker_threshold.toFixed(2)}</span></div>
-                <div className="mb-1"><span className="text-slate-500">Peak portfolio:</span> <span className="font-mono">${anomalyProtection.peak_portfolio.toFixed(2)}</span></div>
-                <div className="mb-1"><span className="text-slate-500">Drawdown:</span> <span className="font-mono">{anomalyProtection.current_drawdown_pct.toFixed(2)}%</span> <span className="text-slate-600">/ threshold {anomalyProtection.drawdown_threshold_pct.toFixed(1)}%</span></div>
-                {Object.keys(anomalyProtection.symbol_blocks).length > 0 && (
-                  <div className="mb-1"><span className="text-slate-500">Blocked symbols:</span> <span className="text-amber-400">{Object.keys(anomalyProtection.symbol_blocks).join(', ')}</span></div>
-                )}
-                <div className="border-t border-slate-700 pt-2 mt-2">
-                  <span className="text-slate-500">Session:</span>{' '}
-                  <span className="text-slate-400">{anomalyProtection.total_pauses}p / {anomalyProtection.total_warnings}w / {anomalyProtection.total_symbol_blocks}sb</span>
-                </div>
+                <AnomalyTooltipContent anomalyProtection={anomalyProtection} manualStopped={manualStopped} manualStopTimestamp={manualStopTimestamp} portfolio={portfolio} />
               </div>
             </div>
           )}
@@ -258,12 +338,93 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
             className="text-slate-500 hover:text-slate-300 text-sm transition-colors"
             title="Logout"
           >
-            Logout
+            {/* Icon on mobile, text on desktop */}
+            <svg className="sm:hidden w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+            <span className="hidden sm:inline">Logout</span>
           </button>
         </div>
       </div>
 
-      {/* Stats bar */}
+      {/* Mobile info badges (visible only on small screens) */}
+      <div className="sm:hidden flex items-center gap-2 px-3 py-1.5 border-t border-slate-700/50 overflow-x-auto">
+        {/* Connection badge */}
+        <button
+          onClick={() => setMobilePopup(p => p === 'connection' ? null : 'connection')}
+          className={mobileBadge}
+        >
+          <div className={`w-1.5 h-1.5 rounded-full ${connectionDot}`} />
+          <span className={`text-[10px] font-medium ${connectionColor}`}>
+            {!connected ? 'Reconnecting' : proxyDown ? 'Zurich' : 'Connected'}
+          </span>
+        </button>
+        {/* Exchanges badge */}
+        <button
+          onClick={() => setMobilePopup(p => p === 'exchanges' ? null : 'exchanges')}
+          className={mobileBadge}
+        >
+          <span className="text-[10px] text-slate-400">Ex</span>
+          <span className="text-[10px] text-white font-mono font-medium">{connectedExchanges}/{totalExchanges}</span>
+        </button>
+        {/* Anomaly badge */}
+        <button
+          onClick={() => setMobilePopup(p => p === 'anomaly' ? null : 'anomaly')}
+          className={mobileBadge}
+        >
+          <div className={`w-1.5 h-1.5 rounded-full ${anomalyStatus.dotClass}`} />
+          <span className={`text-[10px] font-medium ${anomalyStatus.textClass}`}>{anomalyStatus.label}</span>
+        </button>
+        {/* Uptime badge */}
+        <button
+          onClick={() => setMobilePopup(p => p === 'uptime' ? null : 'uptime')}
+          className={mobileBadge}
+        >
+          <svg className="w-2.5 h-2.5 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2" />
+            <circle cx="12" cy="12" r="9" />
+          </svg>
+          <span className="text-[10px] text-white font-mono font-medium">{formatUptime(uptimeSeconds)}</span>
+        </button>
+      </div>
+
+      {/* Mobile popup overlay */}
+      {mobilePopup && (
+        <div className="sm:hidden fixed inset-0 bg-black/50 z-50" onClick={() => setMobilePopup(null)}>
+          <div
+            className="absolute top-14 left-3 right-3 bg-slate-800 border border-slate-600 rounded-lg shadow-xl p-4 text-xs text-slate-300"
+            onClick={e => e.stopPropagation()}
+          >
+            {mobilePopup === 'connection' && (
+              <>
+                <div className="font-medium text-white mb-2 flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${connectionDot}`} />
+                  {connectionText}
+                </div>
+                {proxyUptimeInfo && <ProxyTooltipContent proxyUptimeInfo={proxyUptimeInfo} />}
+                {!proxyUptimeInfo && <div className="text-slate-500">No proxy data available</div>}
+              </>
+            )}
+            {mobilePopup === 'exchanges' && (
+              <>
+                <div className="font-medium text-white mb-2">Exchanges: {connectedExchanges}/{totalExchanges}</div>
+                {proxyUptimeInfo && <ProxyTooltipContent proxyUptimeInfo={proxyUptimeInfo} />}
+              </>
+            )}
+            {mobilePopup === 'anomaly' && (
+              <AnomalyTooltipContent anomalyProtection={anomalyProtection} manualStopped={manualStopped} manualStopTimestamp={manualStopTimestamp} portfolio={portfolio} />
+            )}
+            {mobilePopup === 'uptime' && (
+              <>
+                <div className="font-medium text-white mb-2">Uptime: {formatUptime(uptimeSeconds)}</div>
+                {uptimeInfo && <UptimeTooltipContent uptimeInfo={uptimeInfo} />}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Stats bar (desktop only) */}
       {portfolio && simulation && profitStats && (
         <div className="hidden md:flex items-center gap-6 px-6 py-1.5 bg-slate-800/50 border-t border-slate-700/50 text-xs">
           <div className="flex items-center gap-1.5">
