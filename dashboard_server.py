@@ -382,6 +382,14 @@ class DashboardServer:
         now = time.time()
         created = session.get("created_at", session["last_seen"])
 
+        # Check if session's IP is still whitelisted
+        session_ip = session.get("ip", "")
+        if not self._check_ip_whitelist(session_ip):
+            del self._sessions[token]
+            self._persist_sessions()
+            logger.info(f"[Auth] Session rejected — IP {session_ip} no longer whitelisted")
+            return False
+
         if session["remember"]:
             # Remember-me: 30-day absolute max from creation
             if now - created > self._remember_expiry:
@@ -442,17 +450,24 @@ class DashboardServer:
     async def _enforce_ip_whitelist(self) -> None:
         """Disconnect any authenticated clients whose IP is no longer whitelisted.
 
-        Called after IP whitelist settings change. If a phone is lost/stolen,
-        removing its IP from the whitelist immediately kills the session.
+        Called after IP whitelist settings change and periodically in broadcast loop.
+        If a phone is lost/stolen, removing its IP immediately kills the session.
         """
         if not self._client_ips:
             return
-        to_disconnect: list[Any] = []
+        if not self._settings.get("ip_whitelist_enabled", False):
+            return
+        whitelist = self._settings.get("ip_whitelist", [])
+        if not whitelist:
+            return  # empty whitelist = allow all (don't lock everyone out)
+        to_disconnect: list[tuple[Any, str]] = []
         for ws, client_ip in list(self._client_ips.items()):
-            if not self._check_ip_whitelist(client_ip):
-                to_disconnect.append(ws)
-        for ws in to_disconnect:
-            client_ip = self._client_ips.get(ws, "unknown")
+            if client_ip not in whitelist:
+                to_disconnect.append((ws, client_ip))
+        for ws, client_ip in to_disconnect:
+            logger.warning(f"[Auth] Force disconnecting {client_ip} (IP not in whitelist: {whitelist})")
+            # Invalidate any sessions from this IP
+            self._invalidate_sessions_by_ip(client_ip)
             try:
                 await ws.send(json.dumps({
                     "type": "auth_denied",
@@ -465,6 +480,18 @@ class DashboardServer:
             self._client_ips.pop(ws, None)
             self._auth_logger.warning(f"{client_ip} - Force disconnected (IP removed from whitelist)")
             self._record_auth_event("ip_revoked", client_ip, details="IP removed from whitelist while connected")
+
+    def _invalidate_sessions_by_ip(self, target_ip: str) -> None:
+        """Invalidate all stored sessions created from the given IP."""
+        to_remove = [
+            token for token, data in self._sessions.items()
+            if data.get("ip") == target_ip
+        ]
+        for token in to_remove:
+            del self._sessions[token]
+        if to_remove:
+            self._persist_sessions()
+            logger.info(f"[Auth] Invalidated {len(to_remove)} session(s) from IP {target_ip}")
 
     # --- Auth events ---
 
@@ -675,6 +702,8 @@ class DashboardServer:
                 if now - self._last_cleanup > 300:
                     self._cleanup_auth()
                     self._last_cleanup = now
+                # Enforce IP whitelist on every broadcast cycle (~1s)
+                await self._enforce_ip_whitelist()
                 await asyncio.sleep(1.0)
 
         logger.info("[Dashboard] WebSocket server stopped")
