@@ -2024,12 +2024,9 @@ class DashboardServer:
             f"execution_mode={s.get('execution_mode', 'simulation')}",
         ]
 
-        detail_str = "\n".join(f"  | {line}" for line in lines)
-
         # Change detection
-        changes_str = ""
+        diffs: list[str] = []
         if old_settings:
-            diffs = []
             keys_to_check = [
                 "trade_amount_usd", "trade_amount_pct", "total_capital",
                 "adaptive_mode", "auto_rotate", "max_active_symbols",
@@ -2051,11 +2048,13 @@ class DashboardServer:
                 new_v = s.get(k)
                 if old_v != new_v and old_v is not None:
                     diffs.append(f"{k} {old_v}→{new_v}")
-            if diffs:
-                changes_str = f"\n  | CHANGES: {', '.join(diffs)}"
 
         tag = reason.upper()
-        logger.info(f"[Settings] {tag}\n{detail_str}{changes_str}")
+        logger.info(f"[Settings] {tag}")
+        for line in lines:
+            logger.info(f"[Settings]   | {line}")
+        if diffs:
+            logger.info(f"[Settings]   | CHANGES: {', '.join(diffs)}")
 
     def _build_optimizer_state(self) -> dict[str, Any]:
         """Collect optimizer state for dashboard broadcast."""
