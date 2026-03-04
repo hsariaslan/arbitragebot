@@ -57,6 +57,8 @@ class BitfinexFetcher(BaseFetcher):
         super().__init__(symbols)
         # Map channel_id -> symbol for each connection
         self._channel_map: dict[int, str] = {}
+        # Track per-sub-fetcher connection state (avoids race between 4 sub-fetchers)
+        self._connected_subs: set[int] = set()
 
     @property
     def exchange_name(self) -> str:
@@ -269,12 +271,16 @@ class BitfinexFetcher(BaseFetcher):
 class _BitfinexSubFetcher:
     """Internal helper that manages a single Bitfinex WS connection for a subset of symbols."""
 
+    _next_id = 0
+
     def __init__(self, parent: BitfinexFetcher, symbols: list[str]) -> None:
         self._parent = parent
         self._symbols = symbols
         self._channel_map: dict[int, str] = {}
         self._confirmed: set[str] = set()
         self._last_data_time: float = 0.0
+        self._id = _BitfinexSubFetcher._next_id
+        _BitfinexSubFetcher._next_id += 1
 
     async def run(self) -> None:
         """Connect and listen loop with reconnection."""
@@ -299,6 +305,7 @@ class _BitfinexSubFetcher:
         kwargs = self._parent._ws_connect_kwargs()
 
         async with websockets.connect(url, **kwargs) as ws:
+            self._parent._connected_subs.add(self._id)
             self._parent._ws_connected = True
             logger.info(
                 f"[{self._parent.exchange_name}] Sub-connection for "
@@ -331,7 +338,8 @@ class _BitfinexSubFetcher:
                     except asyncio.CancelledError:
                         pass
             finally:
-                self._parent._ws_connected = False
+                self._parent._connected_subs.discard(self._id)
+                self._parent._ws_connected = len(self._parent._connected_subs) > 0
 
     async def _listen(self, ws: Any) -> None:
         async for raw in ws:
@@ -454,11 +462,15 @@ class _BitfinexBookSubFetcher:
     AMOUNT > 0 = bid, AMOUNT < 0 = ask (absolute value = qty).
     """
 
+    _next_id = 1000  # Offset to avoid collision with SubFetcher IDs
+
     def __init__(self, parent: BitfinexFetcher, symbols: list[str]) -> None:
         self._parent = parent
         self._symbols = symbols
         self._channel_map: dict[int, str] = {}
         self._confirmed: set[str] = set()
+        self._id = _BitfinexBookSubFetcher._next_id
+        _BitfinexBookSubFetcher._next_id += 1
         self._last_data_time: float = 0.0
         # Maintain full book state per symbol for snapshot+update merging
         self._book_bids: dict[str, dict[float, float]] = {}  # symbol -> {price: qty}
@@ -492,6 +504,8 @@ class _BitfinexBookSubFetcher:
         self._book_asks.clear()
 
         async with websockets.connect(url, **kwargs) as ws:
+            self._parent._connected_subs.add(self._id)
+            self._parent._ws_connected = True
             logger.info(
                 f"[{self._parent.exchange_name}] Book sub-connection for "
                 f"{len(self._symbols)} symbols connected"
@@ -524,7 +538,8 @@ class _BitfinexBookSubFetcher:
                     except asyncio.CancelledError:
                         pass
             finally:
-                self._parent._ws_connected = False
+                self._parent._connected_subs.discard(self._id)
+                self._parent._ws_connected = len(self._parent._connected_subs) > 0
 
     async def _listen(self, ws: Any) -> None:
         async for raw in ws:
