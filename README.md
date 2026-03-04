@@ -1,6 +1,6 @@
 # CoirnaBot
 
-**v0.21.1-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
+**v0.22.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
 
 Monitors real-time prices across 9 crypto exchanges via WebSocket, detects price discrepancies, and executes simultaneous buy/sell orders to profit from the spread. Deployed on Bangkok VPS with auto-deploy via GitHub Actions. Supports simulation mode and demo/testnet execution with automatic discrepancy detection.
 
@@ -17,6 +17,8 @@ Monitors real-time prices across 9 crypto exchanges via WebSocket, detects price
 - **Demo/testnet comparison**: Fetches real portfolio from Binance/OKX/Bybit demo APIs, baseline-adjusted comparison with discrepancy detection
 - **Comprehensive fee management**: Per-exchange fee configs with token discounts, referral cashbacks, zero-fee pairs, sim/real mode toggle, hot-apply from dashboard
 - **Transfer fee management**: Per-exchange per-network withdrawal fees (flat/percentage/conditional), preferred network selection, hot-apply from dashboard
+- **Anomaly protection**: 3-layer safety system — circuit breaker (rolling P&L), drawdown protection (peak-to-trough), per-symbol loss streak blocking. Manual stop/start, hard stop (convert all to USDT), distribute from Bitfinex
+- **Zurich WebSocket proxy**: Oracle Cloud free-tier VPS in Zurich for low-latency Bitfinex data (0.7ms vs 1,200ms direct)
 - **Dashboard security**: Login authentication, rate limiting, reCAPTCHA v2, IP whitelist, email alerts, auth logging
 
 ## Prerequisites
@@ -119,7 +121,7 @@ coirnabot/
       types.ts            # TypeScript interfaces
       hooks/useWebSocket.ts  # WebSocket connection, auth flow, restart handling
       components/         # LoginPage, Header, SymbolRankings, RankingPage, PerformanceCharts, SettingsPage, Tooltip, etc.
-      utils/exportXlsx.ts # XLSX export (18 sheets)
+      utils/exportXlsx.ts # XLSX export (21 sheets)
       utils/exportMarkdown.ts # Markdown table export for clipboard
 ```
 

@@ -373,7 +373,7 @@ Average freshness ranged 10,528ms to 19,883ms. Max freshness peaked at 118,786ms
 ### Session #3 — 2026-03-04 (Capital Concentration Bottleneck)
 
 **Date**: 2026-03-04, 01:27:24 - 03:05:16 UTC (1h 38m)
-**Capital**: $1,000 (reduced from $3,000 — testing smaller capital)
+**Capital**: $1,006 (reduced from $3,000 — testing smaller capital)
 **Version**: v0.20.0-alpha (post-Bybit fix)
 **VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
 
@@ -543,29 +543,30 @@ The cycle:
 
 | Pattern | First Seen | Sessions | Avg $/hr | Notes |
 |---------|-----------|----------|----------|-------|
-| Bitfinex buyer + altcoin strong/very_strong | Session #1 | 3 | $66.97 | STRK. S1: 16h/$81.91/hr ($3k), S2: 18m/$107.95/hr ($3k), S3: 1h38m/$11.06/hr ($1k) |
+| Bitfinex buyer + altcoin strong/very_strong | Session #1 | 4 | $37.43 | STRK. S1: $81.91/hr ($3k), S2: $107.95/hr ($3k), S3: $11.06/hr ($1k), S4: $28.11/hr STRK-only phase ($1k) |
+| Non-Bitfinex pair expansion is net negative | Session #3 | 3 | -$2.81 | AXS Gate.io→KuCoin/Bitget. S3: demoted 2× (thin margins). S4: 728 trades, $11.63 gross but -$7.65 net after fees |
 
 ### Exchange Performance Summary
 
 | Exchange | Role | Sessions as Top Role | Notes |
 |----------|------|---------------------|-------|
-| Bitfinex | Buyer | 3/3 | 0% fee + $0 withdrawals = dominant buyer. S1: 89%, S2: STRK buyer, S3: 68.6% |
-| OKX | Seller | 3/3 | S1: most trades (1,348). S2: secondary STRK seller. S3: primary STRK seller (165 trades) |
-| MEXC | Seller/Buyer | 3/3 | S1: highest avg ($0.3683). S2: primary STRK seller. S3: secondary STRK buyer+seller |
-| Bybit | Seller/Fixed | 1/3 | S1: 760 trades, $252.86. S2: DEAD (Bug #1). S3: **Fixed, healthy**, but not in dominant pairs |
-| Bitget | Seller | 1/3 | S1: 496 trades. S2-S3: $0 allocated (not in dominant pairs) |
-| KuCoin | Seller | 1/3 | S1: 344 trades. S2-S3: minimal/no allocation |
-| Gate.io | Seller | 2/3 | S1: limited by cap. S2: AXS seller. S3: AXS seller (before demotion) |
-| Binance | Minimal | 1/3 | S1: 19 trades. S2-S3: $0 allocated |
-| Pionex | Not seen | 0/3 | Disabled in Fee Management. Never traded across all sessions |
+| Bitfinex | Buyer | 4/4 | 0% fee + $0 withdrawals = dominant buyer. S1: 89%, S2-S4: STRK buyer |
+| OKX | Seller | 4/4 | S1: most trades (1,348). S2-S4: primary/secondary STRK seller |
+| MEXC | Seller/Buyer | 4/4 | S1: highest avg ($0.3683). S3-S4: secondary STRK seller. S4: AXS seller (59 trades) |
+| Bybit | Seller/Fixed | 1/4 | S1: 760 trades. S2: DEAD (Bug). S3-S4: Fixed, healthy, minimal allocation |
+| Bitget | Seller | 2/4 | S1: 496 trades. S4: AXS seller (34 trades, 0.17% combined fee) |
+| KuCoin | Seller | 2/4 | S1: 344 trades. S4: AXS primary seller (633 trades, expensive at 0.17%) |
+| Gate.io | Buyer | 3/4 | S2-S3: AXS seller. S4: AXS buyer (728 trades, 0.09% fee) |
+| Binance | Minimal | 1/4 | S1: 19 trades. S2-S4: $0 allocated |
+| Pionex | Not seen | 0/4 | Disabled in Fee Management. Never traded |
 
 ### Symbol Performance History
 
 | Symbol | Sessions Active | Best $/hr | Avg $/hr | Typical Tier | Best Buyer | Notes |
 |--------|----------------|-----------|----------|-------------|------------|-------|
-| STRKUSDT | 3 | $107.95 | $66.97 | strong-very_strong | Bitfinex | Persistent structural spread. S1: 16h, S2: 18m, S3: 1h37m. $1k capital bottlenecks at ~30min |
-| AXSUSDT | 2 | $107.95* | — | normal | MEXC/Gate.io | Thin margins (0.04% avg net). Demoted both sessions. *$/hr shared with STRK |
-| DOTUSDT | 1 | — | — | normal | Bitfinex | S3: Expanded then demoted after 24m, 0 trades. Score faded. |
+| STRKUSDT | 4 | $107.95 | $37.43 | strong-very_strong | Bitfinex | Persistent structural spread. S1: 16h/$81.91, S2: 18m/$107.95, S3: 1h37m/$11.06, S4: 2h13m/$28.11. $1k capital bottlenecks at ~30min |
+| AXSUSDT | 3 | — | -$2.81 | normal | Gate.io | Thin margins (0.04-0.12% avg net), expensive pairs (0.17% combined). S3: demoted 2×. S4: 728 trades, net negative |
+| DOTUSDT | 1 | — | — | normal | Bitfinex | S3: Expanded then demoted after 24m, 0 trades. Score faded |
 
 ---
 
@@ -691,3 +692,264 @@ Session #3 revealed that `consolidate_to_bitfinex()` counteracts the crypto reba
 3. **Skip consolidation of recently-received USDT on sellers**: Seller just got USDT from a trade 5s ago — don't consolidate it for at least `idle_threshold`.
 
 **Revisit after**: Next session with the fix deployed. Measure: $/hr over time (should be flatter), consolidation count (should decrease), total transfer fees (should decrease).
+
+**Session #4 update**: Fix deployed but **not fully effective**. Active sellers still consolidated — root cause deeper than the `active_seller_exchanges` parameter. See "Consolidation Protection Still Failing" decision below.
+
+---
+
+### Session #4 — 2026-03-04 (Two-Regime Session: STRK Goldmine → AXS Decline)
+
+**Date**: 2026-03-04, 03:56:46 - 09:22:32 UTC (5h 26m)
+**Capital**: $1,000
+**Version**: v0.21.1-alpha (frequency gate fix, consolidation seller protection, settings logging fix)
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | 5h 26m |
+| Total Trades | 1,198 |
+| Trading PnL | $77.27 |
+| Transfer Fees | $22.61 (external: $7.31, internal: $15.30) |
+| Cashback | $4.34 (credited: $0.99, pending: $3.34) |
+| **Net Profit** | **$55.66** |
+| **$/hr** | **$10.40** |
+| Portfolio Growth | $1,000 → $1,099 (+9.9%) |
+| Phantom Spreads Filtered | 1,353 |
+| One-Legged Failures (sim) | 28 ($0.24 cost) |
+| Position Cap Skips | 1,992 |
+| Anomaly Events | 0 pauses, 0 warnings, 1 symbol block |
+| EVD Seller Penalties | 22,964 (0 demotions) |
+| Hourly Cap Blocks | 1,107 |
+
+#### Two-Regime Performance
+
+The session divides cleanly into two regimes with dramatically different profitability:
+
+| Phase | Duration | Trades | PnL | Transfer Fees | Net | $/hr |
+|-------|----------|--------|-----|---------------|-----|------|
+| STRK regime (0–2h15m) | 2h 15m | 471 | $65.69 | $2.65 | $63.31 | $28.11 |
+| Dead zone (2h15m–2h38m) | 23 min | 0 | $0 | $0.08 | -$0.08 | — |
+| AXS regime (2h38m–5h21m) | 2h 43m | 728 | $11.63 | $19.96 | **-$7.65** | **-$2.81** |
+
+**The last 3 hours actually lost $7.65 net** — AXS generated $11.63 PnL but incurred $19.96 in new transfer fees.
+
+#### Active Symbols
+
+**Discovery** (61s): FET (0.170, rejected: fading), STRK (0.156, strong), AXS (0.011, normal). **Frequency gate fix validated** — STRK activated this time (was rejected in previous session's v0.20.0 run due to 15s window missing Bitfinex updates).
+
+| Symbol | Activated | Demoted | Duration | Trades | Gross Profit | Avg Net% | Avg Trade Size |
+|--------|-----------|---------|----------|--------|-------------|----------|----------------|
+| STRKUSDT | 03:57:46 | 06:48:35 | 2h 51m (active 2h 13m) | 471 | $65.69 | 0.765% | $17.42 |
+| AXSUSDT | 03:57:46 | 04:07:49 | 10 min (1st activation) | 0 | $0 | — | — |
+| AXSUSDT | 06:34:32 | — | 2h 48m (2nd, via expansion) | 728 | $11.63 | 0.119% | $13.24 |
+
+**STRK**: Bitfinex→OKX/MEXC. Score peaked at 0.39 (very_strong). Killed by 50-minute Bitfinex proxy outage at 06:12 — zero viable trades during outage → score decay → demotion at 06:48.
+
+**AXS (1st)**: Allocated only $58 (score-weighted). Never traded — SIZE_ZERO because base=$2.50 < min=$5.00. Demoted after 10 minutes.
+
+**AXS (2nd)**: Expanded at 06:34 with score=0.091, est_hourly=$32.92, setup_cost=$0.10, bfx=no. Buyers=[Gate.io], Sellers=[KuCoin, Bitget]. Combined fees 0.17% vs 0.12% avg net — per-trade margins were paper-thin to negative after rebalancing costs.
+
+#### Exchange Pair Breakdown
+
+**STRK (471 trades)**:
+
+| Pair (Buy→Sell) | Trades | % | Combined Fee | Notes |
+|------------------|--------|---|-------------|-------|
+| Bitfinex→OKX | 222 | 47% | 0.10% | Primary |
+| Bitfinex→MEXC | 203 | 43% | 0.025% | Most efficient |
+| MEXC→OKX | 31 | 7% | 0.125% | When MEXC had USDT buildup |
+| Bitfinex→Bybit | 7 | 1.5% | 0.075% | Early only |
+| Others | 8 | 1.5% | 0.08-0.18% | Minor |
+
+93% of STRK trades used Bitfinex as buyer (0% fee).
+
+**AXS (728 trades)**:
+
+| Pair (Buy→Sell) | Trades | % | Combined Fee | Notes |
+|------------------|--------|---|-------------|-------|
+| Gate.io→KuCoin | 633 | 87% | 0.17% | Dominant but expensive |
+| Gate.io→MEXC | 59 | 8% | 0.115% | Better margins |
+| Gate.io→Bitget | 34 | 5% | 0.17% | Same fee as KuCoin |
+| Bybit→KuCoin | 2 | 0.3% | 0.155% | Rare |
+
+AXS's dominant pair (Gate.io→KuCoin at 0.17% combined) consumed most of the 0.12% average net%.
+
+#### STRK Score Trajectory
+
+| Time | Score | Tier | Mult | Notes |
+|------|-------|------|------|-------|
+| 03:57 | 0.156 | strong | 2.0 | At activation |
+| 04:00 | 0.300 | strong | 2.0 | Ramping up |
+| 04:15 | 0.39 | very_strong | 4.0 | Peak tier |
+| 05:00 | 0.28 | strong | 2.5 | Cycling |
+| 05:30 | 0.22 | strong | 2.0 | Declining |
+| 06:00 | 0.17 | strong | 2.0 | Weakening |
+| 06:12 | — | — | — | Bitfinex proxy outage starts |
+| 06:48 | <0.01 | — | — | Demoted (35 min into outage) |
+
+#### $/hr Progression
+
+| Time | Duration | Trades | Net | $/hr | Phase |
+|------|----------|--------|-----|------|-------|
+| 04:02 | 0h05m | 20 | $4.55 | $53.52 | STRK launch burst |
+| 04:12 | 0h15m | 47 | $9.22 | $35.29 | STRK hot |
+| 04:29 | 0h32m | 105 | $18.38 | $34.01 | STRK strong |
+| 04:57 | 1h00m | 215 | $30.50 | $30.06 | STRK solo |
+| 06:06 | 2h09m | 458 | $62.04 | **$28.76** | STRK peak |
+| 06:12 | 2h15m | 471 | $63.31 | $28.11 | STRK stops (outage) |
+| 06:35 | 2h38m | 481 | $63.40 | $24.07 | AXS starts |
+| 06:57 | 3h01m | 612 | $61.23 | $20.30 | AXS fees > profits |
+| 07:38 | 3h41m | 956 | $60.70 | $16.44 | AXS declining |
+| 08:01 | 4h04m | 1000 | $58.67 | $14.38 | Net profit falling |
+| 08:59 | 5h03m | 1193 | $55.61 | $11.00 | Near stagnation |
+| 09:22 | 5h21m | 1198 | $55.66 | **$10.40** | Session end |
+
+Net profit peaked at $63.31 (2h15m) then **declined by $7.65** over the remaining 3 hours.
+
+#### Bitfinex Proxy Outage (06:12 – 07:02, 50 min)
+
+Timeline:
+- 06:11:54 — Sub-connection staleness detected, reconnection attempts begin
+- 06:12:14 — First timeout error (`timed out during opening handshake`)
+- 06:12–07:01 — 179 consecutive timeout errors across ticker + book sub-connections
+- 06:55:27 — Book sub-connection partially recovered (30 symbols)
+- 07:02:15 — Full recovery (all sub-connections reconnected)
+
+Impact: STRK's sole buyer was Bitfinex. Zero STRK trades during the outage → score decayed → demotion at 06:48 (36 minutes into outage). The proxy uptime tracker did NOT detect this outage (Bug #3 — see below).
+
+#### Transfer Activity
+
+| Type | Count | Total Cost | Notes |
+|------|-------|-----------|-------|
+| External crypto (Bitfinex→sellers) | ~200 | $0 | STRK phase: zero-cost crypto rebalance |
+| External USDT | ~190 | $7.31 | Mix of free (Bitfinex) and paid |
+| Internal sell/buy | ~633 | $15.30 | AXS phase: taker fees on every cycle |
+| Hub consolidation | ~80 | ~$1.80 wasted | Active exchanges consolidated (Bug #1) |
+| Hourly cap blocks | 1,107 | — | Forced internal ops as fallback |
+
+Internal taker fees ($15.30) are **2× external fees** ($7.31). AXS's 633 internal sell/buy cycles at $0.02-0.03 each drove this.
+
+#### Balance Snapshots
+
+**STRK Phase**:
+
+| Time | Bitfinex | OKX | MEXC | Others | Total |
+|------|----------|-----|------|--------|-------|
+| 04:03 | $381 | $353 | $164 | $107 | $1,005 |
+| 04:47 | $660 | $127 | $232 | $7 | $1,026 |
+| 05:44 | $234 | $679 | $123 | $13 | $1,050 |
+| 06:13 | $923 | $96 | $30 | $13 | $1,063 |
+| 06:30 | $1,049 | $1 | $0 | $13 | $1,063 |
+
+Capital cycling between Bitfinex and seller exchanges. After outage, everything consolidated to Bitfinex.
+
+**AXS Phase**:
+
+| Time | Bitfinex | Gate.io | KuCoin | Bitget | MEXC | Total |
+|------|----------|---------|--------|--------|------|-------|
+| 06:48 | $349 | $589 | $39 | $32 | $26 | $1,066 |
+| 07:28 | $174 | $808 | $48 | $4 | $2 | $1,068 |
+| 08:49 | $178 | $825 | $35 | $4 | $12 | $1,085 |
+| 09:19 | $173 | $859 | $0 | $3 | $32 | $1,099 |
+
+Gate.io (AXS buyer) accumulated 78% of capital. Seller exchanges ($0-50 each) constantly depleted.
+
+#### Anomaly Protection
+
+- **0 pauses, 0 warnings** — trading P&L stayed positive
+- **1 symbol block**: AXSUSDT blocked for 300s (07:37–07:42) after 4 consecutive losses during thin-spread period. Correctly prevented further lossy trades.
+
+#### Exchange Status
+
+All 8 enabled exchanges healthy. No errors except Bitfinex proxy outage (06:12–07:02). Bybit fully operational (503+ msgs/s). MEXC depth reconnections normal (~every 15s, REST-polled). 6 "Task exception was never retrieved" from asyncio (non-functional).
+
+#### Simulation Realism
+
+| Feature | Count | Impact |
+|---------|-------|--------|
+| Phantom spreads | 1,353 (53% of opportunities) | Prevented ~$1.5-2 false profit |
+| One-leg failures | 28 (2.3% rate) | $0.24 total cost |
+| Position cap skips | 1,992 | Prevented over-accumulation |
+
+#### Bugs Found
+
+**Bug #1: Active seller exchanges still consolidated despite protection fix** — Gate.io (AXS buyer) consolidated at 07:56 and 09:21 ($0.50/each), KuCoin (AXS seller) consolidated 2× ($0.40/each), while AXS was active. ~$1.80 wasted. **Root cause**: The `idle_threshold` (600s) triggers on intermittent trading patterns. Additionally, investigation shows cases where active sellers were consolidated with `keep=0` only 62 seconds after a trade — suggesting `_reevaluate_dominant_pairs()` may silently change the sellers list right before consolidation runs. See Decision Log. **Fixed in v0.22.0-alpha**: (a) `_reallocate_symbol()` returns bool, `_dominant_pairs` only updated on success; (b) idle_threshold increased to 1800s (30 min); (c) `last_trade_time` updated on all rebalance operations (internal sell, external USDT/crypto, internal buy).
+
+**Bug #2: [Settings] SESSION_START missing** — Settings logging ran before the WebSocket server/log handler was ready for disk export. Entries were emitted but not captured in rotated log files. **Fixed in v0.22.0-alpha**: Settings logged 10s after server start via `call_later()`. Version (`[Config] version=vX.Y.Z`) logged immediately before settings.
+
+**Bug #3: Proxy uptime tracker missed 50-min Bitfinex outage** — `BitfinexFetcher` sub-fetchers set `_ws_connected = True` on connect but NEVER set it `False` on disconnect (no `finally` block). The parent `_ws_connected` stays `True` during outages. Dashboard showed 8/8 connected throughout. See Decision Log. **Fixed in v0.22.0-alpha**: Added `finally` blocks to both `_BitfinexSubFetcher` and `_BitfinexBookSubFetcher` `_connect_and_listen()` methods.
+
+**Issue #1: AXS expansion was net negative** — Expansion cost gate ($0.10 setup vs $32.92/hr estimated) doesn't model ongoing rebalancing costs or validate pair fee viability. AXS's Gate.io→KuCoin pair (0.17% combined fees) exceeded the 0.12% average net%, making every trade marginally unprofitable before transfer costs. The $32.92/hr estimate was inflated by using scoring fees (with cashback reduction) instead of taker fees, and by only averaging profitable ticks. See Decision Log. **Fixed in v0.22.0-alpha**: Added pair fee viability gate — blocks expansion when `combined_taker_fee > avg_profitable_net × 0.8`.
+
+#### Key Takeaways
+
+1. **STRK at $28+/hr validates the Bitfinex-buyer pattern** — now confirmed across 4 sessions
+2. **Bitfinex proxy = single point of failure for STRK** — 50-min outage → demotion → lost $7.65 net
+3. **AXS was a net-negative expansion** — expansion cost gate needs ongoing cost modeling
+4. **Internal taker fees are the #1 cost** ($15.30 vs $7.31 external) — driven by AXS's expensive pairs
+5. **Anomaly protection worked** — 1 correct symbol block, no false positives
+
+---
+
+## Session #4 — Decision Log
+
+### 2026-03-04: Consolidation Protection Still Failing (Bug #1)
+
+**Problem**: Despite adding `active_seller_exchanges` parameter to `consolidate_to_bitfinex()`, active exchanges are still consolidated. Session #4 lost ~$1.80 in unnecessary fees.
+
+**Root cause investigation** revealed two issues:
+
+**Issue A: `_reevaluate_dominant_pairs()` silently changes sellers before consolidation**
+
+In the eval cycle, `_reevaluate_dominant_pairs()` runs BEFORE consolidation. When it detects a pair change, it updates `_dominant_pairs[sym]` — even if `_reallocate_symbol()` returns early (cost gate, price=0). This means the `active_sellers` set built from `_dominant_pairs` right after reevaluation may contain different exchanges than what was allocated. The old sellers (which have actual capital and USDT from trades) are no longer in the set and get consolidated with `keep=0`.
+
+Evidence: OKX consolidated for $623.29 just 62 seconds after a trade — `keep=0` applied (math proves it), meaning OKX was NOT in `active_sellers` despite being STRK's seller.
+
+**Issue B: `idle_threshold` (600s) is too aggressive for intermittent trading**
+
+Even when an exchange IS in `active_sellers`, the 10-minute idle check causes it to be treated as fully idle. Arbitrage trading is bursty — a seller can go 10+ minutes without a trade, then have a burst. Gate.io (AXS buyer) had a 13-minute gap and was consolidated despite being the sole buyer.
+
+**Fix plan** (all implemented in v0.22.0-alpha):
+1. **Gate `_dominant_pairs` update on successful reallocation**: `_reallocate_symbol()` now returns `bool`. `_dominant_pairs` only updated when capital was actually moved — prevents consolidation from reading stale/unmigrated pairs.
+2. **Increase idle_threshold to 1800s (30 min)**: 10 minutes is too short for intermittent arbitrage. 30 minutes better matches the actual trading pattern.
+3. **Update `last_trade_time` on rebalance operations**: Internal sells, external USDT transfers, external crypto transfers, and internal buys all update `last_trade_time` for both source and destination exchanges.
+
+### 2026-03-04: Bitfinex `_ws_connected` Never Set False (Bug #3)
+
+**Problem**: Proxy uptime tracker didn't detect the 50-minute Bitfinex outage (06:12–07:02). Dashboard showed 8/8 connected throughout.
+
+**Root cause**: `BitfinexFetcher` overrides the base class `run()` and uses 4 sub-fetchers (`_BitfinexSubFetcher`, `_BitfinexBookSubFetcher`). Each sub-fetcher's `_connect_and_listen()` sets `_parent._ws_connected = True` on connect but **never sets it `False`** on disconnect — there is no `finally` block. The base class `_connect_and_listen()` has the `finally: _ws_connected = False`, but it's never called for Bitfinex.
+
+Additionally, 4 sub-fetchers sharing a single boolean creates a race condition: even if one sets `False`, another reconnecting immediately sets `True`.
+
+**Fix** (implemented in v0.22.0-alpha): Added `finally: self._parent._ws_connected = False` blocks to both `_BitfinexSubFetcher._connect_and_listen()` and `_BitfinexBookSubFetcher._connect_and_listen()`. When all sub-connections are down (full outage), `_ws_connected` will be `False` and the proxy tracker will detect it. The race condition with 4 sub-fetchers remains (any one reconnecting sets `True`), but this is acceptable — a single sub-connection recovering means partial data flow has resumed.
+
+### 2026-03-04: Expansion Cost Gate Doesn't Model Ongoing Costs (Issue #1)
+
+**Problem**: AXS expanded with `est_hourly=$32.92 setup_cost=$0.10` but lost $7.65 net over 2.5 hours. The cost gate only checks one-time setup costs, not ongoing operational viability.
+
+**Root causes** (3 compounding issues):
+
+1. **No ongoing cost model**: `_estimate_expansion_cost()` calculates one-time transfer/taker fees to deploy capital. It doesn't model: internal buy taker fees every few minutes, external USDT transfers for replenishment, or the rate of capital depletion that drives these costs.
+
+2. **`est_hourly_profit` inflated**: Uses `get_scoring_fee()` (includes cashback reduction: Gate.io 0.081%, KuCoin 0.072%) instead of actual `get_taker_fee()` (Gate.io 0.090%, KuCoin 0.080%). Only averages profitable ticks, ignoring unprofitable ones. AXS's $32.92/hr estimate vs actual $4.17/hr gross (~$-2.81/hr net).
+
+3. **No pair fee viability check**: There's no validation that the dominant pair's combined fee rate (0.17%) is less than the symbol's avg net% (0.12%). When combined fees > avg net%, every trade is unprofitable before transfer costs.
+
+**Fix** (implemented in v0.22.0-alpha): Added **pair fee viability gate** before expansion:
+1. Computes combined taker fee for the candidate's dominant pair: `buy_fee + sell_fee`
+2. Compares against `avg_profitable_net`
+3. Blocks expansion if `combined_taker_fee > avg_profitable_net * 0.8` (allows 20% margin for fee estimation error)
+4. Logged as `EXPAND_BLOCKED ... pair_fee_exceeds_net`
+
+This is simpler and more effective than modeling ongoing costs, because the fundamental issue is per-trade unprofitability, not insufficient capital.
+
+### 2026-03-04: STRK Single Point of Failure — Bitfinex Dependency
+
+**Problem**: STRK's entire trading capability depends on Bitfinex (sole buyer). When the Zurich proxy went down for 50 minutes, STRK had zero viable trades → score decay → demotion after 36 minutes.
+
+**Observation, not a fix**: This is inherent to STRK's market structure. Bitfinex has the lowest ask price due to its low volume/event-driven nature, creating the structural spread. No other exchange can replace Bitfinex as buyer — MEXC→OKX trades exist but at much lower net% (0.14% vs 0.76%).
+
+**Mitigation**: Improve proxy uptime (Bug #3 fix) + faster proxy reconnection. Consider: increase demotion timer for Bitfinex-dependent symbols during detected proxy outages (don't demote a profitable symbol because the proxy is temporarily down).

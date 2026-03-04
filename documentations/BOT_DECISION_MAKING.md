@@ -380,20 +380,22 @@ Using `scoring_fee` instead of `taker_fee` for the threshold means the bot activ
 # 1. Symbol multiplier from optimizer (tier-based)
 symbol_mult = sym_score.trade_multiplier  # 0.0 to 4.0
 
-# 2. Available balance caps (keep 20% buffer)
-max_by_usdt = usdt_available × 0.80
-max_by_crypto = crypto_value × 0.80
+# 2. Net%-based multiplier (scales trade size by current tick's profitability)
+#    Enabled via net_pct_sizing_enabled (default true)
+#    < 0.03% → 0.5×, 0.03-0.08% → 1.0×, 0.08-0.15% → 1.5×,
+#    0.15-0.25% → 2.0×, > 0.25% → 2.5×
+#    Capped by net_pct_multiplier_cap (default 2.5)
+net_pct_mult = lookup_net_pct_multiplier(net_pct)
 
-# 3. Tick quality factor (based on scoring_net passed as net_pct)
-if net_pct >= 0.10%:  tick_factor = 1.00
-elif net_pct >= 0.05%: tick_factor = 0.90
-else:                  tick_factor = 0.85
+# 3. Available balance caps (dynamic buffer: 95% if small position, 80% otherwise)
+max_by_usdt = usdt_available × buffer_pct
+max_by_crypto = crypto_value × buffer_pct
 
 # 4. Capital-proportional floor
 min_trade = max($5, total_capital × 0.003)
 
 # 5. Compute and cap
-base = trade_amount × symbol_mult × tick_factor
+base = trade_amount × symbol_mult × net_pct_mult
 trade_size = min(max_by_usdt, max_by_crypto, base)
 
 # 6. Below minimum → skip (returns 0)
@@ -508,7 +510,9 @@ Instead of spreading capital across all 9 exchanges, the bot concentrates on the
 Runs every evaluation cycle for active symbols:
 - Compares old vs new buyer/seller sets
 - If dominant exchanges shifted → `_reallocate_symbol()` moves capital
-- Gated by cooldown (2× evaluation_interval) and rotation budget
+- `_reallocate_symbol()` returns `bool` — `True` if capital was moved, `False` if skipped (price=0, no change, or cost gate)
+- `_dominant_pairs` is only updated when `_reallocate_symbol()` returns `True` — prevents consolidation from reading stale/unmigrated pairs
+- Gated by cooldown (3× evaluation_interval) and rotation budget
 
 ### 10.3 Why Scoring Fee Cascades Here
 
@@ -635,8 +639,10 @@ Active symbols that underperform are removed.
 
 **What happens**:
 - Symbol removed from active set
-- Crypto kept in place (no sell) to avoid taker fees
-- Demotion cooldown prevents immediate re-activation (anti-churning)
+- All held crypto is **sold immediately** on demotion (internal sell → USDT) to eliminate market exposure risk
+- Demotion sell via Bitfinex: crypto transferred to Bitfinex and sold at 0% taker (saves source exchange taker fee). Falls back to local sell for symbols not available on Bitfinex
+- Post-demotion: freed USDT redistributed from Bitfinex to starved buyer exchanges of remaining active symbols
+- Demotion cooldown prevents immediate re-activation (anti-churning). Cooldown = `demotion_period × demotion_cooldown_multiplier` (default 5.0)
 - If ALL symbols demoted → re-enter discovery mode
 
 **No minimum active count protection** — better to be idle than bleed money on transfers for dead symbols.
@@ -667,9 +673,11 @@ Add a new symbol when there's room in the active set.
 1. Active symbol count < `max_active_symbols`
 2. Score ≥ `TRADING_SCORE_THRESHOLD` (0.01)
 3. ≥ 30 total ticks (minimum data)
-4. `est_hourly_profit > expansion_cost × safety_multiplier`
-5. Net profit must be positive
-6. Does NOT require watchlist confirmation
+4. Score stability checks pass (min observation time, no cliff drop, no declining trend)
+5. **Cost gate**: `est_hourly_profit × reallocation_cost_horizon > setup_cost`
+6. **Pair fee viability gate**: dominant pair's combined taker fees (`buy_fee + sell_fee`) must be < `avg_profitable_net × 0.8`. Blocks expansion when pair fees would consume most of the spread (e.g., 0.17% combined fees on 0.12% avg net → blocked as `pair_fee_exceeds_net`)
+7. Net profit must be positive
+8. Does NOT require watchlist confirmation (but creates watchlist entry for stability tracking)
 
 **What happens**:
 1. Dominant pairs computed for new symbol

@@ -14,7 +14,7 @@ Comprehensive reference for all 9 supported exchanges — fees, discounts, serve
 | 6 | **Bitget** | 0.08% | Singapore | AWS ap-southeast-1 | ~68ms |
 | 7 | **KuCoin** | 0.08% | Singapore | AWS | ~68ms |
 | 8 | **OKX** | 0.10% | Hong Kong | Alibaba Cloud / AWS HK | ~35ms |
-| 9 | **Gate.io** | 0.10% | Singapore | AWS ap-southeast-1 | ~68ms |
+| 9 | **Gate.io** | 0.09% | Singapore | AWS ap-southeast-1 | ~68ms |
 
 ---
 
@@ -435,7 +435,7 @@ All Bybit fees are **dynamic** — these are conservative estimates.
 ### Key Notes
 
 - 60/60 configured symbols available.
-- Currently **geo-blocked** from user's location (Turkey). Will use with VPS deployment.
+- Fully accessible from Bangkok VPS (Thailand not geo-blocked).
 - 0.05% taker fee with no token requirement — excellent for arbitrage.
 - No demo/testnet API — simulation only.
 - 30 subscription limit per WS connection.
@@ -607,9 +607,9 @@ All Bybit fees are **dynamic** — these are conservative estimates.
 | **Headquarters** | Cayman Islands |
 | **Founded** | 2013 |
 | **Base taker fee** | 0.10% |
-| **Token discount** | GT ~10% off (minimal, not worth prioritizing) |
-| **Effective taker fee** | 0.10% |
-| **Fee model** | received |
+| **Token discount** | GT 10% off → **0.09%** |
+| **Effective taker fee** | 0.09% |
+| **Fee model** | token |
 | **Fee mechanism** | instant |
 | **Demo/Testnet API** | No |
 
@@ -783,7 +783,7 @@ If Pionex has migrated to Singapore (possible but unconfirmed):
 | **Bitget** | 0.10% | BGB 20% | **0.08%** |
 | **KuCoin** | 0.10% | KCS 20% | **0.08%** |
 | **OKX** | 0.10% | OKB (impractical) | **0.10%** |
-| **Gate.io** | 0.10% | GT ~10% (minimal) | **0.10%** |
+| **Gate.io** | 0.10% | GT 10% | **0.09%** |
 
 ### Best Exchange Pairs for Arbitrage (by total fee cost)
 
