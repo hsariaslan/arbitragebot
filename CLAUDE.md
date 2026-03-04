@@ -623,7 +623,7 @@ All events use `[Anomaly]` component prefix. Every trigger includes multi-line s
 | `monitor.py` | Integration: pause checks, emergency sell, per-symbol blocking, trade recording |
 | `dashboard_server.py` | Hot-apply, portfolio update, message handlers, `_hard_stop_all()`, `_distribute_from_bitfinex()`, `_log_all_settings()` |
 | `balance.py` | `force_sell_crypto_via_bitfinex()` — bypasses cooldowns/budget for Hard Stop |
-| `dashboard/src/components/Header.tsx` | Anomaly status indicators with rich hover tooltips |
+| `dashboard/src/components/Header.tsx` | Anomaly status indicators with rich hover tooltips (desktop) + tappable badge popups (mobile) |
 | `dashboard/src/components/SettingsPage.tsx` | Anomaly protection settings UI, Danger Zone (Hard Stop, Distribute, Stop/Start, Restart) |
 
 ## Dashboard
@@ -641,7 +641,7 @@ All pages have their own URL routes (`/#/`, `/#/rankings`, `/#/settings`, `/#/lo
   - **Fee Management**: Per-exchange fee configuration — **enable/disable checkbox** per exchange (disabled = excluded from trading/rebalancing, hot-applied), base taker rate, token discount toggle+%, fee model (received/spent/token), mechanism (instant/rebate/tier), referral cashback toggle+%+settlement delay, zero-fee pairs. Shows computed effective rates with formula breakdown. Cashback stats (pending/credited). Real mode banner. Save button with 5s cooldown. Hot-applied without restart.
   - **Transfer Fees**: Per-exchange withdrawal fee configuration — per-network fees (flat/percentage/conditional), preferred network selector (auto=cheapest), enable/disable individual networks. Shows effective fee and cheapest network per exchange. Save button with 5s cooldown. Hot-applied without restart.
 - **Logs** — Unified log viewer with two sub-tabs:
-  - **Bot Logs**: Real-time terminal-style log viewer (font-mono, auto-scroll). Filters: level (INFO/WARNING/ERROR), component (Monitor/Optimizer/Balance/exchanges/Dashboard/Auth/Email/Settings/Fee), text search. Export to `.log` file.
+  - **Bot Logs**: Real-time terminal-style log viewer (font-mono, auto-scroll). Filters: level (INFO/WARNING/ERROR), component (27 base components + dynamic discovery from log entries), text search. When filter is active, fetches ALL session logs from server (not just the 2000-entry broadcast buffer). Export to `.log` file.
   - **Auth Logs**: Authentication event log (login success/failure, blocked IPs, reconnections, IP denials). Filterable by event type with search by IP/username/browser/OS. Export to `.csv` file.
   - **Export**: Presets (1 Hour, 6 Hours, Today, 1 Day, Current Session, All, Custom UTC datetime picker). "Apply current filters" checkbox auto-checks when UI filters are active. Reads from disk log files for cross-day ranges.
 
@@ -667,7 +667,7 @@ Full authentication system for the WebSocket dashboard:
 
 - **Format**: UTC timestamps via `time.gmtime` converter: `YYYY-MM-DD HH:MM:SS [LEVEL] [Component] message`
 - **Daily rotation**: `TimedRotatingFileHandler` rotates at 00:00 UTC, keeps 30 days. Files: `logs/coirnabot.log` (current), `logs/coirnabot.log.YYYY-MM-DD` (rotated).
-- **DashboardLogHandler**: Custom `logging.Handler` in `dashboard_server.py`. Captures entries in-memory (`deque` for live broadcast, `list` for session export). Parses `[Component]` prefix from log messages.
+- **DashboardLogHandler**: Custom `logging.Handler` in `dashboard_server.py`. Captures entries in-memory (`deque(maxlen=2000)` for live broadcast, `list` for full session export). Parses `[Component]` prefix from log messages using `[\w.]+` regex (supports `Gate.io`). Exposes `get_all()` for filtered views and `total_count()` for UI display. Dashboard fetches full session logs via `request_all_bot_logs` WebSocket message when filters are active.
 - **Latency logging**: `[Latency]` component prefix. Every 60s logs per-exchange: processing time (avg/min/max ms), message rate (msgs/s), data freshness (avg/max age ms) with active/dormant symbol separation (>2min = dormant). Also logs first-data-after-connect timing. Filterable in Bot Logs tab.
 - **Diagnostic logging** (added v0.13.5): Six production-level log lines for self-sufficient diagnostics:
   - `[Config]` — Version (`__version__` from `config.py`) and all key config values at startup (trade_amount, capital, adaptive, min_net, max_symbols, execution_mode). Logged 10s after server start to ensure log handler is ready for disk export.
@@ -675,7 +675,8 @@ Full authentication system for the WebSocket dashboard:
   - `[Monitor] SIZE_ZERO` — Why trade_size=0: which constraint hit (usdt_avail/crypto_val/base < min_trade). Throttled: first per symbol, then every 30th.
   - `[Rebalance] BLOCKED` — Why rebalancing was blocked: which gate rejected (score_gate/net_pnl_gate/roi_gate) with values. Throttled per miss_key.
   - `[Balance] Snapshot` — Every 5 min: per-exchange total value (USDT + crypto USD), portfolio total, fee breakdown (total vs external-only)
-  - `[Session]` — Every 5 min: aggregate trades, pnl, transfer fees, cashback (credited/pending), net, $/hr, SIZE_ZERO count (sz0=), rebalance blocked count (rebal_blocked=)
+  - `[Session]` — Every 5 min: aggregate trades, pnl, transfer fees, cashback (credited/pending), net, $/hr, SIZE_ZERO count (sz0=), rebalance blocked count (rebal_blocked=). In demo/demo_only modes: includes demo accuracy stats (fill/reject/partial/one-leg counts, profit drift, avg slippage, fee mismatches, avg latency)
+  - `[DemoTrade]` — Per-trade demo comparison: symbol, exchanges, status, sim/demo profit+diff, sim/demo slippage, buy/sell prices (sim→actual), fill ratios, fees with currency, latency, data age. D-04b fee rate validation per trade.
   - `[Candidate]` — Candidate lifecycle logged every tick during discovery (with `phase=discovery`, score/peak/drop%/tier/trend) and every eval cycle post-discovery. States: NEW (entered watchlist), WATCH (tracked with score/trend/block reason), CONFIRMED (passed all gates), DROPPED (score fell below threshold), REJECTED (unstable at activation — declining, cliff drop, or fading), EXPAND_TRACK (first seen for expansion), EXPAND_WAIT (unstable), EXPAND_BLOCKED (setup cost exceeds benefit), EXPAND_READY (activating). Filterable in Bot Logs tab.
 - **Fatal error traceback**: `run.py` logs full `traceback.format_exc()` on fatal errors (not just the exception message), enabling root-cause analysis from systemd journal logs.
 - **Disk export**: `_read_bot_logs_from_disk()` reads rotated + current log files for cross-day export ranges. `_read_auth_logs_from_disk()` reads JSONL files. Both use `asyncio.to_thread()` for non-blocking I/O.
@@ -742,10 +743,10 @@ Click "Copy MD" on the Rankings page to copy markdown tables to clipboard (for s
 | `dashboard/src/App.tsx` | Main layout, HashRouter routing, WebSocket state, IP-denied priority gate, restart reconnection |
 | `dashboard/src/types.ts` | All TypeScript interfaces (Trade, SymbolRanking, AdaptiveConfig, ConfigSnapshot, AuthLogEntry, BotLogEntry, DemoComparisonState, etc.) |
 | `dashboard/src/hooks/useWebSocket.ts` | WebSocket connection, auth flow, state management, restart_ack handling, wsInitialized gate, export callbacks |
-| `dashboard/src/components/Header.tsx` | Header with nav tabs, uptime display (hover tooltip with downtime log), exchanges count (hover tooltip with Zurich proxy status/outage log), connection status ("Disconnected (Zurich)" when proxy down), stats bar, logout |
+| `dashboard/src/components/Header.tsx` | Header with nav tabs, uptime display (hover tooltip with downtime log), exchanges count (hover tooltip with Zurich proxy status/outage log), connection status ("Disconnected (Zurich)" when proxy down), stats bar, logout (icon on mobile). Mobile: tappable badge row (connection, exchanges, anomaly, uptime) with popup overlays |
 | `dashboard/src/components/LoginPage.tsx` | Login form with reCAPTCHA integration |
 | `dashboard/src/components/LogsPage.tsx` | Unified Logs page container with Bot Logs / Auth Logs sub-tabs |
-| `dashboard/src/components/BotLogsTab.tsx` | Terminal-style real-time bot log viewer with filters and auto-scroll |
+| `dashboard/src/components/BotLogsTab.tsx` | Terminal-style real-time bot log viewer with level/component/search filters, full session log fetch on filter, dynamic component discovery, auto-scroll |
 | `dashboard/src/components/AuthLogPage.tsx` | Auth event log with filtering/search and CSV export |
 | `dashboard/src/components/ExportLogsModal.tsx` | Reusable export modal with time presets, custom UTC picker, filter toggle |
 | `dashboard/src/components/SymbolRankings.tsx` | Main page ranking card with Cur Net% column |
@@ -809,7 +810,7 @@ Comprehensive sim-vs-demo validation system. See `DISCREPANCIES.md` for the full
 - USDT balance mismatch (threshold: $1 or 1%)
 - Crypto position mismatches (qty delta vs sim qty)
 - Fee rate mismatches (D-04: actual exchange fees vs configured)
-- Root cause classification: fee difference, slippage, missing/extra position, stale data
+- Root cause classification: fee difference, slippage, missing/extra position, stale data, missing_position_no_executor (for exchanges without demo API in Demo+Sim mode)
 
 **Exchange trading rules** (`exchange_info.py`) fetched at startup to validate:
 - D-01: Lot size rounding — quantities rounded DOWN to exchange lot_size_step using Decimal
@@ -849,11 +850,19 @@ Comprehensive sim-vs-demo validation system. See `DISCREPANCIES.md` for the full
 
 ## Phase 2: Demo/Testnet Order Execution (Implemented)
 
-When `execution_mode=demo`, the simulation continues as baseline while real market orders are placed on exchange testnets in parallel. Actual fill data (price, qty, fees, latency) is compared with sim expectations to detect discrepancies D-05, D-08 through D-14, D-17, D-19, D-20.
+When `execution_mode=demo` or `demo_only`, the simulation continues as baseline while real market orders are placed on exchange testnets in parallel. Actual fill data (price, qty, fees, latency) is compared with sim expectations to detect discrepancies D-05, D-08 through D-14, D-17, D-19, D-20.
 
 ### Execution Mode
 
-Set in `settings.json`: `"execution_mode": "simulation"` (default) or `"demo"`. Dashboard Settings page has a selector. Requires restart to take effect.
+Set in `settings.json`: `"execution_mode"` with three options. Dashboard Settings page has a selector. Requires restart to take effect.
+
+| Mode | Label in UI | Active Exchanges | Demo Orders | Description |
+|------|-------------|-----------------|-------------|-------------|
+| `simulation` | Simulation | All 9 | No | Pure simulation, no real orders |
+| `demo` | Demo + Simulation | All 9 | Yes (when both exchanges have executors) | Sim runs on all 9, demo orders on Binance/OKX/Bybit pairs only. Trades involving non-demo exchanges (e.g., OKX→KuCoin) run sim-only. |
+| `demo_only` | Demo Only (Binance/OKX/Bybit) | 3 (Binance, OKX, Bybit) | Yes (all trades) | Restricts `active_exchanges` to demo-capable exchanges only. Every trade gets both sim and demo execution — eliminates `missing_position_no_executor` discrepancy noise. Ideal for pre-live validation. |
+
+`demo_only` mode restricts exchanges early in `run.py` before component initialization, so `BalanceTracker`, `ArbitrageMonitor`, and `SymbolOptimizer` only see 3 exchanges. Header shows `3/3` exchanges.
 
 ### Architecture
 
@@ -895,12 +904,27 @@ Monitor._tick() detects opportunity
 
 `_record_demo_comparison()` runs after each demo trade. Compares sim vs actual:
 - **D-05**: Fee currency mismatch (unexpected currency)
-- **D-08**: Slippage > 0.01% (avg across legs)
+- **D-04b**: Per-trade fee rate validation (actual vs configured rate, WARNING if >0.001% diff)
+- **D-08**: Slippage > 0.01% (avg across legs) + slippage model accuracy check (sim vs actual)
 - **D-09**: Partial fill (fill_ratio < 0.99)
 - **D-10**: Order rejected (error reason)
 - **D-11**: One-legged (one success, one fail) → auto-unwind
 - **D-12**: High latency > 500ms
 - **D-13**: Maker fill (unexpected for market orders)
+
+### Per-Trade Demo Logging (`[DemoTrade]`)
+
+Comprehensive per-trade log with `[DemoTrade]` component prefix. Includes: symbol, exchanges, demo status, sim/demo profit (with diff), sim/demo slippage, buy/sell prices (sim→actual), fill ratios, actual fees with currency, latency, data age. Filterable in Bot Logs tab.
+
+### Demo Accuracy Stats
+
+Running counters tracked in `monitor.py` and persisted via state:
+- `_demo_trade_count`, `_demo_fill_count`, `_demo_reject_count`, `_demo_partial_count`, `_demo_one_legged_count`
+- `_demo_total_sim_profit` vs `_demo_total_actual_profit` (profit drift)
+- `_demo_total_sim_slippage` vs `_demo_total_actual_slippage` (slippage model accuracy)
+- `_demo_total_latency_ms`, `_demo_fee_mismatches`
+
+Logged in `[Session]` 5-minute summary: fill/reject/partial/one-leg counts, profit drift, avg slippage comparison, fee mismatches, avg latency.
 
 ### Fee Model (D-05)
 
