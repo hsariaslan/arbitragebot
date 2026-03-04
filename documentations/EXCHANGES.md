@@ -829,6 +829,124 @@ If Pionex has migrated to Singapore (possible but unconfirmed):
 
 ---
 
+## Referral & Affiliate Programs
+
+### Overview
+
+Two types of referral programs exist on crypto exchanges:
+
+- **Referral Program** (standard): Any registered user can generate a code instantly — no application, no followers, no approval needed. Just go to the exchange's referral page and create one. Lower commission (10-20%). Invitee kickback limited. Code must be entered at registration — cannot bind existing accounts.
+- **Affiliate Program** (formal): Partnership requiring application and approval. Higher commission (30-60%). Can often bind existing users. Requires audience/community proof (followers, website, etc.). **Not practical unless you have a social media presence.**
+
+For the sister's new accounts strategy, the **standard referral program** (zero requirements) is all you need. The affiliate program is only relevant for binding existing accounts.
+
+### Per-Exchange Referral Details
+
+#### Bitfinex
+- **Not applicable** — 0% fees already. No referral benefit possible.
+
+#### Binance
+- **Referral** (any user): Create up to 20 codes. Base commission 20% (40% with ≥500 BNB). Invitee kickback: 0-10% (base) or 0-20% (500 BNB holder).
+- **Affiliate** (requires 5k+ followers or 500+ community): Apply at [binance.com/en/events/affiliate](https://www.binance.com/en/events/affiliate). Up to 40% commission.
+- **Existing account binding**: Only via affiliate "Recall Program" — requires invitee account >180 days old AND inactive for 180 days. Pre-KYC accounts can still add a code. **Effectively impossible for active accounts.**
+
+#### OKX
+- **Referral** (any user): Default 30% commission, settled hourly in USDT. Invitee gets 0-20% fee discount (set by referrer when creating code).
+- **Affiliate** (requires 10 active referrals first): 5-month protection period on commission rate.
+- **Existing account binding**: Yes — affiliate portal has "Invite existing OKX users" link. No time limit. Invitee opens link while logged in → clicks "Bind Now". Requires affiliate status.
+
+#### Bybit
+- **Referral** (any user): Commission up to 30%. Lifetime commissions.
+- **Affiliate** (requires audience/community proof): Apply at [affiliates.bybit.com](https://affiliates.bybit.com). Up to 50% lifetime commission. Dedicated account manager.
+- **Existing account binding**: Affiliate/invitation code can be added within **14 days** of registration (no referrer already bound). After 14 days, not accepted.
+
+#### MEXC
+- **Referral** (any user): Up to 40% commission on Spot and Futures.
+- **Affiliate** (requires 2k+ MX tokens + 5 referees, or 20k+ MX): Higher tiers available.
+- **Existing account binding**: Not officially supported. Accounts may already be silently bound (with 0% kickback). Contact support to request unbind/rebind.
+
+#### Bitget
+- **Referral** (any user): Standard referral program available to all users.
+- **Affiliate** (requires 100+ followers): Simple application form.
+- **Existing account binding**: Not officially supported. Contact support, or watch for occasional "Apply a Referral Code" promotions.
+
+#### KuCoin
+- **Referral** (any user): Standard referral available to all users.
+- **Affiliate** (requires 5k+ followers or 500+ community): Apply at [kucoin.com/affiliate](https://www.kucoin.com/affiliate). Up to 60%+ commission.
+- **Existing account binding**: Not supported. New account only.
+
+#### Gate.io
+- **Referral** (any user): Standard referral program. Commission 30-50% depending on tier.
+- **Affiliate** (no strict requirement): Apply via [gate.com/questionnaire/723](https://www.gate.com/questionnaire/723). Up to 60% commission.
+- **Existing account binding**: Not officially documented. Contact support.
+
+#### Pionex
+- **Referral** (any user): Fixed 20% spot / 15% futures commission. Can share portion as invitee rebate.
+- **Affiliate** (invite-only): Email service@pionex.com. Requires 100+ active traders, or 500+ YouTube views, or 10+ referrals.
+- **Existing account binding**: Not documented. Contact support.
+
+### Summary Table
+
+| Exchange | Referral (any user) | Affiliate Requirement | Bind Existing? | Max Commission |
+|----------|:-------------------:|----------------------|:--------------:|:--------------:|
+| Bitfinex | N/A (0% fees) | — | N/A | N/A |
+| Binance | 20% commission | 5k followers | Recall (180d inactive) | 40% |
+| OKX | 30% commission | 10 active referrals | **Yes** (affiliate link) | 30% |
+| Bybit | 30% commission | Audience proof | **14 days** after registration | 50% |
+| MEXC | 40% commission | 2k MX tokens | Support ticket | 40% |
+| Bitget | Standard | 100 followers | Support ticket | ~30% |
+| KuCoin | Standard | 5k followers | No | 60% |
+| Gate.io | 30-50% commission | No strict requirement | Support ticket | 60% |
+| Pionex | 20% spot / 15% futures | Invite-only | Support ticket | 50% |
+
+### Referrer vs Invitee Split (Bot Config)
+
+When maximizing invitee kickback to reduce bot trading costs:
+
+| Exchange | Pool Type | Total Pool | Invitee Kickback | Referrer Commission | Invitee Duration | Referrer Duration |
+|----------|-----------|:---:|:---:|:---:|---|---|
+| Bitfinex | N/A | — | — | — | — | — |
+| Binance | Shared | 20% | 10% (max at base) | 10% | Permanent | Permanent |
+| OKX | Shared | 30% | 20% (max) | 10% | Permanent | Permanent |
+| Bybit | Independent | — | 20% (fixed) | 20% (separate) | **90 days only** | 365 days |
+| MEXC | Independent | — | 10% (fixed) | 40% (separate) | Lifetime | 1,080 days |
+| Bitget | Unknown | — | ~20% (est.) | ~20% (est.) | Unknown | Unknown |
+| KuCoin | Shared | 20% | 20% (max) | 0% | 365 days | 365 days |
+| Gate.io | Shared | 40% | 30% (max) | 10% | 1 year | 1 year |
+| Pionex | Shared | 20% | 20% (max) | 0% | Ongoing | Ongoing |
+
+**Shared pool**: Invitee + referrer percentages add up to the total pool. Giving more to invitee means referrer earns less.
+**Independent**: Invitee kickback and referrer commission are separate — both are the full advertised rate.
+
+**Time limit note**: Bybit invitee kickback expires after 90 days — set `referral_cashback_pct` to 0 in Fee Management after expiry.
+
+### Recommended Strategy
+
+**Chosen approach: Sister's new accounts with referral codes (win-win).**
+
+Why not retro-active codes on existing accounts? Exchanges use referral codes as customer acquisition tools — they incentivize bringing *new* users. Once registered, you're already their customer. Retro-active binding would let existing users shop for kickbacks without the exchange gaining anyone new. Only OKX allows it (aggressive market share strategy). The others either reject it outright or require impossible conditions (Binance: 180 days inactive).
+
+**Plan:**
+1. Generate a **standard referral code** on each of the 8 exchanges (instant, zero requirements).
+2. Sister signs up on each exchange using your code, completes KYC.
+3. Sister generates API keys → bot uses her accounts for real trading.
+4. You deposit the capital on her accounts (she doesn't invest anything).
+5. Set maximum invitee kickback % — reduces her effective taker fees (bot pays less).
+
+**Win-win:**
+- **Sister wins**: Lower trading fees via invitee kickback (fee discount on every trade). No capital risk — you deposit and manage everything.
+- **You win**: Referrer commission on every trade the bot executes (passive income). Plus, the invitee kickback directly reduces bot trading costs since the bot operates on her accounts.
+
+**No ban risk**: Sister is a real person with her own identity and KYC. Using a referral code at registration is exactly how the system is designed. API key delegation for third-party trading is a standard use case (API keys exist for this purpose). No self-referral, no fake accounts, no ToS violation.
+
+**For existing accounts** (lower priority, optional):
+1. **OKX** — Find an affiliate online, use their "invite existing users" link. Immediate binding, no time limit.
+2. **Bybit** — If account <14 days old, add affiliate code in settings. Otherwise, support ticket.
+3. **MEXC** — Contact support to unbind 0% referral and rebind to a better one.
+4. **Others** — Contact support, ask to bind a referral retroactively. Worst case: they say no.
+
+---
+
 ## Dropped Exchanges
 
 | Exchange | Base Fee | Reason for Dropping |

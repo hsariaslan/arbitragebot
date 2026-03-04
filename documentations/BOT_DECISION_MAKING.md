@@ -194,6 +194,20 @@ Trade executes
   → When now >= expected_credit_at: cashback credited to total, included in net_profit
 ```
 
+### 2.8 Referrer Commission (Display-Only)
+
+Separate from invitee kickback. Tracks how much the referrer's personal account earns per trade. Configured via `referrer_commission_pct` per exchange.
+
+```
+Trade executes
+  → record_referrer_commission() computes: commission_usd = trade_amount × taker_fee × referrer_commission_pct
+  → Accumulated in _total_referrer_earnings and _referrer_earnings_per_exchange
+  → Broadcast to dashboard as fee_stats.referrer_earnings_total
+  → NEVER touches: balance, net_profit, scoring_fee, taker_fee, rebalance gates, or any decision
+```
+
+**Why display-only**: The referrer commission goes to the user's personal account (not the trading account). The bot has no API access to that account. It's tracked purely for visibility — "how much is my personal account earning from the bot's trades?"
+
 ---
 
 ## 3. Discovery Phase
@@ -803,6 +817,14 @@ Price Update Received
 │   │   └─ Include rounding/age metadata
 │   │
 │   └─ If demo mode: fire-and-forget _execute_demo_trade()
+│       ├─ Both legs have executors → execute_arbitrage() (paired + D-11 recovery)
+│       └─ One leg has executor → place_market_order() on that leg only
+│
+├─ Demo setup (one-shot, after initialize_crypto):
+│   └─ _run_demo_setup() → execute_setup_orders()
+│       ├─ Mirrors sim's virtual crypto allocations with real demo buy orders
+│       ├─ Sequential per exchange (rate limit safety)
+│       └─ _demo_setup_complete persisted in state
 │
 └─ Credit due cashbacks (PendingCashback → credited)
 ```
@@ -813,7 +835,7 @@ Price Update Received
 
 | File | Decision Responsibility |
 |------|------------------------|
-| `fee_manager.py` | `get_scoring_fee()`, `get_taker_fee()`, `get_fee_model()`, referral cashback tracking |
+| `fee_manager.py` | `get_scoring_fee()`, `get_taker_fee()`, `get_fee_model()`, referral cashback tracking, `record_referrer_commission()` (display-only) |
 | `monitor.py` | Pair selection (dual fee), threshold check, trade sizing, trade execution, rebalance gates (ROI + net P&L) |
 | `optimizer.py` | SymbolTick creation (scoring fee), `_compute_scores()`, focus tiers, dominant pairs, discovery, rotation/demotion/expansion |
 | `balance.py` | `execute_trade()`, `can_execute()`, `try_rebalance()`, transfer worthiness, rebalance priority |

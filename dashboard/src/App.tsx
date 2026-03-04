@@ -35,7 +35,7 @@ function DashboardPage({ state }: { state: DashboardState }) {
         </div>
       )}
 
-      <StatsCards portfolio={state.portfolio} simulation={state.simulation} profitStats={state.profit_stats ?? { net_profit: 0, hourly_net: 0, session_hourly_rate: 0, trading_pnl: 0, transfer_fees: 0, credited_cashback: 0, pending_cashback: 0, is_profitable: false }} demoComparison={state.demo_comparison} uptimeSeconds={state.uptime_seconds} />
+      <StatsCards portfolio={state.portfolio} simulation={state.simulation} profitStats={state.profit_stats ?? { net_profit: 0, hourly_net: 0, session_hourly_rate: 0, trading_pnl: 0, transfer_fees: 0, credited_cashback: 0, pending_cashback: 0, is_profitable: false, referrer_earnings_total: 0 }} demoComparison={state.demo_comparison} uptimeSeconds={state.uptime_seconds} />
 
       {state.optimizer?.rankings?.length > 0 && (
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-3 sm:gap-5">

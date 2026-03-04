@@ -811,6 +811,7 @@ Comprehensive sim-vs-demo validation system. See `DISCREPANCIES.md` for the full
 - Crypto position mismatches (qty delta vs sim qty)
 - Fee rate mismatches (D-04: actual exchange fees vs configured)
 - Root cause classification: fee difference, slippage, missing/extra position, stale data, missing_position_no_executor (for exchanges without demo API in Demo+Sim mode)
+- **Log throttling**: Repeated discrepancies throttled to every 5 min per exchange+symbol+type. Re-logs immediately on >50% value change. Periodic summary every 5 min. `Discrepancy` objects always created for dashboard — only `logger.info()` calls throttled.
 
 **Exchange trading rules** (`exchange_info.py`) fetched at startup to validate:
 - D-01: Lot size rounding — quantities rounded DOWN to exchange lot_size_step using Decimal
@@ -859,7 +860,7 @@ Set in `settings.json`: `"execution_mode"` with three options. Dashboard Setting
 | Mode | Label in UI | Active Exchanges | Demo Orders | Description |
 |------|-------------|-----------------|-------------|-------------|
 | `simulation` | Simulation | All 9 | No | Pure simulation, no real orders |
-| `demo` | Demo + Simulation | All 9 | Yes (when both exchanges have executors) | Sim runs on all 9, demo orders on Binance/OKX/Bybit pairs only. Trades involving non-demo exchanges (e.g., OKX→KuCoin) run sim-only. |
+| `demo` | Demo + Simulation | All 9 | Yes (any leg with executor) | Sim runs on all 9, demo orders on any leg touching Binance/OKX/Bybit. Single-leg execution when only one exchange has executor (e.g., Buy Binance demo + Sell KuCoin sim-only). |
 | `demo_only` | Demo Only (Binance/OKX/Bybit) | 3 (Binance, OKX, Bybit) | Yes (all trades) | Restricts `active_exchanges` to demo-capable exchanges only. Every trade gets both sim and demo execution — eliminates `missing_position_no_executor` discrepancy noise. Ideal for pre-live validation. |
 
 `demo_only` mode restricts exchanges early in `run.py` before component initialization, so `BalanceTracker`, `ArbitrageMonitor`, and `SymbolOptimizer` only see 3 exchanges. Header shows `3/3` exchanges.
@@ -871,18 +872,25 @@ Monitor._tick() detects opportunity
   ├─ balance.execute_trade()          ← sim (always runs)
   ├─ SimulatedTrade created + appended
   └─ asyncio.create_task(_execute_demo_trade())   ← demo (fire-and-forget)
-       └─ DemoExecutor.execute_arbitrage()
-            ├─ asyncio.gather(buy_executor, sell_executor)
-            ├─ One-legged recovery if needed (D-11)
-            ├─ _record_demo_comparison() → updates SimulatedTrade.demo_* fields
-            └─ state_mgr.save() → immediate crash safety
+       ├─ Both legs have executors:
+       │    └─ DemoExecutor.execute_arbitrage()
+       │         ├─ asyncio.gather(buy_executor, sell_executor)
+       │         ├─ One-legged recovery if needed (D-11)
+       │         └─ _record_demo_comparison()
+       └─ Single leg has executor:
+            └─ place_market_order() on available leg only
+                 └─ _record_single_leg_comparison()
 ```
+
+### Demo Position Establishment
+
+On first `initialize_crypto()`, `_run_demo_setup()` fires as `asyncio.create_task()` to place market buy orders on demo/testnet exchanges, mirroring the sim's virtual crypto allocations. Sequential per exchange (rate limit safety). Per-order logging with `[DemoSetup]` prefix includes latency, fee, sim vs demo cost diff, and `setup_delay_ms` from sim init. One-shot: `_demo_setup_complete` persisted in state. Cleared by "Restart Bot".
 
 ### Key Files
 
 | File | Purpose |
 |------|---------|
-| `executor.py` | `TradeResult`, `ArbitrageResult`, `RateLimiter`, `ExecutionEngine` base, `DemoExecutor` coordinator |
+| `executor.py` | `TradeResult`, `ArbitrageResult`, `RateLimiter`, `ExecutionEngine` base, `DemoExecutor` coordinator, `execute_setup_orders()` |
 | `executors/__init__.py` | Package init |
 | `executors/binance_exec.py` | Binance testnet: `https://testnet.binance.vision`, HMAC-SHA256, rate limit 100/60s |
 | `executors/okx_exec.py` | OKX demo: `https://www.okx.com` + `x-simulated-trading: 1`, HMAC+passphrase, rate limit 50/2s |
@@ -974,23 +982,28 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 
 ### Fee Structure Per Exchange
 
-| Exchange | Base Rate | Token Discount | Effective Rate | Referral Cashback | Settlement | Mechanism | Fee Model |
-|----------|-----------|---------------|---------------|-------------------|------------|-----------|-----------|
-| Binance | 0.10% | BNB 25% (enabled) | 0.075% | 20% | 60 min (hourly) | instant | token |
-| OKX | 0.10% | OKB (disabled) | 0.10% | 20% | 90 min | tier | received |
-| Bybit | 0.10% | MNT/BIT (disabled) | 0.10% | 20% | 1440 min (daily) | tier | received |
-| MEXC | 0.05% | MX (disabled) | 0.05% | 20% | 1440 min (daily) | instant | received |
-| Bitget | 0.10% | BGB 20% (enabled) | 0.08% | 20% | 0 min (instant) | instant | token |
-| KuCoin | 0.10% | KCS 20% (enabled) | 0.08% | 20% | 1440 min (daily) | rebate | token |
-| Gate.io | 0.10% | GT 10% (enabled) | 0.09% | 20% | 1440 min (daily) | instant | token |
-| Pionex | 0.05% | None (VIP tiers only) | 0.05% | 20% | 60 min (hourly) | instant | received |
-| Bitfinex | 0.00% | None (permanent 0%) | 0.00% | Disabled | — | instant | received |
+| Exchange | Base Rate | Token Discount | Effective Rate | Invitee Kickback | Referrer Commission | Settlement | Mechanism | Fee Model |
+|----------|-----------|---------------|---------------|:---:|:---:|------------|-----------|-----------|
+| Binance | 0.10% | BNB 25% (enabled) | 0.075% | 10% | 10% | 60 min (hourly) | instant | token |
+| OKX | 0.10% | OKB (disabled) | 0.10% | 20% | 10% | 90 min | tier | received |
+| Bybit | 0.10% | MNT/BIT (disabled) | 0.10% | 20% (90 days) | 20% | 1440 min (daily) | tier | received |
+| MEXC | 0.05% | MX (disabled) | 0.05% | 10% | 40% | 1440 min (daily) | instant | received |
+| Bitget | 0.10% | BGB 20% (enabled) | 0.08% | 20% | 20% | 0 min (instant) | instant | token |
+| KuCoin | 0.10% | KCS 20% (enabled) | 0.08% | 20% | 0% | 1440 min (daily) | rebate | token |
+| Gate.io | 0.10% | GT 10% (enabled) | 0.09% | 30% | 10% | 1440 min (daily) | instant | token |
+| Pionex | 0.05% | None (VIP tiers only) | 0.05% | 20% | 0% | 60 min (hourly) | instant | received |
+| Bitfinex | 0.00% | None (permanent 0%) | 0.00% | Disabled | Disabled | — | instant | received |
+
+**Invitee Kickback** = fee rebate credited to the trading account (sister's account where bot runs). Configured via `referral_cashback_pct`. Affects scoring, net P&L, and rebalance gates.
+**Referrer Commission** = fee earned by the referrer's personal account. Configured via `referrer_commission_pct`. **Display-only** — never touches balance, P&L, $/hr, scoring, or gating. Purple-themed in dashboard.
+On shared-pool exchanges (Binance, OKX, KuCoin, Gate.io, Pionex), invitee + referrer = total pool. On independent exchanges (Bybit, MEXC), they are separate.
 
 ### Features
 
 - **Exchange enable/disable**: Each exchange has an `enabled` checkbox in the Fee Management tab. Disabled exchanges are excluded from `_active_exchanges` (monitor/optimizer) and `_exchanges` (balance) — stops all trading and rebalancing on that exchange immediately. WebSocket fetchers still run for scoring data. Re-enabling adds the exchange back. Hot-applied without restart via `_apply_enabled_exchanges()`. Persisted in `settings.json` — survives restarts. At startup, `run.py` filters `active_exchanges` via `fee_manager.get_enabled_exchanges()` and `DashboardServer.run()` calls `_apply_enabled_exchanges()`. Header shows `X/X` (enabled only, not 9).
 - **Token discounts**: Per-exchange toggle with configurable %. Effective rate = base × (1 - discount%). Gate.io GT gives 10% at VIP 0. Pionex has no discount token (only volume-based VIP tiers).
-- **Referral cashbacks**: Enabled for all exchanges except Bitfinex (0% fees already). Tracked as `PendingCashback` with exchange-specific settlement times: instant (Bitget, 0 min), hourly (Binance/Pionex, 60 min), ~90 min (OKX), or daily (Bybit/MEXC/KuCoin/Gate.io, 1440 min). Credited cashback is added to USDT balance and included in net profit calculations (`net_profit = trading_pnl - transfer_fees + credited_cashback`). Displayed in Trade Profit card (credited + pending).
+- **Referral cashbacks** (invitee kickback): Fee rebate credited to the trading account. Enabled for all exchanges except Bitfinex (0% fees already). Tracked as `PendingCashback` with exchange-specific settlement times: instant (Bitget, 0 min), hourly (Binance/Pionex, 60 min), ~90 min (OKX), or daily (Bybit/MEXC/KuCoin/Gate.io, 1440 min). Credited cashback is added to USDT balance and included in net profit calculations (`net_profit = trading_pnl - transfer_fees + credited_cashback`). Displayed in Trade Profit card (credited + pending).
+- **Referrer commission tracking**: Tracks how much the referrer's personal account earns from each trade. Configured via `referrer_commission_pct` per exchange. **Display-only** — never added to balance, net profit, $/hr, scoring, or any gating decisions. Tracked in `FeeManager._total_referrer_earnings` and `_referrer_earnings_per_exchange`. Displayed in Trade Profit card (purple) and Fee Management tab with per-exchange breakdown. Shows "$10 transfer" reminder when any exchange accumulates ≥$10. Persisted via state. Logged as `[Fee] Referrer commission` per trade and `ref_earn=` in session summary.
 - **Zero-fee pairs**: Override list per exchange (e.g., Gate.io BTC/USDT → 0% fee). Checked before all other rate computation.
 - **Fee mechanisms**: `instant` (discount applied immediately), `rebate` (KCS — credited back), `tier` (volume-based, OKX/Bybit). **Note**: Stored as metadata only — no code branches on mechanism type. All mechanisms are treated as instant rate reductions via `effective_taker_rate`.
 - **Fee models**: `received` (fee from received asset), `spent` (added to cost), `token` (from discount token balance). **Actively used** in `balance.execute_trade()` — controls how balances change per trade. The `token` model means full crypto/USDT received (fee from discount token), which compounds favorably over hundreds of trades.
@@ -1005,8 +1018,8 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 
 | File | Responsibility |
 |------|---------------|
-| `fee_manager.py` | `FeeManager` class, `ExchangeFeeConfig` dataclass (incl. `enabled`), `is_exchange_enabled()`, `get_enabled_exchanges()`, `PendingCashback` tracking, settings serialization, broadcast dict |
-| `config.py` | `DEFAULT_FEE_CONFIGS` — 9 exchanges × 11 fields (base rates, discounts, mechanisms, models, referral, zero-fee, enabled) |
+| `fee_manager.py` | `FeeManager` class, `ExchangeFeeConfig` dataclass (incl. `enabled`, `referrer_commission_pct`), `is_exchange_enabled()`, `get_enabled_exchanges()`, `PendingCashback` tracking, `record_referrer_commission()`, settings serialization, broadcast dict |
+| `config.py` | `DEFAULT_FEE_CONFIGS` — 9 exchanges × 12 fields (base rates, discounts, mechanisms, models, referral cashback, referrer commission, zero-fee, enabled) |
 | `dashboard_server.py` | `save_fee_settings` handler with validation schema, `_apply_enabled_exchanges()` hot-apply, broadcast via `to_broadcast_dict()` |
 | `dashboard/src/components/FeeManagementTab.tsx` | Per-exchange fee config UI with enable/disable checkbox and computed effective rates |
 

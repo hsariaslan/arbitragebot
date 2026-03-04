@@ -953,3 +953,44 @@ This is simpler and more effective than modeling ongoing costs, because the fund
 **Observation, not a fix**: This is inherent to STRK's market structure. Bitfinex has the lowest ask price due to its low volume/event-driven nature, creating the structural spread. No other exchange can replace Bitfinex as buyer — MEXC→OKX trades exist but at much lower net% (0.14% vs 0.76%).
 
 **Mitigation**: Improve proxy uptime (Bug #3 fix) + faster proxy reconnection. Consider: increase demotion timer for Bitfinex-dependent symbols during detected proxy outages (don't demote a profitable symbol because the proxy is temporarily down).
+
+---
+
+### Session #5 — 2026-03-04 (Demo Only Diagnostic)
+
+**Date**: 2026-03-04
+**Capital**: $1,800
+**Version**: v0.23.1-alpha
+**Mode**: Demo Only (Binance/OKX/Bybit)
+**VPS**: LightNode Bangkok
+
+#### Summary
+
+Short diagnostic run to test Demo Only mode with lowered score threshold (0.0001). No trades executed, 2 transfers occurred. Main finding: 276 `missing_position` discrepancies — the sim allocated crypto virtually via `initialize_crypto()` but no demo buy orders were placed on testnet accounts.
+
+#### Bugs Found
+
+**Bug #4: Missing Demo Position Establishment (CRITICAL)**
+
+The sim allocates crypto to seller exchanges during discovery (`balance.initialize_crypto()`), but no actual demo orders are placed on testnet accounts. Result: demo accounts have 0 crypto, sim shows allocated positions → 276 `missing_position` discrepancies (all on Bybit for DOGEUSDT and ONDOUSDT).
+
+**Root Cause**: `initialize_crypto()` creates virtual positions (divides capital by price). The demo system only placed orders during arbitrage trades, not during initial position establishment.
+
+**Fix** (v0.24.0-alpha): Added `_run_demo_setup()` in `monitor.py` — fires once after `initialize_crypto()`, places market buy orders on demo/testnet via `DemoExecutor.execute_setup_orders()` to mirror sim allocations. One-shot, persisted in state.
+
+**Bug #5: Bitfinex `_ws_connected` Race Condition**
+
+Dashboard showed Zurich VPS proxy as "DOWN" despite it running correctly. Root cause: 4 Bitfinex sub-fetchers (2 ticker + 2 book) all wrote to the same `_ws_connected` boolean. When a slower sub-fetcher's `finally` block ran after a faster one connected, it set `_ws_connected = False`.
+
+**Fix** (v0.24.0-alpha): Changed `_ws_connected` to use a `_connected_subs: set[int]` tracking per-sub-fetcher state. `_ws_connected = len(set) > 0`.
+
+**Bug #6: Discrepancy Log Flood**
+
+`[DemoCompare]` logged every discrepancy at INFO on every 15s poll cycle. 276 identical `missing_position` logs in the session.
+
+**Fix** (v0.24.0-alpha): Added throttling — repeated discrepancies logged every 5 min per exchange+symbol+type. Re-logs immediately on >50% value change. Periodic summary every 5 min. `Discrepancy` objects still created for dashboard.
+
+#### Improvements Identified
+
+1. **Single-leg demo execution**: Demo mode required both exchanges to have executors. Changed to fire demo orders on ANY leg with an executor — dramatically more coverage in Demo+Sim mode.
+2. **Demo+Sim recommended over Demo Only**: Provides more arbitrage pairs (9 exchanges) while still validating all trades touching Binance/OKX/Bybit.
