@@ -939,7 +939,7 @@ class DashboardServer:
         "rebalance_roi_horizon": (int, 0, 86400),
         "adaptive_mode": (bool, None, None),
         "execution_mode": (str, None, None),
-        "trading_score_threshold": (float, 0.001, 0.5),
+        "trading_score_threshold": (float, 0.0001, 0.5),
         "strong_score_threshold": (float, 0.01, 1.0),
         "very_strong_score_threshold": (float, 0.05, 2.0),
         "net_pnl_gate_warmup_trades": (int, 1, 200),
