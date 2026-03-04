@@ -8,6 +8,7 @@ tracks cumulative P&L. Prints a comprehensive discovery report on shutdown.
 
 import asyncio
 import logging
+import random
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -93,6 +94,8 @@ class SimulatedTrade:
     demo_latency_ms: float = 0.0
     demo_slippage_pct: float = 0.0
     demo_status: str = ""  # "filled", "partial", "rejected", "one_legged"
+    # Simulation realism: one-legged failure simulation
+    one_leg_simulated: bool = False
 
 
 class ArbitrageMonitor:
@@ -201,6 +204,23 @@ class ArbitrageMonitor:
         self._exchange_spread_sum: dict[str, float] = defaultdict(float)
         self._exchange_spread_max: dict[str, float] = defaultdict(float)
         self._exchange_spread_count: dict[str, int] = defaultdict(int)
+
+        # Simulation realism features
+        self._spread_persistence_ticks: int = 1
+        self._pending_opportunities: dict[str, dict] = {}
+        self._phantom_spread_count: int = 0
+        self._event_driven_seller_penalty: float = 0.05
+        self._event_driven_seller_penalties: int = 0
+        self._event_driven_seller_demoted: int = 0
+        self._event_driven_exchanges: set[str] = {
+            f.exchange_name for f in fetchers if f.IS_EVENT_DRIVEN
+        }
+        self._one_leg_failure_rate: float = 0.02
+        self._one_leg_unwind_slippage_mult: float = 1.5
+        self._one_leg_sim_count: int = 0
+        self._one_leg_sim_cost: float = 0.0
+        self._max_position_multiplier: float = 5.0
+        self._position_cap_skips: int = 0
 
         # Phase 2: Demo execution
         self._executor: "DemoExecutor | None" = None
@@ -816,6 +836,9 @@ class ArbitrageMonitor:
             best_row = None
             best_buy_asks = None
             best_sell_bids = None
+            # Track best without EVD penalty for demotion detection
+            best_raw_net = float("-inf")
+            best_raw_sell_ex: str = ""
 
             for i, (ex_buy, _, ask_i, _, ask_depth_i, _bids_i, asks_i) in enumerate(exchange_prices):
                 for j, (ex_sell, bid_j, _, bid_depth_j, _, bids_j, _asks_j) in enumerate(exchange_prices):
@@ -838,7 +861,18 @@ class ArbitrageMonitor:
                     # Scoring fees for pair selection (includes cashback weighting)
                     s_buy = self._fee_manager.get_scoring_fee(ex_buy, symbol) if self._fee_manager else 0.001
                     s_sell = self._fee_manager.get_scoring_fee(ex_sell, symbol) if self._fee_manager else 0.001
-                    scoring_net = spread_pct - (s_buy + s_sell) * 100 - slippage_pct
+                    raw_scoring_net = spread_pct - (s_buy + s_sell) * 100 - slippage_pct
+                    scoring_net = raw_scoring_net
+
+                    # Penalize event-driven sellers (stale bid risk)
+                    if self._event_driven_seller_penalty > 0 and ex_sell in self._event_driven_exchanges:
+                        scoring_net -= self._event_driven_seller_penalty
+                        self._event_driven_seller_penalties += 1
+
+                    # Track raw best for demotion detection
+                    if raw_scoring_net > best_raw_net:
+                        best_raw_net = raw_scoring_net
+                        best_raw_sell_ex = ex_sell
 
                     # Taker fees for profit calculation (actual fee charged)
                     t_buy = self._fee_manager.get_taker_fee(ex_buy, symbol) if self._fee_manager else 0.001
@@ -854,9 +888,38 @@ class ArbitrageMonitor:
                         best_buy_asks = asks_i
                         best_sell_bids = bids_j
 
+            # EVD demotion detection: raw winner was event-driven but penalized winner differs
+            if (
+                self._event_driven_seller_penalty > 0
+                and best_raw_sell_ex in self._event_driven_exchanges
+                and best_row is not None
+                and best_row[3] != best_raw_sell_ex  # winner sell_ex differs from raw winner
+            ):
+                self._event_driven_seller_demoted += 1
+                logger.info(
+                    f"[Monitor] EVD_DEMOTED {symbol}: {best_raw_sell_ex} demoted to "
+                    f"{best_row[3]} (penalty={self._event_driven_seller_penalty:.3f}%)"
+                )
+
             if best_row is not None:
                 rows.append(best_row)
                 sym, buy_ex, ask_p, sell_ex, bid_p, spread, fee, net, profit = best_row
+
+                # Log when event-driven exchange IS selected as seller (despite penalty)
+                if (
+                    self._event_driven_seller_penalty > 0
+                    and sell_ex in self._event_driven_exchanges
+                ):
+                    evd_key = f"evd_seller:{sym}"
+                    self._size_zero_log_count.setdefault(evd_key, 0)
+                    self._size_zero_log_count[evd_key] += 1
+                    evd_count = self._size_zero_log_count[evd_key]
+                    if evd_count <= 3 or evd_count % 30 == 0:
+                        logger.info(
+                            f"[Monitor] EVD_SELLER {sym} {buy_ex}->{sell_ex}: "
+                            f"net={net:.4f}% (penalty={self._event_driven_seller_penalty:.3f}% "
+                            f"applied, still best)"
+                        )
 
                 # Record observation (all, not just profitable)
                 self._all_observations.append((sym, spread, fee, net, buy_ex, sell_ex))
@@ -867,6 +930,25 @@ class ArbitrageMonitor:
                 # Simulate trade if profitable after cashback and above threshold
                 if best_scoring_net > 0 and best_scoring_net >= pair_min_net:
                     self._interval_profitable += 1
+
+                    # Spread persistence gate: require spread across consecutive ticks
+                    if self._spread_persistence_ticks > 0:
+                        opp_key = f"{sym}:{buy_ex}:{sell_ex}"
+                        pending = self._pending_opportunities.get(opp_key)
+                        if pending is None or pending["tick"] < self._tick_count - 1:
+                            # New or non-consecutive — start tracking
+                            self._pending_opportunities[opp_key] = {
+                                "tick": self._tick_count, "count": 1,
+                            }
+                            self._phantom_spread_count += 1
+                            continue  # Don't execute yet — wait for persistence
+                        else:
+                            pending["tick"] = self._tick_count
+                            pending["count"] += 1
+                            if pending["count"] <= self._spread_persistence_ticks:
+                                continue  # Not enough consecutive ticks yet
+                            # Passed persistence check — proceed to execute
+
                     can_trade = True
 
                     # Compute trade size (adaptive or static)
@@ -876,6 +958,21 @@ class ArbitrageMonitor:
                         )
                     else:
                         trade_size = self._trade_amount
+
+                    # Position accumulation cap: limit crypto value per symbol per buyer exchange
+                    if self._max_position_multiplier > 0 and self._balance and trade_size > 0:
+                        cap = self._trade_amount * self._max_position_multiplier
+                        crypto_qty = self._balance.crypto.get(buy_ex, {}).get(sym, 0.0)
+                        crypto_val = crypto_qty * ask_p if crypto_qty > 0 else 0.0
+                        min_trade = max(5.0, self._total_capital * 0.003)
+                        if crypto_val >= cap:
+                            self._position_cap_skips += 1
+                            trade_size = 0  # will be caught by trade_size <= 0 check below
+                        elif crypto_val + trade_size > cap:
+                            trade_size = max(0, cap - crypto_val)
+                            if trade_size < min_trade:
+                                self._position_cap_skips += 1
+                                trade_size = 0
 
                     if self._balance and self._balance.initialized:
                         # Track miss-streak for rebalancing (even when trade_size is 0)
@@ -1024,6 +1121,25 @@ class ArbitrageMonitor:
                         actual_slippage = buy_slip_actual.slippage_pct + sell_slip_actual.slippage_pct
                         net_adjusted = spread - fee - actual_slippage
                         actual_profit = trade_size * (net_adjusted / 100)
+
+                        # One-legged failure simulation
+                        one_leg_flag = False
+                        if self._one_leg_failure_rate > 0 and random.random() < self._one_leg_failure_rate:
+                            failed_leg = random.choice(["buy", "sell"])
+                            unwind_fee = buy_fee_rate if failed_leg == "buy" else sell_fee_rate
+                            unwind_slip = actual_slippage * self._one_leg_unwind_slippage_mult
+                            unwind_cost = trade_size * (unwind_fee + unwind_slip / 100)
+                            actual_profit -= unwind_cost
+                            self._one_leg_sim_count += 1
+                            self._one_leg_sim_cost += unwind_cost
+                            one_leg_flag = True
+                            logger.info(
+                                f"[Trade] ONE_LEG_SIM #{len(self._trades)+1} {sym} "
+                                f"{buy_ex}->{sell_ex}: failed_leg={failed_leg} "
+                                f"unwind_cost=${unwind_cost:.4f} "
+                                f"adjusted_profit=${actual_profit:.4f}"
+                            )
+
                         # Data age: max of buy and sell exchange ages (ms)
                         buy_age = symbol_ex_age.get(buy_ex, 0.0)
                         sell_age = symbol_ex_age.get(sell_ex, 0.0)
@@ -1046,6 +1162,7 @@ class ArbitrageMonitor:
                             sim_slippage_pct=actual_slippage,
                             sim_buy_slippage_pct=buy_slip_actual.slippage_pct,
                             sim_sell_slippage_pct=sell_slip_actual.slippage_pct,
+                            one_leg_simulated=one_leg_flag,
                         )
                         self._trades.append(trade)
                         self._record_trade_pnl(now, actual_profit)
@@ -1209,8 +1326,21 @@ class ArbitrageMonitor:
                 f"cashback=${credited_cb + pending_cb:.2f} "
                 f"(credited=${credited_cb:.2f} pending=${pending_cb:.2f}), "
                 f"net=${net:.2f}, $/hr=${hourly:.2f}, "
-                f"sz0={size_zero_total}, rebal_blocked={rebal_blocked_total}"
+                f"sz0={size_zero_total}, rebal_blocked={rebal_blocked_total}, "
+                f"phantom={self._phantom_spread_count}, "
+                f"evd_sell={self._event_driven_seller_penalties}/demoted={self._event_driven_seller_demoted}, "
+                f"one_leg={self._one_leg_sim_count}/${self._one_leg_sim_cost:.2f}, "
+                f"pos_cap={self._position_cap_skips}"
             )
+
+        # Cleanup stale pending opportunities (spread didn't persist)
+        if self._pending_opportunities:
+            stale_keys = [
+                k for k, v in self._pending_opportunities.items()
+                if v["tick"] < self._tick_count - 1
+            ]
+            for k in stale_keys:
+                del self._pending_opportunities[k]
 
         # Compute average age per exchange for display
         tick_ages: dict[str, float] = {}
@@ -1501,6 +1631,13 @@ class ArbitrageMonitor:
             "demo_executor": self._executor.to_state_dict() if self._executor else None,
             "_hourly_pnl": self._hourly_pnl,
             "_daily_pnl": self._daily_pnl,
+            # Simulation realism counters
+            "_phantom_spread_count": self._phantom_spread_count,
+            "_event_driven_seller_penalties": self._event_driven_seller_penalties,
+            "_event_driven_seller_demoted": self._event_driven_seller_demoted,
+            "_one_leg_sim_count": self._one_leg_sim_count,
+            "_one_leg_sim_cost": self._one_leg_sim_cost,
+            "_position_cap_skips": self._position_cap_skips,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -1534,3 +1671,10 @@ class ArbitrageMonitor:
         )
         self._hourly_pnl = data.get("_hourly_pnl", {})
         self._daily_pnl = data.get("_daily_pnl", {})
+        # Simulation realism counters
+        self._phantom_spread_count = data.get("_phantom_spread_count", 0)
+        self._event_driven_seller_penalties = data.get("_event_driven_seller_penalties", 0)
+        self._event_driven_seller_demoted = data.get("_event_driven_seller_demoted", 0)
+        self._one_leg_sim_count = data.get("_one_leg_sim_count", 0)
+        self._one_leg_sim_cost = data.get("_one_leg_sim_cost", 0.0)
+        self._position_cap_skips = data.get("_position_cap_skips", 0)

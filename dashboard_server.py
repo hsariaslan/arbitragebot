@@ -873,6 +873,11 @@ class DashboardServer:
         "bitfinex_reserve_hard_floor": (float, 0.0, 0.20),
         "net_pct_sizing_enabled": (bool, None, None),
         "net_pct_multiplier_cap": (float, 1.0, 10.0),
+        "spread_persistence_ticks": (int, 0, 5),
+        "event_driven_seller_penalty_pct": (float, 0.0, 1.0),
+        "one_leg_failure_rate": (float, 0.0, 0.20),
+        "one_leg_unwind_slippage_mult": (float, 1.0, 5.0),
+        "max_position_multiplier": (float, 0, 50),
     }
 
     _SETTINGS_ENUMS: dict[str, list[str]] = {
@@ -1637,6 +1642,18 @@ class DashboardServer:
             self._balance._bitfinex_reserve_hard_floor_amount = (
                 self._balance._initial_investment * self._balance._bitfinex_reserve_hard_floor
             )
+
+        # Simulation realism features
+        if "spread_persistence_ticks" in settings:
+            self._monitor._spread_persistence_ticks = int(settings["spread_persistence_ticks"])
+        if "event_driven_seller_penalty_pct" in settings:
+            self._monitor._event_driven_seller_penalty = float(settings["event_driven_seller_penalty_pct"])
+        if "one_leg_failure_rate" in settings:
+            self._monitor._one_leg_failure_rate = float(settings["one_leg_failure_rate"])
+        if "one_leg_unwind_slippage_mult" in settings:
+            self._monitor._one_leg_unwind_slippage_mult = float(settings["one_leg_unwind_slippage_mult"])
+        if "max_position_multiplier" in settings:
+            self._monitor._max_position_multiplier = float(settings["max_position_multiplier"])
 
         # execution_mode: persisted to settings.json but requires restart
         # (no hot-apply — executor creation happens at startup)

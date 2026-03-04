@@ -62,6 +62,11 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [executionMode, setExecutionMode] = useState(currentSettings.execution_mode ?? 'simulation');
   const [ipWhitelistEnabled, setIpWhitelistEnabled] = useState(currentSettings.ip_whitelist_enabled ?? false);
   const [ipWhitelist, setIpWhitelist] = useState((currentSettings.ip_whitelist ?? []).join(', '));
+  const [spreadPersistenceTicks, setSpreadPersistenceTicks] = useState(currentSettings.spread_persistence_ticks ?? 1);
+  const [evdSellerPenalty, setEvdSellerPenalty] = useState(currentSettings.event_driven_seller_penalty_pct ?? 0.05);
+  const [oneLegFailureRate, setOneLegFailureRate] = useState(currentSettings.one_leg_failure_rate ?? 0.02);
+  const [oneLegUnwindSlippageMult, setOneLegUnwindSlippageMult] = useState(currentSettings.one_leg_unwind_slippage_mult ?? 1.5);
+  const [maxPositionMultiplier, setMaxPositionMultiplier] = useState(currentSettings.max_position_multiplier ?? 5.0);
   const [securityStatus, setSecurityStatus] = useState<string | null>(null);
   const [showRestartConfirm, setShowRestartConfirm] = useState(false);
 
@@ -105,6 +110,11 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setRebalanceRoiDivisor(currentSettings.rebalance_roi_divisor ?? 3);
       setAdaptiveMode(currentSettings.adaptive_mode ?? true);
       setExecutionMode(currentSettings.execution_mode ?? 'simulation');
+      setSpreadPersistenceTicks(currentSettings.spread_persistence_ticks ?? 1);
+      setEvdSellerPenalty(currentSettings.event_driven_seller_penalty_pct ?? 0.05);
+      setOneLegFailureRate(currentSettings.one_leg_failure_rate ?? 0.02);
+      setOneLegUnwindSlippageMult(currentSettings.one_leg_unwind_slippage_mult ?? 1.5);
+      setMaxPositionMultiplier(currentSettings.max_position_multiplier ?? 5.0);
       setIpWhitelistEnabled(currentSettings.ip_whitelist_enabled ?? false);
       setIpWhitelist((currentSettings.ip_whitelist ?? []).join(', '));
     }
@@ -148,6 +158,11 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     net_pct_multiplier_cap: netPctMultiplierCap,
     adaptive_mode: adaptiveMode,
     execution_mode: executionMode,
+    spread_persistence_ticks: spreadPersistenceTicks,
+    event_driven_seller_penalty_pct: evdSellerPenalty,
+    one_leg_failure_rate: oneLegFailureRate,
+    one_leg_unwind_slippage_mult: oneLegUnwindSlippageMult,
+    max_position_multiplier: maxPositionMultiplier,
   });
 
   const handleSave = () => {
@@ -592,6 +607,58 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             </label>
             <input type="number" value={bitfinexReserveHardFloor} min={0} max={0.20} step={0.01}
               onChange={d(setBitfinexReserveHardFloor, 0.05)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+        </div>
+      </div>
+
+      {/* Simulation Realism */}
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Simulation Realism</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Spread Persistence Ticks
+              <Tooltip text="Number of consecutive ticks a spread must persist before executing. Simulates execution latency — real orders take ~1s to reach exchanges. 0 = instant (legacy), 1 = spread must exist on 2 consecutive ticks (~1s), 2 = 3 ticks (~2s). Range: 0-5. Default: 1. Config key: spread_persistence_ticks" />
+            </label>
+            <input type="number" value={spreadPersistenceTicks} min={0} max={5} step={1}
+              onChange={d(setSpreadPersistenceTicks, 1)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Event-Driven Seller Penalty %
+              <Tooltip text="Scoring penalty applied when event-driven exchanges (e.g. Bitfinex) are sellers. Their bids update every 10-20s (vs ~100ms for streaming exchanges), so the bid may be stale by the time your order arrives. This deprioritizes event-driven sellers unless their bid is meaningfully better. 0 = disabled. Default: 0.05%. Config key: event_driven_seller_penalty_pct" />
+            </label>
+            <input type="number" value={evdSellerPenalty} min={0} max={1.0} step={0.01}
+              onChange={d(setEvdSellerPenalty, 0.05)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              One-Leg Failure Rate
+              <Tooltip text="Probability of simulated one-legged failure per trade. When triggered, one leg of the arbitrage fails and the unwind cost (taker fee + slippage) is deducted from profit. Simulates real-world partial execution failures. 0 = disabled. Default: 0.02 (2%). Config key: one_leg_failure_rate" />
+            </label>
+            <input type="number" value={oneLegFailureRate} min={0} max={0.20} step={0.01}
+              onChange={d(setOneLegFailureRate, 0.02)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Unwind Slippage Multiplier
+              <Tooltip text="Multiplier on estimated slippage for emergency unwind trades after a one-legged failure. Higher values simulate the urgency premium of unwinding a naked position quickly. Range: 1.0-5.0. Default: 1.5. Config key: one_leg_unwind_slippage_mult" />
+            </label>
+            <input type="number" value={oneLegUnwindSlippageMult} min={1.0} max={5.0} step={0.1}
+              onChange={d(setOneLegUnwindSlippageMult, 1.5)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Max Position Multiplier
+              <Tooltip text="Maximum accumulated crypto value per symbol per buyer exchange, as a multiple of trade_amount. Prevents flash-crash exposure from large accumulated positions. 0 = unlimited. For $30 trades with 5x cap: max $150 of any symbol on any buyer exchange. Range: 0-50. Default: 5.0. Config key: max_position_multiplier" />
+            </label>
+            <input type="number" value={maxPositionMultiplier} min={0} max={50} step={0.5}
+              onChange={d(setMaxPositionMultiplier, 5.0)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
         </div>

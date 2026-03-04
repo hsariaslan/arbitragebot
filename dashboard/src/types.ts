@@ -140,6 +140,12 @@ export interface Settings {
   net_pnl_gate_warmup_trades?: number;
   net_pnl_gate_grace_seconds?: number;
   rebalance_roi_divisor?: number;
+  // Simulation realism
+  spread_persistence_ticks?: number;
+  event_driven_seller_penalty_pct?: number;
+  one_leg_failure_rate?: number;
+  one_leg_unwind_slippage_mult?: number;
+  max_position_multiplier?: number;
   // Security
   ip_whitelist_enabled?: boolean;
   ip_whitelist?: string[];

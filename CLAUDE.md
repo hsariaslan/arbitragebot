@@ -209,7 +209,7 @@ All 9 exchange fetchers subscribe to multi-level order book data (up to 5 levels
 |----------|---------|--------|-------------|-------|
 | Binance | `@depth5@100ms` | 5 | 100ms | Snapshot per push |
 | OKX | `books5` | 5 | ~100ms | Snapshot per push |
-| Bybit | `orderbook.1` | 1 | ~100ms | Single best level only |
+| Bybit | `orderbook.50` | 50 (top 5 used) | 20ms | Valid depths: 1, 50, 200, 1000 |
 | MEXC | REST `/api/v3/depth?limit=5` | 5 | 3s poll | No WS depth available, uses async REST polling |
 | Bitget | `books5` | 5 | ~100ms | Snapshot per push |
 | KuCoin | `/spotMarket/level5` | 5 | ~100ms | Uses WS token auth |
@@ -477,6 +477,57 @@ All snapshots are exported in the XLSX "Configurations" sheet.
 | `transfer_fee_manager.py` | `TransferFeeManager` — per-exchange per-network withdrawal fees (flat/percentage/conditional), preferred network selection |
 | `settings.json` | Runtime settings including `adaptive_mode`, `min_net_profit_pct`, `trade_amount_usd`, `trade_amount_pct`, `total_capital`, `fee_configs`, `transfer_configs`, `reallocation_cost_horizon`, `demotion_cooldown_multiplier`, `hourly_external_transfer_cap` |
 
+## Simulation Realism
+
+Four features that close the gap between simulation and live trading $/hr. All configurable via dashboard Settings → "Simulation Realism" section. Hot-applied without restart.
+
+### Feature 1: Spread Persistence
+
+Only executes trades when the spread persists across consecutive ticks (~1s each), filtering "phantom spreads" that would close before real orders arrive.
+
+- **Setting**: `spread_persistence_ticks` (int, default 1, range 0-5)
+- 0 = disabled (instant execution, legacy behavior)
+- 1 = spread must exist on 2 consecutive ticks (~1s latency simulation)
+- Tracked in `_pending_opportunities` dict (resets on restart)
+- Counter: `_phantom_spread_count` — logged in `[Session]` summary as `phantom=X`
+
+### Feature 2: Event-Driven Seller Penalty
+
+Deprioritizes event-driven exchanges (e.g., Bitfinex) as sellers during pair selection. Their bids update every 10-20s (vs ~100ms for streaming exchanges), so the bid may be stale.
+
+- **Setting**: `event_driven_seller_penalty_pct` (float, default 0.05, range 0.0-1.0)
+- Applied at scoring time: `scoring_net -= penalty` when seller has `IS_EVENT_DRIVEN = True`
+- Uses `_event_driven_exchanges` set built from fetcher flags at init (no hardcoded exchange names)
+- Counters: `_event_driven_seller_penalties` (total applications), `_event_driven_seller_demoted` (winner changed)
+- Logging: `[Monitor] EVD_SELLER` (throttled), `[Monitor] EVD_DEMOTED` (always)
+- Session summary: `evd_sell=X/demoted=X`
+
+### Feature 3: One-Legged Failure Simulation
+
+Simulates random trade execution failures where one leg succeeds but the other fails, deducting unwind costs from profit.
+
+- **Settings**: `one_leg_failure_rate` (float, default 0.02 = 2%), `one_leg_unwind_slippage_mult` (float, default 1.5)
+- After trade executes: roll `random.random()` against failure rate
+- If triggered: compute unwind cost (taker fee + slippage × multiplier), deduct from profit
+- `SimulatedTrade.one_leg_simulated` field marks affected trades
+- Logging: `[Trade] ONE_LEG_SIM` with details
+- Session summary: `one_leg=X/$Y.YY`
+
+### Feature 4: Max Position Accumulation Cap
+
+Limits accumulated crypto value per symbol on buyer exchanges, preventing excessive flash-crash exposure.
+
+- **Setting**: `max_position_multiplier` (float, default 5.0, range 0-50)
+- 0 = disabled (no cap)
+- Before trade execution: checks `crypto_value + trade_size > trade_amount × multiplier`
+- If at cap: trade_size set to 0 (skipped). If near cap: trade_size reduced.
+- Per-exchange, per-symbol (not global)
+- Counter: `_position_cap_skips` — session summary: `pos_cap=X`
+
+### State Persistence
+
+All counters (`_phantom_spread_count`, `_event_driven_seller_penalties`, `_event_driven_seller_demoted`, `_one_leg_sim_count`, `_one_leg_sim_cost`, `_position_cap_skips`) are persisted via `to_state_dict()` / `from_state_dict()`. `_pending_opportunities` resets on restart (stateless — fresh detection).
+
 ## Dashboard
 
 React/TypeScript SPA served by the Python backend via WebSocket. Uses `HashRouter` for client-side URL routing (no nginx config needed). Full-width layout optimized for 1920px screens.
@@ -693,6 +744,10 @@ Comprehensive sim-vs-demo validation system. See `DISCREPANCIES.md` for the full
 | `monitor.py` | `_compute_trade_size()` — min notional/qty validation; `SimulatedTrade` — rounding/age metadata |
 | `dashboard_server.py` | `_build_demo_state()` — builds baseline-adjusted per-exchange comparison data for dashboard |
 | `state_manager.py` | Persists demo_fetcher baselines via `to_state_dict()` / `from_state_dict()` |
+
+## IMPORTANT: Before Going Live
+
+**When transitioning to real trading, you MUST read `documentations/RISKS.md` first.** It contains 16 documented risks (3 critical, 4 high, 5 medium, 4 low), a capital deployment strategy (Bitfinex hub → distribute at $0 cost), and a pre-live checklist. The document was written during Session #2 analysis when all risks were fresh. Do not skip it.
 
 ## Phase 2: Demo/Testnet Order Execution (Implemented)
 
@@ -925,6 +980,7 @@ Detailed reference documents in `documentations/`:
 | `documentations/BOT_DECISION_MAKING.md` | Complete decision reference: fee computation (scoring vs taker), discovery, scoring, focus tiers, pair selection, threshold, trade sizing, execution, dominant pairs, capital allocation, rebalancing (6 gates), symbol lifecycle, net profit awareness, flow diagrams |
 | `documentations/FUTURE_PLANS.md` | Net%-based dynamic trade sizing design: multiplier tiers, distributed VPS latency analysis, slippage/stale data risks, simulation vs real trading considerations |
 | `documentations/SESSIONS.md` | Session history & analysis: per-session performance metrics, exchange pair breakdowns, pattern tracking, decision log |
+| `documentations/RISKS.md` | **READ BEFORE GOING LIVE.** Complete risk assessment for live trading: 16 risks sorted by severity (critical/high/medium/low) with probability, capital deployment strategy (Bitfinex hub), pre-live checklist |
 
 ## Technology Stack
 

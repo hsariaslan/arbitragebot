@@ -323,6 +323,13 @@ HOURLY_EXTERNAL_TRANSFER_CAP: float = 2.0 # Max external withdrawal fees per hou
 BITFINEX_RESERVE_PCT: float = 0.15        # Keep 15% of capital as USDT on Bitfinex (free withdrawals)
 BITFINEX_RESERVE_HARD_FLOOR: float = 0.05 # Never drain below 5% in emergency draws
 
+# Simulation realism (configurable via settings page)
+SPREAD_PERSISTENCE_TICKS: int = 1           # Consecutive ticks spread must persist before executing (0=instant)
+EVENT_DRIVEN_SELLER_PENALTY_PCT: float = 0.05  # Scoring penalty % when event-driven exchange is seller
+ONE_LEG_FAILURE_RATE: float = 0.02          # Probability of simulated one-legged failure per trade (0=disabled)
+ONE_LEG_UNWIND_SLIPPAGE_MULT: float = 1.5   # Slippage multiplier for emergency unwind trades
+MAX_POSITION_MULTIPLIER: float = 5.0        # Max accumulated crypto per symbol per buyer exchange (× trade_amount, 0=unlimited)
+
 # Execution mode: "simulation" (default), "demo" (testnet orders)
 EXECUTION_MODE: str = "simulation"
 
