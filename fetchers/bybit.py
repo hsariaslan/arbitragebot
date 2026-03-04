@@ -3,12 +3,16 @@ Bybit Spot WebSocket fetcher.
 
 Connects to Bybit v5 public WebSocket API for spot and streams real-time
 data using two channels per symbol:
-    - orderbook.5 for 5-level bid/ask prices and quantities
+    - orderbook.50 for 50-level bid/ask depth (we use top 5)
     - tickers for lastPrice and 24h volume
 
-Bybit orderbook.5 fields:
-    b = [[price, qty], ...] bids (up to 5 levels, descending)
-    a = [[price, qty], ...] asks (up to 5 levels, ascending)
+Bybit v5 Spot valid orderbook depths: 1, 50, 200, 1000.
+Note: orderbook.5 does NOT exist — causes silent subscription failure
+and zero data (discovered Session #2, 2026-03-03).
+
+Bybit orderbook.50 fields:
+    b = [[price, qty], ...] bids (up to 50 levels, descending)
+    a = [[price, qty], ...] asks (up to 50 levels, ascending)
     s = symbol
 
 Bybit tickers fields:
@@ -34,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 class BybitFetcher(BaseFetcher):
-    """Bybit Spot WebSocket fetcher using orderbook.1 + tickers channels."""
+    """Bybit Spot WebSocket fetcher using orderbook.50 + tickers channels."""
 
     @property
     def exchange_name(self) -> str:
@@ -44,10 +48,10 @@ class BybitFetcher(BaseFetcher):
         return BYBIT_WS_URL
 
     async def _on_connect(self, ws: Any) -> None:
-        """Subscribe to orderbook.5 and tickers for all symbols (batched, max 10 args per message)."""
+        """Subscribe to orderbook.50 and tickers for all symbols (batched, max 10 args per message)."""
         args = []
         for s in self.symbols:
-            args.append(f"orderbook.5.{s}")
+            args.append(f"orderbook.50.{s}")
             args.append(f"tickers.{s}")
         # Bybit limits 10 args per subscribe message
         batch_size = 10
@@ -76,10 +80,10 @@ class BybitFetcher(BaseFetcher):
 
     def _parse_message(self, raw_message: dict[str, Any]) -> tuple[str, PriceState] | None:
         """
-        Parse Bybit orderbook.5 or tickers messages.
+        Parse Bybit orderbook.50 or tickers messages.
 
-        orderbook.5: {"topic": "orderbook.5.BTCUSDT",
-                      "data": {"s": "BTCUSDT", "b": [["price","qty"], ...], "a": [["price","qty"], ...]}}
+        orderbook.50: {"topic": "orderbook.50.BTCUSDT",
+                       "data": {"s": "BTCUSDT", "b": [["price","qty"], ...], "a": [["price","qty"], ...]}}
         tickers:     {"topic": "tickers.BTCUSDT",
                       "data": {"symbol": "BTCUSDT", "lastPrice": "...", "volume24h": "..."}}
 
