@@ -109,6 +109,9 @@ class DemoPortfolioFetcher:
         # Per-exchange backoff (for rate limiting)
         self._backoff: dict[str, float] = {}
 
+        # Set of exchanges that have demo executors (set by run.py)
+        self._demo_exchanges: set[str] = set()
+
         # Fee rate validation: track which exchanges have been validated (D-04)
         self._fee_validated: dict[str, bool] = {}
         # Actual demo/testnet fee rates (may differ from production config)
@@ -124,6 +127,10 @@ class DemoPortfolioFetcher:
         configured_list = [ex for ex, ok in self._configured.items() if ok]
         if configured_list:
             logger.info(f"[DemoCompare] Configured for: {', '.join(configured_list)}")
+
+    def set_demo_exchanges(self, exchanges: set[str]) -> None:
+        """Set which exchanges have active demo executors."""
+        self._demo_exchanges = exchanges
 
     @property
     def enabled(self) -> bool:
@@ -628,7 +635,11 @@ class DemoPortfolioFetcher:
                 diff_pct = (sim_val - adjusted_demo_val) / max(abs(adjusted_demo_val), 1) * 100
 
                 if sim_qty > 0.0001 and abs(demo_qty_delta) < 0.0001:
-                    dtype = "missing_position"
+                    # Distinguish: no executor for this exchange vs real missing position
+                    if self._demo_exchanges and exchange not in self._demo_exchanges:
+                        dtype = "missing_position_no_executor"
+                    else:
+                        dtype = "missing_position"
                 elif sim_qty < 0.0001 and abs(demo_qty_delta) > 0.0001:
                     dtype = "extra_position"
                 else:
@@ -668,6 +679,11 @@ class DemoPortfolioFetcher:
         """Determine the likely root cause of a discrepancy."""
         if abs(diff_pct) > 50:
             if sim_val > demo_val:
+                if self._demo_exchanges and exchange not in self._demo_exchanges:
+                    return (
+                        f"No demo executor for {exchange} — sim-only position "
+                        f"(expected in Demo+Sim mode)"
+                    )
                 return "Simulation holds position not executed on demo (no demo order placement)"
             return "Demo holds position not reflected in simulation"
 

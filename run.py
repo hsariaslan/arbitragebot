@@ -75,7 +75,7 @@ def setup_logging() -> tuple[Path, DashboardLogHandler]:
     file_h.suffix = "%Y-%m-%d"
     file_h.setFormatter(fmt)
 
-    dashboard_h = DashboardLogHandler(maxlen=500)
+    dashboard_h = DashboardLogHandler(maxlen=2000)
 
     root = logging.getLogger()
     root.setLevel(logging.INFO)
@@ -134,6 +134,18 @@ async def main() -> None:
         # Safety: if all are disabled, fall back to all
         active_exchanges = [f.exchange_name for f in fetchers]
         logger.warning("[Config] All exchanges disabled — falling back to all 9")
+
+    # Demo-only mode: restrict to exchanges with demo executors
+    execution_mode = settings.get("execution_mode", "simulation")
+    if execution_mode == "demo_only":
+        demo_only_exchanges = {"Binance", "OKX", "Bybit"}
+        active_exchanges = [ex for ex in active_exchanges if ex in demo_only_exchanges]
+        if not active_exchanges:
+            logger.warning("[Config] Demo-only mode but no demo exchanges enabled — falling back to all")
+            active_exchanges = [f.exchange_name for f in fetchers]
+        else:
+            logger.info(f"[Executor] Demo-only mode: active exchanges restricted to {active_exchanges}")
+
     active_symbols = list(ACTIVE_SYMBOLS)  # from config.py, discovery may override
 
     # Compute uniform initial allocations from total_capital
@@ -283,10 +295,9 @@ async def main() -> None:
         logger.info("[DemoCompare] Disabled (no API keys configured in .env)")
 
     # Phase 2: Demo order execution (optional — needs execution_mode=demo)
-    execution_mode = settings.get("execution_mode", "simulation")
     demo_executor = None
 
-    if execution_mode == "demo":
+    if execution_mode in ("demo", "demo_only"):
         from config import (
             BINANCE_TESTNET_API_KEY, OKX_DEMO_API_KEY, BYBIT_DEMO_API_KEY,
         )
@@ -323,14 +334,19 @@ async def main() -> None:
             monitor.set_executor(
                 demo_executor, state_mgr,
                 demo_fetcher if demo_fetcher.enabled else None,
+                execution_mode=execution_mode,
             )
-            balance._execution_mode = "demo"
+            balance._execution_mode = execution_mode
+            # Inform demo_fetcher which exchanges have executors
+            if demo_fetcher and demo_fetcher.enabled:
+                demo_fetcher.set_demo_exchanges(set(exchange_executors.keys()))
             logger.info(
-                f"Demo execution enabled for: {list(exchange_executors.keys())}"
+                f"[Executor] {execution_mode} mode enabled for: "
+                f"{list(exchange_executors.keys())}"
             )
         else:
             logger.warning(
-                "[Executor] execution_mode=demo but no API keys configured"
+                f"[Executor] execution_mode={execution_mode} but no API keys configured"
             )
     else:
         logger.info("[Executor] Simulation mode (no real orders)")

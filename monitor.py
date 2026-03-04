@@ -236,6 +236,19 @@ class ArbitrageMonitor:
         self._state_mgr: "StateManager | None" = None
         self._demo_fetcher = None  # set via set_executor()
 
+        # Demo accuracy stats (for [Session] summary)
+        self._demo_trade_count: int = 0
+        self._demo_fill_count: int = 0
+        self._demo_reject_count: int = 0
+        self._demo_partial_count: int = 0
+        self._demo_one_legged_count: int = 0
+        self._demo_total_sim_profit: float = 0.0
+        self._demo_total_actual_profit: float = 0.0
+        self._demo_total_sim_slippage: float = 0.0
+        self._demo_total_actual_slippage: float = 0.0
+        self._demo_total_latency_ms: float = 0.0
+        self._demo_fee_mismatches: int = 0
+
     def set_optimizer(self, optimizer: "SymbolOptimizer") -> None:
         """Store optimizer reference for score-based rebalance gating."""
         self._optimizer = optimizer
@@ -245,10 +258,11 @@ class ArbitrageMonitor:
         executor: "DemoExecutor",
         state_mgr: "StateManager",
         demo_fetcher=None,
+        execution_mode: str = "demo",
     ) -> None:
         """Enable demo execution mode with the given executor."""
         self._executor = executor
-        self._execution_mode = "demo"
+        self._execution_mode = execution_mode
         self._state_mgr = state_mgr
         self._demo_fetcher = demo_fetcher
         logger.info(
@@ -691,6 +705,26 @@ class ArbitrageMonitor:
                         f"{leg.fee_currency} on {leg.exchange}"
                     )
 
+        # D-04b: Fee rate validation per trade
+        for leg, side in [(buy, "buy"), (sell, "sell")]:
+            if leg.success and leg.fee_rate > 0 and self._fee_manager:
+                configured_rate = self._fee_manager.get_taker_fee(leg.exchange)
+                if abs(leg.fee_rate - configured_rate) > 0.00005:  # 0.005% tolerance
+                    self._demo_fee_mismatches += 1
+                    logger.warning(
+                        f"[DemoTrade] {sym} {side} fee rate mismatch on {leg.exchange}: "
+                        f"configured={configured_rate*100:.3f}% actual={leg.fee_rate*100:.3f}%"
+                    )
+
+        # Slippage model accuracy
+        if buy.success and sell.success:
+            slip_model_err = abs(sim_trade.sim_slippage_pct - result.avg_slippage_pct)
+            if slip_model_err > 0.02:  # >0.02% model error
+                logger.info(
+                    f"[DemoTrade] {sym} slippage model off by {slip_model_err:.4f}%: "
+                    f"sim={sim_trade.sim_slippage_pct:.4f}% actual={result.avg_slippage_pct:.4f}%"
+                )
+
         # Profit comparison
         profit_diff = result.actual_profit_usd - sim_trade.profit_usd
         if abs(profit_diff) > 0.01:
@@ -698,6 +732,40 @@ class ArbitrageMonitor:
                 f"[DemoCompare] {sym} profit: sim=${sim_trade.profit_usd:.4f} "
                 f"actual=${result.actual_profit_usd:.4f} diff=${profit_diff:+.4f}"
             )
+
+        # Update demo accuracy counters
+        self._demo_trade_count += 1
+        self._demo_total_sim_profit += sim_trade.profit_usd
+        self._demo_total_actual_profit += result.actual_profit_usd
+        self._demo_total_sim_slippage += sim_trade.sim_slippage_pct
+        self._demo_total_actual_slippage += result.avg_slippage_pct
+        self._demo_total_latency_ms += result.total_latency_ms
+        if sim_trade.demo_status == "filled":
+            self._demo_fill_count += 1
+        elif sim_trade.demo_status == "rejected":
+            self._demo_reject_count += 1
+        elif sim_trade.demo_status == "partial":
+            self._demo_partial_count += 1
+        elif sim_trade.demo_status == "one_legged":
+            self._demo_one_legged_count += 1
+
+        # Comprehensive per-trade summary log
+        logger.info(
+            f"[DemoTrade] {sym} {buy.exchange}\u2192{sell.exchange} "
+            f"status={sim_trade.demo_status} "
+            f"sim_profit=${sim_trade.profit_usd:+.4f} "
+            f"demo_profit=${result.actual_profit_usd:+.4f} "
+            f"diff=${profit_diff:+.4f} "
+            f"sim_slip={sim_trade.sim_slippage_pct:.4f}% "
+            f"demo_slip={result.avg_slippage_pct:.4f}% "
+            f"buy_price={sim_trade.buy_price:.6f}\u2192{buy.actual_avg_price:.6f} "
+            f"sell_price={sim_trade.sell_price:.6f}\u2192{sell.actual_avg_price:.6f} "
+            f"buy_fill={buy.fill_ratio:.2%} sell_fill={sell.fill_ratio:.2%} "
+            f"buy_fee={buy.actual_fee:.6f}({buy.fee_currency}) "
+            f"sell_fee={sell.actual_fee:.6f}({sell.fee_currency}) "
+            f"latency={result.total_latency_ms:.0f}ms "
+            f"data_age={sim_trade.data_age_ms:.0f}ms"
+        )
 
     def stop(self) -> None:
         """Signal the monitor to stop."""
@@ -1252,7 +1320,7 @@ class ArbitrageMonitor:
                                 )
 
                         # Phase 2: Fire demo orders in parallel (non-blocking)
-                        if (self._execution_mode == "demo"
+                        if (self._execution_mode in ("demo", "demo_only")
                                 and self._executor
                                 and self._executor.can_execute(buy_ex, sell_ex)):
                             asyncio.create_task(self._execute_demo_trade(
@@ -1399,6 +1467,23 @@ class ArbitrageMonitor:
                 f"pos_cap={self._position_cap_skips}, "
                 f"anomaly={self._anomaly._total_pauses}p/{self._anomaly._total_warnings}w/{self._anomaly._total_symbol_blocks}sb"
             )
+            # Demo accuracy stats (only when demo trades have been placed)
+            if self._demo_trade_count > 0:
+                avg_lat = self._demo_total_latency_ms / self._demo_trade_count
+                avg_sim_slip = self._demo_total_sim_slippage / self._demo_trade_count
+                avg_demo_slip = self._demo_total_actual_slippage / self._demo_trade_count
+                drift = self._demo_total_actual_profit - self._demo_total_sim_profit
+                logger.info(
+                    f"[Session] demo={self._demo_fill_count}/{self._demo_trade_count}filled "
+                    f"reject={self._demo_reject_count} partial={self._demo_partial_count} "
+                    f"one_leg={self._demo_one_legged_count} "
+                    f"profit_sim=${self._demo_total_sim_profit:.2f} "
+                    f"profit_demo=${self._demo_total_actual_profit:.2f} "
+                    f"drift=${drift:+.2f} "
+                    f"avg_slip_sim={avg_sim_slip:.4f}% avg_slip_demo={avg_demo_slip:.4f}% "
+                    f"fee_mismatch={self._demo_fee_mismatches} "
+                    f"latency_avg={avg_lat:.0f}ms"
+                )
 
         # Cleanup stale pending opportunities (spread didn't persist)
         if self._pending_opportunities:
@@ -1709,6 +1794,18 @@ class ArbitrageMonitor:
             "_anomaly": self._anomaly.to_state_dict(),
             "_manual_stopped": self._manual_stopped,
             "_manual_stop_timestamp": self._manual_stop_timestamp,
+            # Demo accuracy stats
+            "_demo_trade_count": self._demo_trade_count,
+            "_demo_fill_count": self._demo_fill_count,
+            "_demo_reject_count": self._demo_reject_count,
+            "_demo_partial_count": self._demo_partial_count,
+            "_demo_one_legged_count": self._demo_one_legged_count,
+            "_demo_total_sim_profit": self._demo_total_sim_profit,
+            "_demo_total_actual_profit": self._demo_total_actual_profit,
+            "_demo_total_sim_slippage": self._demo_total_sim_slippage,
+            "_demo_total_actual_slippage": self._demo_total_actual_slippage,
+            "_demo_total_latency_ms": self._demo_total_latency_ms,
+            "_demo_fee_mismatches": self._demo_fee_mismatches,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -1754,3 +1851,15 @@ class ArbitrageMonitor:
             self._anomaly.from_state_dict(data["_anomaly"])
         self._manual_stopped = data.get("_manual_stopped", False)
         self._manual_stop_timestamp = data.get("_manual_stop_timestamp", 0.0)
+        # Demo accuracy stats
+        self._demo_trade_count = data.get("_demo_trade_count", 0)
+        self._demo_fill_count = data.get("_demo_fill_count", 0)
+        self._demo_reject_count = data.get("_demo_reject_count", 0)
+        self._demo_partial_count = data.get("_demo_partial_count", 0)
+        self._demo_one_legged_count = data.get("_demo_one_legged_count", 0)
+        self._demo_total_sim_profit = data.get("_demo_total_sim_profit", 0.0)
+        self._demo_total_actual_profit = data.get("_demo_total_actual_profit", 0.0)
+        self._demo_total_sim_slippage = data.get("_demo_total_sim_slippage", 0.0)
+        self._demo_total_actual_slippage = data.get("_demo_total_actual_slippage", 0.0)
+        self._demo_total_latency_ms = data.get("_demo_total_latency_ms", 0.0)
+        self._demo_fee_mismatches = data.get("_demo_fee_mismatches", 0)

@@ -362,13 +362,14 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         <div className="mt-4">
           <label className="flex items-center text-sm text-slate-300 mb-1">
             Execution Mode
-            <Tooltip text="Simulation: no real orders (default). Demo: places real orders on exchange testnets alongside simulation. Requires API keys in .env. Restart required to take effect. Config key: execution_mode" />
+            <Tooltip text="Simulation: no real orders (default). Demo + Simulation: places real orders on Binance/OKX/Bybit testnets alongside simulation on all 9 exchanges — useful for broad market coverage with partial demo validation. Demo Only: restricts trading to only Binance/OKX/Bybit (the 3 demo-capable exchanges) — every trade gets demo orders for comprehensive sim-vs-demo comparison. Requires API keys in .env. Restart required to take effect. Config key: execution_mode" />
           </label>
           <select value={executionMode}
             onChange={e => { setDirty(true); setExecutionMode(e.target.value); }}
             className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
             <option value="simulation">Simulation</option>
-            <option value="demo">Demo (Testnet)</option>
+            <option value="demo">Demo + Simulation</option>
+            <option value="demo_only">Demo Only (Binance/OKX/Bybit)</option>
           </select>
         </div>
       </div>

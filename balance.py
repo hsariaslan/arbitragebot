@@ -504,7 +504,7 @@ class BalanceTracker:
             amt = external_rebal
             self.usdt[external_source] -= amt + external_cost
 
-            if self._execution_mode == "demo":
+            if self._execution_mode in ("demo", "demo_only"):
                 # D-17: In demo mode, funds transit through network
                 self._in_transit.append(InTransitFund(
                     amount=amt,
