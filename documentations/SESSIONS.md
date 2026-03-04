@@ -21,7 +21,7 @@ Tracking session performance over time to identify patterns, optimal conditions,
 
 **Date**: 2026-03-03, 03:52 - 20:20 UTC (16h 28m)
 **Capital**: $3,000
-**Version**: v0.15.2-alpha → v0.15.3-alpha (pre-slippage simulation)
+**Version**: v0.18.0-alpha (pre-slippage simulation)
 **VPS**: LightNode Bangkok (single monolithic)
 
 #### Summary
@@ -370,34 +370,202 @@ Average freshness ranged 10,528ms to 19,883ms. Max freshness peaked at 118,786ms
 
 ---
 
+### Session #3 — 2026-03-04 (Capital Concentration Bottleneck)
+
+**Date**: 2026-03-04, 01:27:24 - 03:05:16 UTC (1h 38m)
+**Capital**: $1,000 (reduced from $3,000 — testing smaller capital)
+**Version**: v0.20.0-alpha (post-Bybit fix)
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | 1h 38m |
+| Total Trades | 283 |
+| Trading PnL | $21.31 |
+| Transfer Fees | $3.87 (external: $3.60) |
+| Cashback | $0.72 (credited: $0.10, pending: $0.62) |
+| **Net Profit** | **$17.54** |
+| **$/hr** | **$11.06** |
+| Portfolio Growth | $1,006 → $1,018 (+1.2%) |
+| Errors | 0 |
+| SIZE_ZERO Events | 2,493 |
+| Phantom Spreads Filtered | 381 |
+| One-Legged Failures (sim) | 6 ($0.01 cost) |
+| Position Cap Skips | 228 |
+| Rebalance EMPTY | 718 |
+| Rebalance BLOCKED | 3 (score_gate) |
+| EVD_DEMOTED | 95 |
+
+#### Active Symbols
+
+**3 symbols activated** after 60s discovery, but only 1 survived:
+
+| Symbol | Activated | Demoted | Duration | Trades | Net Profit | Notes |
+|--------|-----------|---------|----------|--------|------------|-------|
+| STRKUSDT | 01:28:24 | — | Full session (1h37m) | 263 | ~$17 | strong tier (score ~0.28-0.30) |
+| AXSUSDT | 01:28:24 | 01:54:30 | 26 min | 20 | ~$0.50 | Thin margins (0.042% avg net) |
+| DOTUSDT | 01:38:25 | 02:02:32 | 24 min | 0 | $0 | Expanded, never traded, score faded |
+
+**3 candidates REJECTED at activation**: FETUSDT (fading, recent_freq=0.0%), SNXUSDT (fading), BTCUSDT (fading). All had high initial scores during discovery but were transient spikes.
+
+**Post-demotion**: Only STRKUSDT remained active for the final 63 minutes. AXSUSDT and DOTUSDT re-appeared as expansion candidates near session end but hadn't passed stability checks.
+
+#### Exchange Pair Breakdown
+
+| Route (Buy→Sell) | Trades | Est. Profit | Avg Net% | Notes |
+|-------------------|--------|------------|----------|-------|
+| STRKUSDT Bitfinex→OKX | 165 | ~$13.00 | ~0.80% | Primary route |
+| STRKUSDT MEXC→OKX | 67 | ~$1.50 | ~0.14% | Secondary (MEXC 0.05% fee) |
+| STRKUSDT Bitfinex→MEXC | 24 | ~$1.50 | ~0.65% | |
+| AXSUSDT Gate.io→MEXC | 12 | ~$0.30 | ~0.04% | Before demotion |
+| AXSUSDT Gate.io→Bitget | 8 | ~$0.20 | ~0.04% | Before demotion |
+| STRKUSDT Bitfinex→Bitget | 3 | ~$0.20 | ~0.70% | Occasional |
+| STRKUSDT KuCoin→OKX | 2 | ~$0.05 | ~0.10% | Rare |
+| STRKUSDT Bitfinex→KuCoin | 2 | ~$0.15 | ~0.70% | Rare |
+
+**Bitfinex as buyer: 194/283 trades (68.6%)** — lower % than S1/S2 because MEXC→OKX trades (67 trades) don't use Bitfinex. STRK still dominates profit.
+
+#### Exchange Status — All 8 Healthy (Bybit Fixed!)
+
+| Exchange | Symbols | Msg Rate | Avg Freshness | Status |
+|----------|---------|----------|---------------|--------|
+| MEXC | 60/60 | 617/s | 30ms | Excellent |
+| Bybit | 59/60 | 503/s | 149ms | **Healthy (FIXED)** |
+| Bitget | 60/60 | 356/s | 75ms | Excellent |
+| Binance | 59/60 | 317/s | 225ms | Good |
+| OKX | 60/60 | 321/s | 484ms | Good |
+| Gate.io | 60/60 | 274/s | 354ms | Good |
+| KuCoin | 60/60 | 505/s | 503ms | Good |
+| Pionex | 58/60 | 74/s | 976ms | Disabled (data only) |
+| Bitfinex | 34/60 | 2/s | 12.5s | Event-driven (normal) |
+
+**Bybit fully operational** — zero errors, zero disconnections, 503 msgs/s, 149ms freshness. Session #2's Bug #1 (`orderbook.5` → `orderbook.50`) is confirmed fixed. Bybit was evaluated for trades and appeared in EVD_DEMOTED pair selections but wasn't in dominant pairs for STRKUSDT this session.
+
+**Pionex disabled** — connected and receiving data (58 symbols) but excluded from active trading set via Fee Management settings.
+
+#### $/hr Progression
+
+| Time | Duration | Trades | Net | $/hr |
+|------|----------|--------|-----|------|
+| 01:32 | 5m | ~40 | $2.36 | $28.36 |
+| 01:42 | 15m | ~110 | $3.72 | $14.88 |
+| 01:57 | 30m | ~170 | $6.63 | $13.26 |
+| 02:27 | 1h | ~235 | $12.72 | $12.72 |
+| 03:05 | 1h38m | 283 | $17.54 | $11.06 |
+
+$/hr declined steadily from $28.36 → $11.06 as seller exchanges ran dry and trades became impossible. This is the capital concentration bottleneck — detailed below.
+
+#### Balance Snapshots
+
+| Time | Bitfinex | MEXC | OKX | Gate.io | Bybit | Others | Total |
+|------|----------|------|-----|---------|-------|--------|-------|
+| 01:28 | $424 | $24 | $385+crypto | $28 | $0 | $0 | $1,006 |
+| 01:33 | $421 | $3 | $365+crypto | $25 | $0 | $0 | $1,006 |
+| 01:43 | $501 | $65 | $314 | $73 | $0 | $0 | $1,008 |
+| 01:58 | $733 | $79 | $139 | $0 | $0 | $0 | $1,010 |
+| 02:13 | $902 | $42 | $59 | $0 | $0 | $0 | $1,013 |
+| 02:28 | $993 | $7 | $13 | $0 | $0 | $0 | $1,015 |
+| 02:43 | $1,010 | $3 | $3 | $0 | $0 | $0 | $1,016 |
+| 03:03 | $1,013 | $2 | $3 | $0 | $0 | $0 | $1,018 |
+
+**Capital concentration timeline**: By 30 minutes, Bitfinex held 73% of capital. By 1 hour, 98%. By session end, 99.5% ($1,013 of $1,018). Seller exchanges (OKX, MEXC) were completely depleted.
+
+#### Transfer Activity
+
+- **Hub consolidation**: 10 consolidation rounds moved idle capital to Bitfinex
+- **Post-demotion**: AXSUSDT demotion freed $49.87, consolidated $600.22 to Bitfinex. DOTUSDT demotion sold $9.90 via Bitfinex (saved 0.025% taker).
+- **Transfer fee breakdown**: Gate.io $1.00 (2× $0.50), OKX $0.10+, MEXC $0.00, Bitget $0.001. Total $3.87.
+- **Transfer fee ratio**: 18.1% of gross profit ($3.87/$21.31) — much higher than S1's 3.4%. Smaller capital amplifies fixed transfer costs.
+
+#### The Capital Concentration Problem
+
+This is the critical bottleneck limiting profitability:
+
+**Mechanism**: Bitfinex is the dominant buyer for STRKUSDT (0% fee). Each trade: Bitfinex sends USDT to buy crypto → crypto ships to seller exchange → seller sells crypto → seller accumulates USDT → rebalancer moves USDT back to Bitfinex. But the rebalancer can't keep up:
+
+1. **USDT flows one-way to Bitfinex**: Bitfinex buys = USDT deducted from Bitfinex. Seller sells = USDT added to seller. Then rebalancer consolidates seller USDT back to Bitfinex. Net: USDT concentrates on Bitfinex.
+2. **Crypto depletes on sellers**: Each sell reduces crypto on the seller exchange. The only way to replenish is external crypto transfer (Bitfinex→seller) or internal buy on seller. But both require capital on the seller side.
+3. **Death spiral**: Once sellers run dry, trades can't execute → no profit → no new capital flowing to sellers → permanently stuck.
+
+**Evidence**:
+- 2,493 SIZE_ZERO events (trade_size=0 because `crypto_val < min_trade` on seller)
+- 718 Rebalance EMPTY events (tried to route funds, no viable paths)
+- 228 position cap skips
+- $/hr dropped from $28.36 (5 min) to $11.06 (1h38m) — a 61% decline
+
+**Why this wasn't a problem in Session #1**: $3,000 capital distributed across 7 seller exchanges (OKX, MEXC, Bybit, Bitget, KuCoin, Gate.io, Binance) with very_strong tier allowing 3 sellers. More capital per seller = longer before depletion. The session ran 16h38m before similar starvation effects appeared.
+
+**With $1,000 capital**: Only ~$100-200 per seller exchange, depleted within 20-30 minutes. The session effectively became single-symbol, single-route by the 30-minute mark.
+
+#### Anomaly Protection
+
+Not triggered. Clean session — no pauses, warnings, emergency sells, or symbol blocks.
+
+#### Simulation Realism
+
+All 4 features working correctly:
+- **Spread persistence** (1 tick): 381 phantom spreads filtered
+- **EVD seller penalty**: 95 demotions (Bitfinex deprioritized as seller for DOTUSDT)
+- **One-legged failures**: 6 simulated, $0.01 total cost (5/6 on Bitfinex buy side = $0 unwind)
+- **Position cap**: 228 skips
+
+#### Key Takeaways
+
+1. **Bybit is fixed** — fully operational, zero issues
+2. **$1,000 capital is viable** but hits concentration bottleneck fast (~30 min)
+3. **STRK remains the profit engine** — persistent structural spread, Bitfinex→OKX dominant
+4. **Transfer fee ratio is brutal at small capital**: 18.1% vs 3.4% at $3,000. Fixed transfer costs ($0.10-$0.50) matter more when gross profit is $21 vs $1,372.
+5. **Hub consolidation fights crypto rebalancing** — consolidation pulls USDT from active sellers (OKX/MEXC) back to Bitfinex, while crypto rebalancing simultaneously pushes crypto from Bitfinex to those same sellers. See "Capital Concentration Root Cause" below.
+
+#### Capital Concentration Root Cause
+
+**The consolidation is counterproductive for active seller exchanges.**
+
+The cycle:
+1. **Trade**: Bitfinex buys STRK (USDT→crypto). OKX sells STRK (crypto→USDT).
+2. **Crypto rebalance** (30s cooldown): Bitfinex ships crypto to OKX ($0 fee) so OKX can sell again.
+3. **Hub consolidation** (10min eval cycle): Sees OKX has "idle" USDT → pulls it back to Bitfinex ($0.10 fee).
+4. **Net effect**: USDT roundtrips Bitfinex→(crypto)→OKX→(consolidation)→Bitfinex, paying $0.10 each consolidation cycle. Capital oscillates but trends toward Bitfinex.
+
+**Evidence from session**: 174 crypto transfers (Bitfinex→sellers, $0 fee) vs 10 consolidation rounds (sellers→Bitfinex, $0.10-$0.50 fee). The system is actively working — but consolidation creates unnecessary friction.
+
+**Root cause**: `consolidate_to_bitfinex()` has `active_buyer_exchanges` protection but NO protection for active seller exchanges. OKX/MEXC are active sellers (receiving USDT from every trade), yet their USDT gets consolidated because they're not in `active_buyer_exchanges`.
+
+**Solution**: Add `active_seller_exchanges` parameter to `consolidate_to_bitfinex()`. Keep a buffer on active sellers (e.g., `trade_amount × 3`) so they can fund internal buys when crypto rebalance is on cooldown. Active sellers that haven't had a trade in 10+ min can still be consolidated. See Decision Log entry for implementation details.
+
+---
+
 ## Pattern Tracking
 
 ### Confirmed Profitable Patterns
 
 | Pattern | First Seen | Sessions | Avg $/hr | Notes |
 |---------|-----------|----------|----------|-------|
-| Bitfinex buyer + altcoin strong/very_strong | Session #1 | 2 | $94.93 | STRK. Persistent structural spread. S1: 16h/$81.91/hr, S2: 18m/$107.95/hr |
+| Bitfinex buyer + altcoin strong/very_strong | Session #1 | 3 | $66.97 | STRK. S1: 16h/$81.91/hr ($3k), S2: 18m/$107.95/hr ($3k), S3: 1h38m/$11.06/hr ($1k) |
 
 ### Exchange Performance Summary
 
 | Exchange | Role | Sessions as Top Role | Notes |
 |----------|------|---------------------|-------|
-| Bitfinex | Buyer | 2/2 | 0% fee + $0 withdrawals = dominant buyer. S1: 89% trades, S2: STRK buyer |
-| OKX | Seller | 2/2 | S1: most trades (1,348), $426 profit. S2: secondary STRK seller |
-| MEXC | Seller/Buyer | 2/2 | S1: highest avg ($0.3683). S2: primary STRK seller + AXS buyer |
-| Bybit | Seller/Dead | 1/2 | S1: 760 trades, $252.86. S2: **DEAD** (Bug #1: invalid orderbook.5 channel) |
-| Bitget | Seller | 1/2 | S1: 496 trades, consistent. S2: $0 allocated (not in dominant pairs) |
-| KuCoin | Seller | 1/2 | S1: 344 trades. S2: $0 allocated |
-| Gate.io | Seller | 2/2 | S1: limited by cap. S2: primary AXS seller |
-| Binance | Minimal | 1/2 | S1: 19 trades. S2: $0 allocated |
-| Pionex | Not seen | 0/2 | Never in any trades across both sessions |
+| Bitfinex | Buyer | 3/3 | 0% fee + $0 withdrawals = dominant buyer. S1: 89%, S2: STRK buyer, S3: 68.6% |
+| OKX | Seller | 3/3 | S1: most trades (1,348). S2: secondary STRK seller. S3: primary STRK seller (165 trades) |
+| MEXC | Seller/Buyer | 3/3 | S1: highest avg ($0.3683). S2: primary STRK seller. S3: secondary STRK buyer+seller |
+| Bybit | Seller/Fixed | 1/3 | S1: 760 trades, $252.86. S2: DEAD (Bug #1). S3: **Fixed, healthy**, but not in dominant pairs |
+| Bitget | Seller | 1/3 | S1: 496 trades. S2-S3: $0 allocated (not in dominant pairs) |
+| KuCoin | Seller | 1/3 | S1: 344 trades. S2-S3: minimal/no allocation |
+| Gate.io | Seller | 2/3 | S1: limited by cap. S2: AXS seller. S3: AXS seller (before demotion) |
+| Binance | Minimal | 1/3 | S1: 19 trades. S2-S3: $0 allocated |
+| Pionex | Not seen | 0/3 | Disabled in Fee Management. Never traded across all sessions |
 
 ### Symbol Performance History
 
 | Symbol | Sessions Active | Best $/hr | Avg $/hr | Typical Tier | Best Buyer | Notes |
 |--------|----------------|-----------|----------|-------------|------------|-------|
-| STRKUSDT | 2 | $107.95 | $94.93 | very_strong | Bitfinex | Persistent structural spread, 16h+ sustained (S1), 18m (S2) |
-| AXSUSDT | 1 | $107.95* | — | normal | MEXC | Thin margins (0.04% avg net). *$/hr shared with STRK |
+| STRKUSDT | 3 | $107.95 | $66.97 | strong-very_strong | Bitfinex | Persistent structural spread. S1: 16h, S2: 18m, S3: 1h37m. $1k capital bottlenecks at ~30min |
+| AXSUSDT | 2 | $107.95* | — | normal | MEXC/Gate.io | Thin margins (0.04% avg net). Demoted both sessions. *$/hr shared with STRK |
+| DOTUSDT | 1 | — | — | normal | Bitfinex | S3: Expanded then demoted after 24m, 0 trades. Score faded. |
 
 ---
 
@@ -493,3 +661,33 @@ Added `IS_EVENT_DRIVEN` class constant to `BaseFetcher` (default `False`), overr
 
 **Before**: `freshness: avg=13998ms max=118786ms` — looks broken
 **After**: `data_age: avg=14.0s max=118.8s (event-driven)` — clearly expected behavior
+
+### 2026-03-04: Capital Concentration — Consolidation vs Active Sellers
+
+**Decision: Protect active seller exchanges from hub consolidation.**
+
+Session #3 revealed that `consolidate_to_bitfinex()` counteracts the crypto rebalancing system. The consolidator pulls USDT from active seller exchanges (OKX, MEXC) back to Bitfinex every eval cycle, while crypto rebalancing simultaneously pushes crypto from Bitfinex to those same sellers. This creates a wasteful roundtrip ($0.10 per OKX consolidation) and starves sellers during cooldown gaps.
+
+**Evidence from Session #3**:
+- 174 crypto transfers Bitfinex→sellers ($0 fee each)
+- 10 consolidation rounds sellers→Bitfinex ($0.10-$0.50 fee)
+- $3.87 total transfer fees (18.1% of $21.31 gross — vs 3.4% at $3,000 capital in S1)
+- Capital oscillated but trended to Bitfinex: $424→$162→$852→$162→$1,013
+- $/hr dropped 61% (from $28.36 at 5min to $11.06 at 1h38m) as sellers dried up
+
+**Root cause**: `consolidate_to_bitfinex()` accepts `active_buyer_exchanges` but has no concept of active sellers. All non-buyer USDT is treated as idle and consolidated.
+
+**Fix**: Add `active_seller_exchanges` parameter to `consolidate_to_bitfinex()`. The optimizer already tracks dominant sellers per symbol via `_compute_dominant_pairs()` — pass these to consolidation. Keep `trade_amount × 3` buffer on active sellers that traded recently (same logic as active buyers). Active sellers idle > `idle_threshold` can still be consolidated.
+
+**Why this works**: When Bitfinex is buyer and OKX is seller:
+- OKX receives USDT from each sell → buffer protects this USDT from consolidation
+- When OKX needs crypto, rebalancer ships from Bitfinex ($0 fee)
+- OKX can also use its buffered USDT for internal buy (Option 2 in `_rebalance_crypto`) if crypto transfer is on cooldown
+- Net: fewer consolidation roundtrips, less wasted fees, steadier trading flow
+
+**Additional improvements to consider**:
+1. **Reduce crypto rebalance cooldown for $0-fee transfers**: Currently 30s for all. Bitfinex→anywhere is $0 — could use 10-15s cooldown for free transfers.
+2. **Increase crypto transfer amount**: Currently `trade_amount × 3` ($90). For persistent spreads, sending larger batches reduces rebalance frequency and gaps.
+3. **Skip consolidation of recently-received USDT on sellers**: Seller just got USDT from a trade 5s ago — don't consolidate it for at least `idle_threshold`.
+
+**Revisit after**: Next session with the fix deployed. Measure: $/hr over time (should be flatter), consolidation count (should decrease), total transfer fees (should decrease).

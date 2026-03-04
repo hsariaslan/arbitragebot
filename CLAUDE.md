@@ -528,6 +528,104 @@ Limits accumulated crypto value per symbol on buyer exchanges, preventing excess
 
 All counters (`_phantom_spread_count`, `_event_driven_seller_penalties`, `_event_driven_seller_demoted`, `_one_leg_sim_count`, `_one_leg_sim_cost`, `_position_cap_skips`) are persisted via `to_state_dict()` / `from_state_dict()`. `_pending_opportunities` resets on restart (stateless — fresh detection).
 
+## Anomaly Protection
+
+3-layer trading safety system that detects performance decline and takes targeted action. Per-symbol blocking for isolated issues, global pause only for systemic problems. All settings configurable via dashboard Settings, hot-applied without restart. Separate `AnomalyProtection` class in `anomaly_protection.py`.
+
+### Layer 1: Circuit Breaker (Rolling P&L) — Global
+
+Detects systemic P&L decline across all symbols using a rolling window of `(timestamp, profit)` tuples.
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| `circuit_breaker_window` | 900 (15min) | 60–7200 | Rolling window in seconds |
+| `circuit_breaker_threshold` | -5.0 ($) | -1000–0 | Pause threshold (for $1000 capital: -0.5%) |
+| `circuit_breaker_resume_pct` | 0.5 | 0.1–1.0 | Resume when P&L > threshold × resume_pct |
+| `circuit_breaker_cooldown` | 300 (5min) | 30–3600 | Min wait before auto-resume |
+
+### Layer 2: Drawdown Protection (Peak-to-Trough) — Global
+
+Tracks portfolio value vs session peak. Pauses on significant decline, emergency sell-all on severe decline.
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| `drawdown_threshold_pct` | 5.0% | 0.5–20.0 | Pause threshold ($50 on $1000) |
+| `drawdown_resume_pct` | 3.0% | 0.1–10.0 | Auto-resume when recovered |
+| `drawdown_emergency_mult` | 2.0 | 1.5–5.0 | Emergency sell at threshold × mult (10%) |
+
+Emergency sell-all: iterates all crypto positions, sells at current price minus taker fee, credits USDT. Requires manual resume from dashboard.
+
+### Layer 3: Per-Symbol Loss Streak — Targeted
+
+Blocks individual symbols after consecutive losses. Other profitable symbols keep trading.
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| `symbol_loss_streak_threshold` | 4 | 2–20 | Consecutive losses to trigger block |
+| `symbol_loss_streak_cooldown` | 300 (5min) | 60–3600 | Block duration (streak resets after) |
+
+### Warning Level (Pre-Pause)
+
+Before circuit breaker triggers full pause, reduces trade size to 0.5× when rolling P&L approaches threshold.
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| `warning_pnl_pct` | 0.5 | 0.1–1.0 | Warning at threshold × pct (-$2.50 default) |
+
+Master toggle: `anomaly_protection_enabled` (bool, default true).
+
+### Manual Stop/Start
+
+Operator toggle in Settings → Danger Zone, independent from anomaly protection. Persisted in state (survives deploys). "Stop Trading" button with confirmation prompt, "Start Trading" button to resume. Logged as `[Monitor] MANUAL_STOP/MANUAL_START by operator`. `_manual_stop_timestamp` tracks when trading was stopped (used for duration display in header tooltip).
+
+### Hard Stop (Convert All Crypto to USDT)
+
+One-click operator action in Danger Zone to liquidate all crypto positions across all exchanges. Two modes:
+- **Transfer to Bitfinex ON** (default): Crypto transferred to Bitfinex and sold at 0% taker. Symbols not available on Bitfinex sold locally. USDT accumulates on Bitfinex. Enables Distribute button.
+- **Transfer to Bitfinex OFF**: Sell all crypto locally on each exchange (pays taker fee per exchange).
+
+Red confirmation modal with text input — must type "hard stop" exactly to enable confirm button. Result displayed in modal (positions sold, gross, fees, net). Backend: `_hard_stop_all()` in `dashboard_server.py`, uses `force_sell_crypto_via_bitfinex()` in `balance.py` (bypasses cooldowns/budget). Logged as `[Monitor] HARD_STOP_SELL`.
+
+### Distribute USDT from Bitfinex
+
+Score-weighted distribution of Bitfinex USDT to profitable exchanges. **Contextually enabled/disabled** via `_distribute_enabled` flag:
+- **Enabled when**: execution mode changed to "live", or Hard Stop completes with Transfer to Bitfinex ON
+- **Disabled when**: distribution completes, or bot restarts (one-shot)
+- **Disabled by default**: button greyed out until a trigger enables it
+
+Distribution strategy: uses optimizer's active symbols and dominant buyer/seller exchanges for score-weighted allocation. Falls back to even split if no active symbols. Respects Bitfinex reserve. Free transfer ($0 Bitfinex withdrawal). Red confirmation modal — must type "distribute usdt" to confirm. Backend: `_distribute_from_bitfinex()` in `dashboard_server.py`. Logged as `[Monitor] DISTRIBUTE`.
+
+### Comprehensive Settings Logging
+
+`_log_all_settings(reason, old_settings=None)` in `dashboard_server.py` logs ALL settings with `[Settings]` component prefix:
+- **Session start**: Called after DashboardServer creation in `run.py`
+- **Settings change**: Called at end of `_apply_settings()` with before/after diff
+
+Multi-line structured output includes: trade amount, adaptive mode, symbol limits, scoring params, rebalance gates, net P&L gate, simulation realism, anomaly thresholds, Bitfinex reserve, fee configs (per-exchange effective rates), execution mode, and changed values diff.
+
+### Diagnostic Logging
+
+All events use `[Anomaly]` component prefix. Every trigger includes multi-line state snapshots: rolling P&L, loss rate, top losers/winners, portfolio breakdown, crypto exposure, per-symbol recent trades. Events stored in deque (maxlen=100), persisted in state, viewable in dashboard. Session summary: `anomaly=Xp/Xw/Xsb` (pauses/warnings/symbol-blocks).
+
+### Integration Points
+
+- **monitor.py**: `_anomaly` instance, `_anomaly_paused` and `_manual_stopped` flags. Main loop checks `should_block_trading`. `_tick()` checks `should_emergency_sell` and `is_symbol_blocked(sym)`. `_compute_trade_size()` applies `trade_size_multiplier`. `record_trade()` called after each trade.
+- **dashboard_server.py**: `update_portfolio_value()` called in `_build_state()`. Hot-apply for all 11 settings. Message handlers: `anomaly_resume`, `manual_stop`, `manual_start`, `hard_stop`, `distribute_from_bitfinex`. `_log_all_settings()` for comprehensive logging.
+- **Dashboard**: Header shows anomaly indicators (STOPPED/EMERGENCY/PAUSED/WARNING/Protected) with rich hover tooltips showing diagnostics (rolling P&L, thresholds, loss rate, blocked symbols, session counters). Settings page has live stats, blocked symbols display, all 11 configurable inputs, and Danger Zone (Hard Stop, Distribute, Stop/Start, Restart).
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `anomaly_protection.py` | `AnomalyProtection` class — all 3 layers, state persistence, diagnostic logging |
+| `config.py` | 11 anomaly protection constants |
+| `settings.py` | Default settings for anomaly protection |
+| `monitor.py` | Integration: pause checks, emergency sell, per-symbol blocking, trade recording |
+| `dashboard_server.py` | Hot-apply, portfolio update, message handlers, `_hard_stop_all()`, `_distribute_from_bitfinex()`, `_log_all_settings()` |
+| `balance.py` | `force_sell_crypto_via_bitfinex()` — bypasses cooldowns/budget for Hard Stop |
+| `dashboard/src/components/Header.tsx` | Anomaly status indicators with rich hover tooltips |
+| `dashboard/src/components/SettingsPage.tsx` | Anomaly protection settings UI, Danger Zone (Hard Stop, Distribute, Stop/Start, Restart) |
+
 ## Dashboard
 
 React/TypeScript SPA served by the Python backend via WebSocket. Uses `HashRouter` for client-side URL routing (no nginx config needed). Full-width layout optimized for 1920px screens.
@@ -539,7 +637,7 @@ All pages have their own URL routes (`/#/`, `/#/rankings`, `/#/settings`, `/#/lo
 - **Dashboard** — Real-time overview: header with persistent uptime (hover for downtime log), stats bar (portfolio, trades, profit, fees, transfers). Portfolio P&L (sim + demo), trade/transfer stats, demo exchange status, symbol rankings with dominant exchange pairs (e.g. `BIN→KUC`) and live Cur Net% column, balance table, price grid, demo portfolio comparison, recent trades/transfers, rotation log. Fully responsive: 2×2 stats grid, horizontal-scroll tables, bottom tab nav on mobile.
 - **Rankings** — Deep analysis: full rolling rankings table with Mult/Trade $ columns, top-10 charts (by score, frequency, $/hr), historical session stats with Strong/V.Strong columns and duration, lifecycle funnel, exchange rankings, pair analysis, trend analysis, watchlist. Performance charts section (cumulative P&L, hourly P&L, exchange profit contribution) using recharts. Markdown export ("Copy MD") for sharing data with Claude. All tables horizontal-scroll on mobile.
 - **Settings** — Three sub-tabs (routed: `/settings`, `/settings/fees`, `/settings/transfers`). Each setting has a `?` tooltip icon with detailed description (hover on desktop, tap on mobile):
-  - **General**: Configure all parameters: trade amount (fixed $ or % of capital with auto-scaling), capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: "Restart Bot" button clears saved state and starts fresh with configured capital. Form grids stack single-column on mobile.
+  - **General**: Configure all parameters: trade amount (fixed $ or % of capital with auto-scaling), capital, min net profit %, rebalance cooldown, ROI horizon, adaptive mode toggle, auto-rotate, symbol limits, IP whitelist. **Danger Zone**: Stop/Start Trading toggle, "Hard Stop" (convert all crypto to USDT with Bitfinex optimization), "Distribute USDT from Bitfinex" (contextually enabled, score-weighted allocation), "Restart Bot" (clears state, fresh start). Hard Stop and Distribute require typing confirmation phrase. Form grids stack single-column on mobile.
   - **Fee Management**: Per-exchange fee configuration — **enable/disable checkbox** per exchange (disabled = excluded from trading/rebalancing, hot-applied), base taker rate, token discount toggle+%, fee model (received/spent/token), mechanism (instant/rebate/tier), referral cashback toggle+%+settlement delay, zero-fee pairs. Shows computed effective rates with formula breakdown. Cashback stats (pending/credited). Real mode banner. Save button with 5s cooldown. Hot-applied without restart.
   - **Transfer Fees**: Per-exchange withdrawal fee configuration — per-network fees (flat/percentage/conditional), preferred network selector (auto=cheapest), enable/disable individual networks. Shows effective fee and cheapest network per exchange. Save button with 5s cooldown. Hot-applied without restart.
 - **Logs** — Unified log viewer with two sub-tabs:
