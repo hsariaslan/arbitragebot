@@ -178,33 +178,226 @@ Even the conservative estimate ($38/hr) on $3,000 capital is extraordinary.
 
 ---
 
+### Session #2 — 2026-03-03 (Short Diagnostic Run + Critical Bybit Bug)
+
+**Date**: 2026-03-03, 22:04:59 - 22:22:45 UTC (~18 min)
+**Capital**: $3,000
+**Version**: v0.19.0-alpha (post-slippage simulation, post-Zurich proxy)
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+**Purpose**: First run after deploying slippage simulation, Zurich proxy, and persistent uptime tracking
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | 17m 46s |
+| Total Trades | 194 |
+| Trading PnL | $29.42 |
+| Transfer Fees | $1.27 (external: $0.70) |
+| Cashback | $0.78 (credited: $0.00, pending: $0.78) |
+| **Net Profit** | **$28.16** |
+| **$/hr** | **$107.95** |
+| Portfolio Growth | $3,000 → $3,026 (+0.87%) |
+| Errors | 0 |
+| SIZE_ZERO Events | 678 (cumulative ticks) |
+
+#### Active Symbols
+
+**2 symbols activated** after 60s discovery:
+
+| Symbol | Score | Tier | Avg Net% | Freq% | Dominant Pair |
+|--------|-------|------|----------|-------|---------------|
+| STRKUSDT | 0.5257 | very_strong | 0.928% | 56.7% | Bitfinex → MEXC + OKX |
+| AXSUSDT | 0.0584 | normal | 0.063% | 93.3% | MEXC → Gate.io |
+
+**3 candidates REJECTED at activation:**
+- FETUSDT: score 0.2391 but fading (peaked at 1.304, dropped 82%), `recent_freq=0.0%`
+- BTCUSDT: score 0.0152, cliff_drop from peak 0.0545
+- SOLUSDT: score 0.0139, cliff_drop from peak 0.0563
+
+STRK continued its Session #1 pattern — Bitfinex as buyer with 0% fees, structural spread. AXS was a new addition with thin margins.
+
+#### Exchange Status
+
+| Exchange | Symbols | First Data | Msg Rate | Avg Freshness | Status |
+|----------|---------|------------|----------|---------------|--------|
+| MEXC | 60/60 | 521ms | 617/s | 52ms | Best data quality |
+| KuCoin | 60/60 | 98ms | 450/s | 700ms | Healthy |
+| Bitget | 60/60 | 103ms | 335/s | 120ms | Healthy |
+| OKX | 60/60 | — | 273/s | 740ms | Healthy |
+| Binance | 59/60 | 8ms | 272/s | 460ms | Healthy (no HYPEUSDT) |
+| Gate.io | 60/60 | 130ms | 248/s | 700ms | Healthy |
+| Pionex | 58/60 | 5,739ms | 70/s | 930ms | Slow connect, low rate |
+| Bitfinex | 36/60 | 955ms | 2/s | 13,500ms | Event-driven (see analysis below) |
+| **Bybit** | **0/60** | **Never** | **0/s** | **N/A** | **DEAD — see Bug #1** |
+
+**7 of 9 exchanges functional**. Bybit completely non-functional. Bitfinex delivered data but at low frequency (by design).
+
+#### $/hr Progression
+
+| Time | Trades | Net | $/hr |
+|------|--------|-----|------|
+| 0h05m | 40 | $15.50 | $182.44 |
+| 0h10m | 126 | $24.20 | $140.74 |
+| 0h15m | 184 | $28.16 | $107.95 |
+
+$/hr decreased over time (common for short sessions as initial high-spread trades are followed by lower-spread ones).
+
+#### Balance Snapshots
+
+| Time | Bitfinex | MEXC | OKX | Gate.io | Others | Total |
+|------|----------|------|-----|---------|--------|-------|
+| 22:11 | $1,178 | $1,335 | $285 | $218 | $0 | $3,016 |
+| 22:16 | $1,425 | $514 | $627 | $459 | $0 | $3,026 |
+| 22:22 | $1,127 | $177 | $812 | $910 | $0 | $3,026 |
+
+Capital concentrated on 4 exchanges only (Bitfinex, MEXC, OKX, Gate.io). Binance, Bitget, Bybit, KuCoin, Pionex all had $0 — no capital allocated because they weren't in the dominant pairs for STRK or AXS.
+
+#### Trade Breakdown by Route
+
+| Route | ~Trades | Net% Range | Notes |
+|-------|---------|------------|-------|
+| STRKUSDT Bitfinex→MEXC | ~65 | 0.025–0.998% | Primary STRK route |
+| STRKUSDT Bitfinex→OKX | ~20 | 0.026–0.984% | Secondary STRK route |
+| AXSUSDT MEXC→Gate.io | ~90 | 0.024–0.107% | Primary AXS route, thin margins |
+| AXSUSDT OKX→Gate.io | ~19 | 0.015–0.040% | Secondary AXS route |
+
+STRK generated the bulk of profit (~$25 of $29.42) despite fewer trades. AXS had high frequency but very thin margins (avg 0.04% net).
+
+---
+
+### Session #2 — Bugs Found
+
+#### Bug #1: Bybit Dead — Invalid WebSocket Channel (CRITICAL)
+
+**Severity**: Critical — Bybit produced zero data for the entire session
+**Root Cause**: `orderbook.5` is not a valid Bybit v5 Spot WebSocket channel
+
+**Symptoms**:
+- 35 reconnections in 18 minutes (one every ~30 seconds)
+- `Bybit(0)` in all discovery logs — zero symbols received data
+- Pattern: Connect → Subscribe → 30s silence → Staleness watchdog triggers → Reconnect → Repeat
+
+**Technical Details**:
+- File: `fetchers/bybit.py:50` — `args.append(f"orderbook.5.{s}")`
+- Bybit v5 Spot API valid depths: **1, 50, 200, 1000** (confirmed via [official docs](https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook))
+- `orderbook.5` does NOT exist — Bybit silently ignores the invalid subscription
+- Without orderbook data, the staleness watchdog (30s timeout) triggers reconnection endlessly
+- The docstring at line 37 said `orderbook.1` but the actual code used `orderbook.5` — a documentation/code mismatch
+
+**Fix**: Changed `orderbook.5` → `orderbook.50` in `fetchers/bybit.py`. Updated all docstrings and CLAUDE.md.
+
+**Impact**: Bybit (0.075% taker fee with MNT/BIT discount) was completely excluded from all trading. Given Session #1 showed Bybit as the 3rd most profitable seller (760 trades, $252.86 profit), this likely cost significant profit.
+
+**Lesson**: Always validate WebSocket subscription channels against official API documentation. Silent subscription failures are dangerous — the connection appears healthy but delivers no data.
+
+---
+
+#### Bug #2 (Non-bug): Bitfinex Data Staleness — Event-Driven by Design
+
+**Severity**: Informational — not a bug, but the latency metrics are misleading
+**Initial Concern**: Bitfinex showed ~14s average freshness, 2 msgs/s — appeared broken despite Zurich proxy
+
+**Investigation Results**:
+
+1. **Zurich proxy works perfectly**: Processing overhead is 0.01ms. The proxy relays every message immediately with no buffering.
+
+2. **Bitfinex ticker channel is event-driven**: Official docs state "After receiving the snapshot, you will receive updates upon any change." There is no fixed-interval push. No server-side throttle on outbound ticker data.
+
+3. **Bitfinex has ~70-100x less volume than Binance**: ~$225M/day vs ~$15-20B/day. Many alt coins have very sparse trading activity on Bitfinex — prices genuinely don't change for 10-20+ seconds.
+
+4. **Only 36/60 symbols subscribed successfully**: 24 symbols rejected as "symbol: invalid" (Bitfinex uses `tBTCUST` format, not all symbols have UST pairs). Active symbols further reduced to 32-34 at any given time (2-4 dormant).
+
+5. **Book channel also event-driven**: The `_BitfinexBookSubFetcher` subscribes with `freq: "F0"` (real-time) but only sends when order book levels change. On quiet symbols, book updates are equally sparse.
+
+6. **The "freshness" metric conflates data accuracy with data age**: A 14-second-old price that hasn't changed is still 100% accurate. The metric is designed to detect broken connections (like Bybit's 30s watchdog), not slow-moving markets.
+
+**Verdict**: Bitfinex data is not stale — it's accurate but infrequent. The 0% fee advantage far outweighs the slower update rate. No code fix needed for correctness.
+
+**Future improvement**: Consider Bitfinex-specific handling in the latency/freshness logging to avoid confusing metrics. Track "time since last price change" separately from "time since last message received."
+
+**Invalid Bitfinex Symbols (24)**: ICPUSDT, TRUMPUSDT, HBARUSDT, BNBUSDT, AXSUSDT, PENGUUSDT, WLDUSDT, WIFUSDT, RENDERUSDT, ONDOUSDT, ARUSDT, ALGOUSDT, PENDLEUSDT, TIAUSDT, FLOKIUSDT, WUSDT, GRTUSDT, ORDIUSDT, DYDXUSDT, OPUSDT, ATOMUSDT, INJUSDT, BCHUSDT, SNXUSDT
+
+---
+
+#### Bug #3 (Partial): Slippage Only Logged on 11/194 Trades
+
+**Severity**: Low — slippage system works correctly, but visibility is limited
+**Observation**: Only 11 trades (5.7%) showed `slip=` in logs, all involving OKX or Gate.io as buyer/seller
+
+**Investigation Results**:
+
+1. **Slippage is computed for ALL trades** with available depth data — it's just that for small trade sizes (~$30) on liquid books, the simulated slippage rounds to 0.0000%
+
+2. **Logging only shows non-zero slippage**: `monitor.py` uses `if actual_slippage > 0` — trades with zero simulated slippage are logged without the `slip=` field
+
+3. **All 9 exchanges have working depth implementations**: OKX (books5), Binance (@depth5), Bitget (books5), KuCoin (level2Depth5), Gate.io (order_book snapshot+delta), MEXC (protobuf depth), Pionex (DEPTH topic), Bitfinex (book channel)
+
+4. **Bybit had zero depth** due to Bug #1 — fixing the `orderbook.50` subscription will restore Bybit depth data
+
+5. **Slippage values when present**: STRK slippage range 0.0037–0.0109%, AXS range 0.0004–0.0008%. These are negligible for current trade sizes.
+
+**Verdict**: System working as designed. Small trade sizes ($30) on liquid books produce near-zero slippage. As trade sizes grow (adaptive sizing), slippage will become more visible and meaningful. No code change needed.
+
+---
+
+### Session #2 — Latency Analysis
+
+#### Per-Exchange Latency (60s intervals, averaged across session)
+
+| Exchange | Msgs/s | Avg Freshness | Max Freshness | Proc Time | Active/Total |
+|----------|--------|---------------|---------------|-----------|-------------|
+| MEXC | 617 | 52ms | 105ms | 0.01ms | 60/60 |
+| KuCoin | 450 | 700ms | 5,500ms | 0.02ms | 60/60 |
+| Bitget | 335 | 120ms | 200ms | 0.02ms | 60/60 |
+| OKX | 273 | 740ms | 7,500ms | 0.02ms | 60/60 |
+| Binance | 272 | 460ms | 2,600ms | 0.02ms | 59/60 |
+| Gate.io | 248 | 700ms | 7,000ms | 0.03ms | 60/60 |
+| Pionex | 70 | 930ms | 6,800ms | 0.01ms | 58/60 |
+| Bitfinex | 2 | 13,500ms | 118,786ms | 0.01ms | 33/60 |
+| Bybit | 0 | N/A | N/A | N/A | 0/60 |
+
+**Data quality tiers**:
+- **Excellent** (< 200ms freshness): MEXC, Bitget
+- **Good** (200ms–1s): Binance, OKX, KuCoin, Gate.io
+- **Acceptable** (1–2s): Pionex
+- **Event-driven** (10s+): Bitfinex (by design, not a bug)
+- **Dead**: Bybit (Bug #1)
+
+#### Bitfinex Freshness Over Time (17 data points)
+
+Average freshness ranged 10,528ms to 19,883ms. Max freshness peaked at 118,786ms (one dormant symbol hadn't updated in ~2 minutes). Active symbol count stable at 32-36. Message rate consistent at 2/s (105-155 msgs per 60s window). **No degradation trend** — Bitfinex data is stable but sparse.
+
+---
+
 ## Pattern Tracking
 
 ### Confirmed Profitable Patterns
 
 | Pattern | First Seen | Sessions | Avg $/hr | Notes |
 |---------|-----------|----------|----------|-------|
-| Bitfinex buyer + altcoin strong/very_strong | Session #1 | 1 | $81.91 | STRK. Persistent structural spread. 16h+ sustained. |
+| Bitfinex buyer + altcoin strong/very_strong | Session #1 | 2 | $94.93 | STRK. Persistent structural spread. S1: 16h/$81.91/hr, S2: 18m/$107.95/hr |
 
 ### Exchange Performance Summary
 
 | Exchange | Role | Sessions as Top Role | Notes |
 |----------|------|---------------------|-------|
-| Bitfinex | Buyer | 1/1 | 0% fee + $0 withdrawals = dominant buyer (89% of trades, 99.7% of profit) |
-| OKX | Seller | 1/1 | Most trades as seller (1,348), highest total profit ($426) |
-| MEXC | Seller/Buyer | 1/1 | Highest avg profit as seller ($0.3683), also secondary buyer (11%) |
-| Bybit | Seller | 1/1 | 3rd most trades (760), solid avg profit ($0.3327) |
-| Bitget | Seller | 1/1 | 4th most trades (496), consistent ($0.3185/trade) |
-| KuCoin | Seller | 1/1 | Moderate volume (344), $0.40 withdrawal fee |
-| Gate.io | Seller | 1/1 | Limited by $5/hr transfer cap, good avg ($0.3201) |
-| Binance | Minimal | 1/1 | Only 19 trades, rarely has STRK advantage |
-| Pionex | Not seen | 0/1 | Not in any trades this session |
+| Bitfinex | Buyer | 2/2 | 0% fee + $0 withdrawals = dominant buyer. S1: 89% trades, S2: STRK buyer |
+| OKX | Seller | 2/2 | S1: most trades (1,348), $426 profit. S2: secondary STRK seller |
+| MEXC | Seller/Buyer | 2/2 | S1: highest avg ($0.3683). S2: primary STRK seller + AXS buyer |
+| Bybit | Seller/Dead | 1/2 | S1: 760 trades, $252.86. S2: **DEAD** (Bug #1: invalid orderbook.5 channel) |
+| Bitget | Seller | 1/2 | S1: 496 trades, consistent. S2: $0 allocated (not in dominant pairs) |
+| KuCoin | Seller | 1/2 | S1: 344 trades. S2: $0 allocated |
+| Gate.io | Seller | 2/2 | S1: limited by cap. S2: primary AXS seller |
+| Binance | Minimal | 1/2 | S1: 19 trades. S2: $0 allocated |
+| Pionex | Not seen | 0/2 | Never in any trades across both sessions |
 
 ### Symbol Performance History
 
 | Symbol | Sessions Active | Best $/hr | Avg $/hr | Typical Tier | Best Buyer | Notes |
 |--------|----------------|-----------|----------|-------------|------------|-------|
-| STRKUSDT | 1 | $81.91 | $81.91 | very_strong | Bitfinex | Persistent structural spread, 16h+ sustained |
+| STRKUSDT | 2 | $107.95 | $94.93 | very_strong | Bitfinex | Persistent structural spread, 16h+ sustained (S1), 18m (S2) |
+| AXSUSDT | 1 | $107.95* | — | normal | MEXC | Thin margins (0.04% avg net). *$/hr shared with STRK |
 
 ---
 
@@ -231,3 +424,72 @@ After analyzing Session #1, we considered adding:
 **Action taken:** Fixed the expansion cost estimation bug (Bitfinex reserve was blocking valid expansions). No other exchange-specific changes.
 
 **Revisit when:** Multiple sessions confirm consistent patterns across different symbols and market conditions.
+
+### 2026-03-04: Bitfinex Data Staleness — Is It a Problem?
+
+**Decision: No. Bitfinex data is accurate but infrequent — by design.**
+
+After Session #2 showed Bitfinex averaging 2 msgs/s and 14s average freshness (vs MEXC's 617 msgs/s and 52ms), we investigated whether:
+- The Zurich proxy was causing delays
+- Our code was dropping messages
+- Bitfinex was throttling us
+
+**Findings:**
+1. Zurich proxy processes messages in 0.01ms — zero overhead, transparent relay
+2. Bitfinex official docs: "you will receive updates upon any change" — purely event-driven
+3. Bitfinex daily spot volume ~$225M vs Binance ~$15-20B (70-100x less)
+4. No server-side throttle on outbound ticker/book data
+5. 24/60 symbols rejected as invalid (`tSTRKUST` format — many alts don't have UST pairs)
+6. Low-volume alts genuinely don't trade for 10-20+ seconds
+
+**Verdict**: Bitfinex's 0% fee advantage (~0.05-0.10% per trade saved vs any other buyer) massively outweighs slower data. A 14s-old price that hasn't changed is 100% accurate. The bot already handles this correctly — when a spread appears, it trades; when data is stale, there's nothing to trade anyway.
+
+**Action needed**: Consider Bitfinex-specific handling in the freshness logging system. Current metrics conflate "data age" with "data staleness/inaccuracy" — misleading for event-driven exchanges. Bitfinex should not trigger the same freshness warnings as a broken connection would.
+
+### 2026-03-04: Bybit orderbook.5 — Silent Subscription Failure
+
+**Decision: Fix applied. Channel changed to `orderbook.50`.**
+
+Bybit v5 Spot API valid orderbook depths are: 1, 50, 200, 1000. `orderbook.5` does NOT exist. Bybit silently ignores invalid subscriptions without sending an error response, causing:
+- Zero data delivery → 30s staleness watchdog → reconnect → repeat endlessly
+- 35 reconnections in 18 minutes with zero data
+
+**Root cause**: Likely a copy-paste error from another exchange (Bitget/OKX use `books5`, which may have been confused with `orderbook.5`). The docstring at line 37 correctly said `orderbook.1` but the actual code used `orderbook.5` — the mismatch went unnoticed.
+
+**Lesson**: Always validate WebSocket channel names against official API docs. Test new exchange integrations with log-level monitoring of subscription responses. Consider adding subscription confirmation tracking (count confirmed vs attempted subscriptions).
+
+### 2026-03-04: Pionex Disabled — Was It Correct?
+
+**Decision: Yes. Pionex has real staleness, unlike Bitfinex.**
+
+After discovering Bitfinex's "staleness" was actually event-driven behavior (accurate but infrequent data), we investigated whether Pionex (~930ms avg freshness) was the same case.
+
+**Key differences between Bitfinex and Pionex:**
+
+| Aspect | Bitfinex | Pionex |
+|--------|----------|--------|
+| Avg freshness | 13,500ms | 930ms |
+| Msg rate | 2/s (0.06/symbol) | 70/s (1.2/symbol) |
+| Why slow | Prices genuinely don't change | Network latency + aggregation delay |
+| Data accuracy | 100% accurate (no change = no update) | Genuinely late (prices changed elsewhere) |
+| Server location | Zurich proxy (0.7ms to Bitfinex) | US (Virginia) behind Cloudflare (~300ms one-way) |
+
+**Pionex staleness causes:**
+1. **Network latency (~40%)**: US-based origin server behind Cloudflare adds ~250-400ms per message vs Singapore-based exchanges. First-data latency was 5,739ms (vs Binance 8ms, Bitget 103ms).
+2. **Low update frequency (~60%)**: Pionex aggregates 50-60% of Binance's order book through its own matching engine, emitting only 1.2 updates/symbol/s vs Binance's native 4.7/s. DEPTH topic is event-driven with no interval parameter.
+
+**Verdict**: Pionex data is genuinely ~1 second stale. Arbitrage opportunities detected using Pionex prices may have already closed on faster exchanges. Disabling Pionex was the correct decision. Pionex's value is limited to Pionex↔non-Binance pairs (since it mirrors Binance, Pionex↔Binance arbitrage is near-zero), and even those opportunities would be detected ~1s late.
+
+**Re-enable when**: Tokyo VPS is deployed (<5ms to Pionex) OR Pionex moves servers closer to Asia.
+
+### 2026-03-04: Bitfinex Event-Driven Latency Handling
+
+**Decision: Implemented `IS_EVENT_DRIVEN` flag.**
+
+Added `IS_EVENT_DRIVEN` class constant to `BaseFetcher` (default `False`), overridden to `True` in `BitfinexFetcher`. Latency logging for event-driven exchanges uses:
+- `data_age` label instead of `freshness` (signals expected behavior, not a problem)
+- Seconds instead of milliseconds (14.0s is more readable than 13998ms)
+- `(event-driven)` suffix to clarify the metric
+
+**Before**: `freshness: avg=13998ms max=118786ms` — looks broken
+**After**: `data_age: avg=14.0s max=118.8s (event-driven)` — clearly expected behavior
