@@ -1512,11 +1512,16 @@ class SymbolOptimizer:
         # Consolidate freed USDT from local sells to Bitfinex hub
         if self._balance and "Bitfinex" in self._balance._exchanges:
             active_buyers = set()
+            active_sellers = set()
             for sym in self._active_symbols:
                 pairs = self._dominant_pairs.get(sym, {})
                 for ex_name, _ in pairs.get("buyers", []):
                     active_buyers.add(ex_name)
-            transfers = self._balance.consolidate_to_bitfinex(active_buyers)
+                for ex_name, _ in pairs.get("sellers", []):
+                    active_sellers.add(ex_name)
+            transfers = self._balance.consolidate_to_bitfinex(
+                active_buyers, active_seller_exchanges=active_sellers,
+            )
             if transfers:
                 hub_fee = sum(t.fee_usd for t in transfers)
                 hub_amt = sum(t.amount_usd for t in transfers)
@@ -1905,12 +1910,18 @@ class SymbolOptimizer:
             # Consolidate to Bitfinex hub even when in deficit (not gated by PnL)
             if self._balance and "Bitfinex" in self._balance._exchanges:
                 active_buyers = set()
+                active_sellers = set()
                 for sym in self._active_symbols:
                     pairs = self._dominant_pairs.get(sym, {})
                     for ex_name, _ in pairs.get("buyers", []):
                         active_buyers.add(ex_name)
+                    for ex_name, _ in pairs.get("sellers", []):
+                        active_sellers.add(ex_name)
                 buyer_set = active_buyers if self._active_symbols else None
-                self._balance.consolidate_to_bitfinex(buyer_set)
+                seller_set = active_sellers if self._active_symbols else None
+                self._balance.consolidate_to_bitfinex(
+                    buyer_set, active_seller_exchanges=seller_set,
+                )
                 self._consolidate_idle_seller_crypto(idle_threshold=900.0)
                 self._balance.replenish_reserve()
             return
@@ -1940,13 +1951,19 @@ class SymbolOptimizer:
         # Phase 4.5: Consolidate idle capital to Bitfinex hub
         if self._balance and "Bitfinex" in self._balance._exchanges:
             active_buyers = set()
+            active_sellers = set()
             for sym in self._active_symbols:
                 pairs = self._dominant_pairs.get(sym, {})
                 for ex_name, _ in pairs.get("buyers", []):
                     active_buyers.add(ex_name)
+                for ex_name, _ in pairs.get("sellers", []):
+                    active_sellers.add(ex_name)
             # Full consolidation if no active symbols, partial otherwise
             buyer_set = active_buyers if self._active_symbols else None
-            transfers = self._balance.consolidate_to_bitfinex(buyer_set)
+            seller_set = active_sellers if self._active_symbols else None
+            transfers = self._balance.consolidate_to_bitfinex(
+                buyer_set, active_seller_exchanges=seller_set,
+            )
             if transfers:
                 hub_fee = sum(t.fee_usd for t in transfers)
                 hub_amt = sum(t.amount_usd for t in transfers)

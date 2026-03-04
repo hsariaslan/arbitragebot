@@ -595,9 +595,22 @@ class BalanceTracker:
         crypto (from buying) while the sell exchange depletes it (from selling).
         Transferring the token directly avoids paying a taker fee.
         """
-        # Cooldown check
+        # Cooldown check — shorter for free transfers (Bitfinex, MEXC, Bybit)
         cooldown_key = f"{exchange}:crypto:{symbol}"
-        remaining = self._rebalance_cooldown - (now - self._last_rebalance.get(cooldown_key, 0))
+        effective_cooldown = self._rebalance_cooldown
+        # Find cheapest crypto source to check if free transfer is possible
+        cheapest_fee = float("inf")
+        for ex in self._exchanges:
+            if ex != exchange:
+                qty = self.crypto[ex].get(symbol, 0.0)
+                if qty * price >= self._trade_amount:
+                    fee = self._get_withdrawal_fee(ex)
+                    if fee < cheapest_fee:
+                        cheapest_fee = fee
+        if cheapest_fee <= 0.01:
+            # Free transfer available — use shorter cooldown (10s vs 30s default)
+            effective_cooldown = min(self._rebalance_cooldown, 10.0)
+        remaining = effective_cooldown - (now - self._last_rebalance.get(cooldown_key, 0))
         if remaining > 0:
             logger.debug(
                 f"[Balance] Crypto rebalance {exchange}/{symbol}: cooldown {remaining:.0f}s remaining"
@@ -942,24 +955,30 @@ class BalanceTracker:
         self,
         active_buyer_exchanges: set[str] | None = None,
         idle_threshold: float = 600.0,
+        active_seller_exchanges: set[str] | None = None,
     ) -> list[Transfer]:
         """Consolidate USDT from non-essential exchanges to Bitfinex hub.
 
         Bitfinex has $0 withdrawal fees, making it the ideal capital hub.
         Capital on Bitfinex can be redistributed to any exchange for free.
 
-        Active buyer exchanges that have been idle (no trades) for longer than
-        idle_threshold are treated as non-essential and consolidated too.
+        Active buyer/seller exchanges that have been idle (no trades) for longer
+        than idle_threshold are treated as non-essential and consolidated too.
 
         Not gated by net PnL — consolidation is always beneficial.
         Respects hourly budget cap and per-source cooldown.
 
         Args:
-            active_buyer_exchanges: Exchanges still needed for trading.
+            active_buyer_exchanges: Exchanges still needed as buyers.
                 Keep trade_amount×3 buffer on recently-active ones.
                 None = consolidate everything.
-            idle_threshold: Seconds since last trade before an active buyer
+            idle_threshold: Seconds since last trade before an active exchange
                 is considered idle and its capital consolidated. Default 600s (10 min).
+            active_seller_exchanges: Exchanges still needed as sellers.
+                Keep trade_amount×3 buffer on recently-active ones so USDT
+                accumulated from sells isn't immediately pulled back to Bitfinex
+                (which would cause expensive crypto rebalance cycles).
+                None = no seller protection.
         """
         if self._bitfinex_reserve_pct <= 0:
             return []
@@ -980,18 +999,20 @@ class BalanceTracker:
         for ex in sources:
             # Compute available USDT based on exchange activity
             usdt = self.usdt.get(ex, 0.0)
-            if active_buyer_exchanges and ex in active_buyer_exchanges:
-                # Check if this active buyer is actually idle
+            is_active_buyer = active_buyer_exchanges and ex in active_buyer_exchanges
+            is_active_seller = active_seller_exchanges and ex in active_seller_exchanges
+            if is_active_buyer or is_active_seller:
+                # Check if this active exchange is actually idle
                 last_trade = self.last_trade_time.get(ex, 0.0)
                 idle_seconds = now - last_trade if last_trade > 0 else float("inf")
                 if idle_seconds < idle_threshold:
                     # Recently active — keep buffer for upcoming trades
                     keep = self._trade_amount * 3
                 else:
-                    # Active buyer but idle for too long — consolidate
+                    # Active but idle for too long — consolidate
                     keep = 0.0
             else:
-                # Not an active buyer — transfer everything
+                # Not an active exchange — transfer everything
                 keep = 0.0
             available = usdt - keep
             if available < min_transfer:
@@ -1094,6 +1115,36 @@ class BalanceTracker:
             f"(withdrawal ${withdrawal_fee:.4f})"
         )
         return transfer
+
+    def force_sell_crypto_via_bitfinex(
+        self,
+        source_exchange: str,
+        symbol: str,
+        qty: float,
+        bitfinex_bid: float,
+    ) -> dict:
+        """Force-sell crypto via Bitfinex, bypassing all cooldowns and budget checks.
+
+        Used by Hard Stop operator action — always executes, no gatekeeping.
+        Returns result dict (not Transfer) — this is an operator action.
+        """
+        gross = qty * bitfinex_bid
+        withdrawal_fee = self._get_withdrawal_fee(source_exchange)
+
+        # Execute: move crypto out, sell at 0% on Bitfinex, credit USDT
+        self.crypto[source_exchange][symbol] -= qty
+        self.usdt["Bitfinex"] += gross  # 0% taker on Bitfinex
+        if withdrawal_fee > 0:
+            self.total_transfer_fees += withdrawal_fee
+            self.total_external_transfer_fees += withdrawal_fee
+            self._record_external_fee(withdrawal_fee)
+
+        return {
+            "gross": gross,
+            "withdrawal_fee": withdrawal_fee,
+            "taker_fee": 0.0,  # Bitfinex 0%
+            "net": gross,
+        }
 
     def execute_trade(
         self,
