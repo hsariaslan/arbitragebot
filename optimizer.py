@@ -945,15 +945,31 @@ class SymbolOptimizer:
         tradeable_symbols: list[str] = []
         rejected_declining: list[str] = []
         now = time.time()
+        evd_exchanges = getattr(self._monitor, "_event_driven_exchanges", set())
         for sym in tradeable_symbols_raw:
             # Check 1: Recent profitable frequency — are ticks STILL profitable?
-            # Look at the last 15 seconds of tick data. If frequency dropped to
-            # near-zero, the opportunity was transient and has already closed.
+            # Look at recent tick data. If frequency dropped to near-zero,
+            # the opportunity was transient and has already closed.
+            # Use a longer window (60s) for symbols involving event-driven exchanges
+            # (e.g., Bitfinex updates every 10-20s, so a 15s window misses updates).
             ticks = self._ticks.get(sym, [])
             if len(ticks) >= 15:
-                recent_cutoff = now - 15.0
+                # Determine if this symbol's profitable ticks involve event-driven exchanges
+                involves_evd = False
+                if evd_exchanges:
+                    profitable_ticks_sample = [
+                        t for t in ticks[-30:] if t.best_net_pct > 0
+                    ]
+                    if profitable_ticks_sample:
+                        involves_evd = any(
+                            t.buy_exchange in evd_exchanges or t.sell_exchange in evd_exchanges
+                            for t in profitable_ticks_sample
+                        )
+                recent_window = 60.0 if involves_evd else 15.0
+                min_recent_ticks = 5 if involves_evd else 10
+                recent_cutoff = now - recent_window
                 recent_ticks = [t for t in ticks if t.timestamp >= recent_cutoff]
-                if len(recent_ticks) >= 10:
+                if len(recent_ticks) >= min_recent_ticks:
                     recent_profitable = sum(1 for t in recent_ticks if t.best_net_pct > 0)
                     recent_freq = recent_profitable / len(recent_ticks)
                     if recent_freq < 0.05:
@@ -963,6 +979,7 @@ class SymbolOptimizer:
                             f"{sym.replace('USDT', '')}("
                             f"recent_freq={recent_freq:.1%} "
                             f"overall_freq={overall_freq:.1%} "
+                            f"window={recent_window:.0f}s "
                             f"reason=fading)"
                         )
                         continue
