@@ -123,6 +123,7 @@ class DashboardServer:
             optimizer.set_dashboard(self)
         self._running = False
         self._clients: set[Any] = set()
+        self._client_ips: dict[Any, str] = {}  # ws → resolved IP (for whitelist enforcement)
         self._start_time = 0.0
         self._uptime_data: dict = {}
         self._uptime_file = Path("state/uptime.json")
@@ -438,6 +439,33 @@ class DashboardServer:
             return True  # empty whitelist = allow all
         return ip in whitelist
 
+    async def _enforce_ip_whitelist(self) -> None:
+        """Disconnect any authenticated clients whose IP is no longer whitelisted.
+
+        Called after IP whitelist settings change. If a phone is lost/stolen,
+        removing its IP from the whitelist immediately kills the session.
+        """
+        if not self._client_ips:
+            return
+        to_disconnect: list[Any] = []
+        for ws, client_ip in list(self._client_ips.items()):
+            if not self._check_ip_whitelist(client_ip):
+                to_disconnect.append(ws)
+        for ws in to_disconnect:
+            client_ip = self._client_ips.get(ws, "unknown")
+            try:
+                await ws.send(json.dumps({
+                    "type": "auth_denied",
+                    "reason": "IP removed from whitelist",
+                }))
+                await ws.close()
+            except Exception:
+                pass
+            self._clients.discard(ws)
+            self._client_ips.pop(ws, None)
+            self._auth_logger.warning(f"{client_ip} - Force disconnected (IP removed from whitelist)")
+            self._record_auth_event("ip_revoked", client_ip, details="IP removed from whitelist while connected")
+
     # --- Auth events ---
 
     @staticmethod
@@ -636,6 +664,8 @@ class DashboardServer:
                         except Exception:
                             dead.add(ws)
                     self._clients -= dead
+                    for ws in dead:
+                        self._client_ips.pop(ws, None)
                 # Periodic uptime heartbeat (~every 60s)
                 self._save_uptime_heartbeat()
                 # Track proxy (Zurich VPS) connection state
@@ -721,6 +751,7 @@ class DashboardServer:
                         session_token = token
                         await ws.send(json.dumps({"type": "auth_ok", "token": token}))
                         self._clients.add(ws)
+                        self._client_ips[ws] = ip
                         await ws.send(json.dumps(self._build_state()))
                         self._auth_logger.info(f"{ip} - Reconnected with session token")
                         self._record_auth_event("reconnected", ip, browser=browser, os_info=os_info)
@@ -794,6 +825,7 @@ class DashboardServer:
                         self._failed_attempts.pop(ip, None)
                         await ws.send(json.dumps({"type": "auth_ok", "token": session_token}))
                         self._clients.add(ws)
+                        self._client_ips[ws] = ip
                         await ws.send(json.dumps(self._build_state()))
                         self._auth_logger.info(f"{ip} - Login successful ({username}, remember={remember})")
                         self._record_auth_event(
@@ -848,6 +880,7 @@ class DashboardServer:
             pass
         finally:
             self._clients.discard(ws)
+            self._client_ips.pop(ws, None)
             if authenticated:
                 logger.info(f"[Dashboard] Client {ip} disconnected ({len(self._clients)} total)")
 
@@ -1130,6 +1163,8 @@ class DashboardServer:
             save_settings(self._settings)
             await ws.send(json.dumps({"type": "security_settings_saved", "ok": True}))
             logger.info("[Dashboard] Security settings saved")
+            # Immediately disconnect clients whose IP is no longer whitelisted
+            await self._enforce_ip_whitelist()
 
         elif msg_type == "save_fee_settings":
             now = time.time()

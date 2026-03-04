@@ -140,6 +140,7 @@ export function useWebSocket() {
           setAuthError(data.reason || 'IP not allowed');
           setAuthLoading(false);
           setIpDenied(true);
+          clearStoredToken();
           return;
         }
 
