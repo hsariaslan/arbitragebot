@@ -330,6 +330,19 @@ ONE_LEG_FAILURE_RATE: float = 0.02          # Probability of simulated one-legge
 ONE_LEG_UNWIND_SLIPPAGE_MULT: float = 1.5   # Slippage multiplier for emergency unwind trades
 MAX_POSITION_MULTIPLIER: float = 5.0        # Max accumulated crypto per symbol per buyer exchange (× trade_amount, 0=unlimited)
 
+# Anomaly protection (configurable via settings page)
+ANOMALY_PROTECTION_ENABLED: bool = True
+CIRCUIT_BREAKER_WINDOW: int = 900            # Rolling P&L window in seconds (15min)
+CIRCUIT_BREAKER_THRESHOLD: float = -5.0      # Global pause if rolling P&L < -$5
+CIRCUIT_BREAKER_RESUME_PCT: float = 0.5      # Auto-resume at 50% of threshold
+CIRCUIT_BREAKER_COOLDOWN: int = 300          # Min seconds before auto-resume (5min)
+DRAWDOWN_THRESHOLD_PCT: float = 5.0          # Global pause at 5% drawdown from peak
+DRAWDOWN_RESUME_PCT: float = 3.0             # Auto-resume when drawdown recovers to 3%
+DRAWDOWN_EMERGENCY_MULT: float = 2.0         # Emergency sell-all at 2× threshold (10%)
+SYMBOL_LOSS_STREAK_THRESHOLD: int = 4        # Block symbol after 4 consecutive losses
+SYMBOL_LOSS_STREAK_COOLDOWN: int = 300       # Per-symbol block duration (5min)
+WARNING_PNL_PCT: float = 0.5                 # Warning (trade size ×0.5) at 50% of CB threshold
+
 # Execution mode: "simulation" (default), "demo" (testnet orders)
 EXECUTION_MODE: str = "simulation"
 

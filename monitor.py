@@ -222,6 +222,14 @@ class ArbitrageMonitor:
         self._max_position_multiplier: float = 5.0
         self._position_cap_skips: int = 0
 
+        # Anomaly protection
+        from anomaly_protection import AnomalyProtection
+
+        self._anomaly = AnomalyProtection()
+        self._anomaly_paused: bool = False
+        self._manual_stopped: bool = False
+        self._manual_stop_timestamp: float = 0.0
+
         # Phase 2: Demo execution
         self._executor: "DemoExecutor | None" = None
         self._execution_mode: str = "simulation"
@@ -272,6 +280,41 @@ class ArbitrageMonitor:
         if self._log_file:
             with open(self._log_file, "a") as f:
                 f.write(text + "\n")
+
+    def _emergency_sell_all(self) -> None:
+        """Emergency: sell all crypto positions to USDT."""
+        if not self._balance:
+            return
+        prices = self._get_current_prices()
+        total_sold = 0.0
+        positions_sold = 0
+        for ex in list(self._balance._exchanges):
+            for sym in list(self._balance.crypto.get(ex, {}).keys()):
+                qty = self._balance.crypto[ex].get(sym, 0.0)
+                if qty <= 0:
+                    continue
+                price = prices.get(sym, 0.0)
+                if price <= 0:
+                    continue
+                fee_rate = (
+                    self._fee_manager.get_taker_fee(ex, sym)
+                    if self._fee_manager else 0.001
+                )
+                gross = qty * price
+                net = gross * (1 - fee_rate)
+                self._balance.usdt[ex] += net
+                self._balance.crypto[ex][sym] = 0.0
+                total_sold += gross
+                positions_sold += 1
+                logger.warning(
+                    f"[Anomaly] EMERGENCY_SELL {sym} on {ex}: "
+                    f"qty={qty:.6f} price=${price:.4f} gross=${gross:.2f} "
+                    f"fee={fee_rate * 100:.3f}% net=${net:.2f}"
+                )
+        logger.warning(
+            f"[Anomaly] EMERGENCY_SELL_COMPLETE: {positions_sold} positions sold, "
+            f"total=${total_sold:.2f}"
+        )
 
     def get_net_profit_stats(self) -> dict:
         """Compute rolling hourly net profit stats."""
@@ -413,7 +456,8 @@ class ArbitrageMonitor:
         else:
             net_mult = 1.0
 
-        base = self._trade_amount * symbol_mult * net_mult
+        anomaly_mult = self._anomaly.trade_size_multiplier
+        base = self._trade_amount * symbol_mult * net_mult * anomaly_mult
         trade_size = min(max_by_usdt, max_by_crypto, base)
 
         if trade_size < min_trade:
@@ -719,7 +763,16 @@ class ArbitrageMonitor:
         )
 
         while self._running:
-            if not self._paused:
+            # Anomaly protection: sync pause state
+            if self._anomaly.should_block_trading:
+                if not self._anomaly_paused:
+                    self._anomaly_paused = True
+                    logger.warning("[Monitor] Anomaly protection activated, trading paused")
+            elif self._anomaly_paused:
+                self._anomaly_paused = False
+                logger.info("[Monitor] Anomaly protection cleared, resuming trading")
+
+            if not self._paused and not self._anomaly_paused and not self._manual_stopped:
                 self._tick()
             await asyncio.sleep(MONITOR_INTERVAL_SECONDS)
 
@@ -730,6 +783,11 @@ class ArbitrageMonitor:
         now = time.time()
         dt = datetime.fromtimestamp(now, tz=LOCAL_TZ)
         self._tick_count += 1
+
+        # Emergency sell-all triggered by anomaly protection
+        if self._anomaly.should_emergency_sell and self._balance:
+            self._emergency_sell_all()
+            self._anomaly.clear_emergency_sell()
 
         # Initialize balance tracker as soon as prices are available
         if self._balance and not self._balance.initialized:
@@ -949,6 +1007,10 @@ class ArbitrageMonitor:
                                 continue  # Not enough consecutive ticks yet
                             # Passed persistence check — proceed to execute
 
+                    # Per-symbol anomaly block: skip symbols in loss streak cooldown
+                    if self._anomaly.is_symbol_blocked(sym):
+                        continue
+
                     can_trade = True
 
                     # Compute trade size (adaptive or static)
@@ -1166,6 +1228,10 @@ class ArbitrageMonitor:
                         )
                         self._trades.append(trade)
                         self._record_trade_pnl(now, actual_profit)
+                        self._anomaly.record_trade(now, sym, actual_profit, context={
+                            "buy_ex": buy_ex, "sell_ex": sell_ex,
+                            "net_pct": net_adjusted, "trade_size": trade_size,
+                        })
                         qty = trade_size / ask_p if ask_p > 0 else 0.0
                         slip_str = f" slip={actual_slippage:.4f}%" if actual_slippage > 0 else ""
                         logger.info(
@@ -1330,7 +1396,8 @@ class ArbitrageMonitor:
                 f"phantom={self._phantom_spread_count}, "
                 f"evd_sell={self._event_driven_seller_penalties}/demoted={self._event_driven_seller_demoted}, "
                 f"one_leg={self._one_leg_sim_count}/${self._one_leg_sim_cost:.2f}, "
-                f"pos_cap={self._position_cap_skips}"
+                f"pos_cap={self._position_cap_skips}, "
+                f"anomaly={self._anomaly._total_pauses}p/{self._anomaly._total_warnings}w/{self._anomaly._total_symbol_blocks}sb"
             )
 
         # Cleanup stale pending opportunities (spread didn't persist)
@@ -1638,6 +1705,10 @@ class ArbitrageMonitor:
             "_one_leg_sim_count": self._one_leg_sim_count,
             "_one_leg_sim_cost": self._one_leg_sim_cost,
             "_position_cap_skips": self._position_cap_skips,
+            # Anomaly protection
+            "_anomaly": self._anomaly.to_state_dict(),
+            "_manual_stopped": self._manual_stopped,
+            "_manual_stop_timestamp": self._manual_stop_timestamp,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -1678,3 +1749,8 @@ class ArbitrageMonitor:
         self._one_leg_sim_count = data.get("_one_leg_sim_count", 0)
         self._one_leg_sim_cost = data.get("_one_leg_sim_cost", 0.0)
         self._position_cap_skips = data.get("_position_cap_skips", 0)
+        # Anomaly protection
+        if "_anomaly" in data:
+            self._anomaly.from_state_dict(data["_anomaly"])
+        self._manual_stopped = data.get("_manual_stopped", False)
+        self._manual_stop_timestamp = data.get("_manual_stop_timestamp", 0.0)
