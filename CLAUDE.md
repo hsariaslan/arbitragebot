@@ -7,6 +7,7 @@
 - Never run `git checkout` or `git commit` commands without my confirmation.
 - Always use `read_xlsx.py` when reading a xlsx output file.
 - Check the latest log file under `logs` folder.
+- **IMPORTANT**: `settings.json` on local machine differs from VPS. The VPS has its own runtime settings (e.g., `hourly_external_transfer_cap=$5` on VPS vs `$2` default locally). When analyzing logs, trust the `[Settings]` log entries for actual runtime values, not the local `settings.json` file.
 
 ## Project Goal
 
@@ -595,6 +596,10 @@ Score-weighted distribution of Bitfinex USDT to profitable exchanges. **Contextu
 - **Disabled by default**: button greyed out until a trigger enables it
 
 Distribution strategy: uses optimizer's active symbols and dominant buyer/seller exchanges for score-weighted allocation. Falls back to even split if no active symbols. Respects Bitfinex reserve. Free transfer ($0 Bitfinex withdrawal). Red confirmation modal — must type "distribute usdt" to confirm. Backend: `_distribute_from_bitfinex()` in `dashboard_server.py`. Logged as `[Monitor] DISTRIBUTE`.
+
+### Settings Sync at Startup
+
+`_sync_settings_on_startup()` in `dashboard_server.py:run()` applies all persisted `settings.json` values to components (BalanceTracker, Monitor, Optimizer, AnomalyProtection) before the main loop starts. This ensures settings changed via dashboard in previous sessions are applied — `run.py` only passes a subset of settings to constructors. Targeted method: no optimizer reset or discovery restart.
 
 ### Comprehensive Settings Logging
 

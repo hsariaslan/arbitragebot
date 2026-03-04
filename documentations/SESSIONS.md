@@ -1085,3 +1085,89 @@ After partial fill on demo setup (7.75 of 9.57 AXS), subsequent sell attempts ex
 1. **$10 trade sizes can't cover transfer fees**: Each trade generates $0.005-$0.012. A single $0.10 transfer needs 10-20 trades to recoup. At $1,000 capital this is expected.
 2. **Demo+Sim mode reveals single-leg only**: Most arbitrage pairs cross demo/non-demo exchanges. Full arbitrage validation needs Demo Only mode or more exchange demo APIs.
 3. **Testnet order books are unreliable**: Bybit testnet had insufficient depth for a $12 order. Production would handle this trivially. Depth-aware sizing is still good practice.
+
+---
+
+### Session #7 — 2026-03-04 (Settings Desync Bug)
+
+**Date**: 2026-03-04, ~22:36 - 23:13 UTC (~37min)
+**Capital**: $1,000
+**Version**: v0.24.1-alpha
+**Mode**: Demo + Simulation (8 exchanges, Pionex disabled)
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | ~37 min |
+| Total Trades | 91 (sim) |
+| Trading PnL | $1.29 |
+| Transfer Fees | $2.14 (external: $1.61) |
+| **Net Profit** | **-$0.82** |
+| **$/hr** | **-$1.51** |
+| Active Symbols | HYPEUSDT → SNXUSDT + DOGEUSDT (after rotation) |
+| SIZE_ZERO Events | 900+ |
+| Position Cap Hits | 200+ |
+
+SNX was strong (score 0.1141) with 0.07-0.29% net spreads, but trading stalled for the last ~4 minutes due to a cascading failure: seller-side capital starvation on KuCoin → hourly transfer cap blocked replenishment → net P&L gate closed → emergency reserve exhausted.
+
+#### Bugs Found
+
+**Bug #10: Settings Not Synced at Startup (CRITICAL)**
+
+The VPS `settings.json` had `hourly_external_transfer_cap: 5.0` (set via dashboard in a previous session), and the `[Settings]` log confirmed `hourly_transfer_cap=$5.00`. But `BalanceTracker` was enforcing `$2.00` — the constructor default from `run.py`.
+
+**Root Cause**: `run.py` creates `BalanceTracker` with `settings.get("hourly_external_transfer_cap", 2.0)`. The `_apply_settings()` method (which syncs all values to components) only runs when a user saves settings from the dashboard — it was **never called at startup**. So settings changed via dashboard in previous sessions were persisted to `settings.json` and logged correctly, but not applied to the actual components.
+
+**Impact**: Hourly cap enforced at $2 instead of $5. Transfers blocked at `$1.60 + $0.40 > $2.00` when they should have been allowed. SNX trading stalled 25 minutes early. The bug affected ALL settings that can be changed via dashboard: `hourly_external_transfer_cap`, `bitfinex_reserve_pct`, `rebalance_cooldown`, `min_net_profit_pct`, `spread_persistence_ticks`, anomaly thresholds, etc.
+
+**Fix** (v0.24.2-alpha): Added `_sync_settings_on_startup()` in `dashboard_server.py:run()` — syncs all persisted settings from `settings.json` to BalanceTracker, Monitor, Optimizer, and AnomalyProtection at startup. Targeted method (no optimizer reset/discovery restart unlike full `_apply_settings()`).
+
+**Bug #11: Emergency Draw Log Spam — 60+ Messages in 2 Minutes (LOW)**
+
+When Bitfinex reserve hit the hard floor ($50), every tick triggered `[Balance] Emergency draw limited by hard floor` — over 60 identical messages in ~2 minutes.
+
+**Fix** (v0.24.2-alpha): Throttled to once per 30 seconds.
+
+#### Cascading Failure Timeline
+
+| Time | Event | Effect |
+|------|-------|--------|
+| 22:54 | SNX activated, KuCoin = sole seller | Trades sell on KuCoin, consuming crypto |
+| 22:55-23:02 | Burst trading + rebalancing | $30 rebalances consumed in ~3 trades each |
+| 23:02:54 | Hourly cap blocked (`$1.60+$0.40 > $2.00`) | External transfers stopped (should have been $5.00 cap) |
+| 23:05-23:09 | Internal rebalance attempts, some succeed | Trading in sporadic bursts |
+| 23:09:13 | Net P&L gate closed ($1.29 PnL < $1.61 ext fees) | ALL rebalancing blocked |
+| 23:09-23:11 | Emergency reserve draws from Bitfinex | Temporary relief, quickly exhausted |
+| 23:11:25 | Emergency reserve hit hard floor ($50) | 60+ identical log messages, no more draws |
+| 23:11-23:13 | Complete stall | Strong symbol, active spreads, zero trades |
+
+#### Discrepancies (All Harmless)
+
+| Type | Count | Details |
+|------|-------|---------|
+| D-10 OKX HYPE min order | 13 | $10 below OKX testnet minimum |
+| D-10 OKX SNX instrument | 2 | SNX not on OKX demo testnet |
+| D-10 Bybit HYPE min order | 4 | $10 below Bybit testnet minimum |
+| D-04b Bybit fee 0.075%→0.301% | 5 | Testnet doesn't apply token discounts |
+| D-08 slippage 0.03% | 1 | Normal |
+| missing_position OKX/Bybit | Several | Consequence of D-10 rejections |
+| balance_mismatch Bybit $240 | 1 | Unhedged single-leg demo buys |
+
+All testnet artifacts — no production impact.
+
+#### Other Observations
+
+| # | Observation | Notes |
+|---|-------------|-------|
+| 1 | OKX clOrdId fix confirmed working | Orders submitted correctly, rejected for instrument/min-order reasons (not format) |
+| 2 | Rebalance EMPTY backoff working | `backoff=30s`, `backoff=60s` logged — no more 32-in-90s spam |
+| 3 | DOGE properly demoted after 900s | Sold via Bitfinex at 0% |
+| 4 | EVD_DEMOTED noise for DOGE (~20 msgs) | Working as designed, verbose |
+
+#### Lessons
+
+1. **Settings desync is silent and dangerous**: The log showed the correct value ($5.00) but the component used the wrong one ($2.00). The settings logging reads from `self._settings` (in-memory), not from the component's actual field. Added startup sync to prevent this.
+2. **Single-seller concentration creates fragile capital loops**: When 100% of sell volume goes to one exchange, the bot enters: trade → deplete → rebalance → trade → deplete. Each $30 rebalance only covers ~3 trades at $10.
+3. **Log throttling is essential**: Emergency draw spam (60+ msgs) drowns out useful diagnostic information.
