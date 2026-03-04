@@ -17,7 +17,7 @@ import logging
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -192,15 +192,15 @@ class RateLimiter:
 def generate_client_order_id(symbol: str, side: str) -> str:
     """Generate an idempotent client order ID for crash recovery.
 
-    Format: coirna-{base}-{side}-{ts_ms}-{uuid8}
-    Example: coirna-BTC-buy-1740000000000-a1b2c3d4
-    Max 36 chars (Binance limit).
+    Format: cb{base}{side}{ts_ms}{uuid6}  (alphanumeric only, starts with letter)
+    Example: cbBTCb1740000000a1b2c3
+    Max 32 chars (OKX limit). No hyphens — OKX requires alphanumeric only.
     """
     base = symbol.replace("USDT", "")[:5]
     ts = str(int(time.time() * 1000))[-10:]  # last 10 digits
     uid = uuid.uuid4().hex[:6]
     s = side[0]  # "b" or "s"
-    return f"coirna-{base}-{s}-{ts}-{uid}"
+    return f"cb{base}{s}{ts}{uid}"
 
 
 # ── Abstract Execution Engine ────────────────────────────────────────────
@@ -284,12 +284,53 @@ class DemoExecutor:
         # Pending order IDs for crash recovery
         self._pending_orders: list[dict] = []
 
+        # Demo-side position tracking: {exchange: {symbol: qty}}
+        # Tracks actual crypto held on demo/testnet based on order fills.
+        # Prevents sell attempts on exchanges with insufficient demo balance.
+        self._demo_positions: dict[str, dict[str, float]] = defaultdict(
+            lambda: defaultdict(float)
+        )
+
     @property
     def supported_exchanges(self) -> list[str]:
         return list(self._executors.keys())
 
     def has_executor(self, exchange: str) -> bool:
         return exchange in self._executors
+
+    def update_demo_position(self, exchange: str, symbol: str, side: str, qty: float) -> None:
+        """Update tracked demo position after a fill.
+
+        Args:
+            exchange: Exchange name
+            symbol: Symbol (e.g. "BTCUSDT")
+            side: "buy" (adds position) or "sell" (removes position)
+            qty: Filled quantity (always positive)
+        """
+        if side == "buy":
+            self._demo_positions[exchange][symbol] += qty
+        elif side == "sell":
+            self._demo_positions[exchange][symbol] = max(
+                0.0, self._demo_positions[exchange][symbol] - qty
+            )
+
+    def get_demo_position(self, exchange: str, symbol: str) -> float:
+        """Get tracked demo crypto position for an exchange+symbol."""
+        return self._demo_positions.get(exchange, {}).get(symbol, 0.0)
+
+    def cap_sell_qty(self, exchange: str, symbol: str, requested_qty: float) -> float:
+        """Cap sell quantity to available demo position.
+
+        Returns 0 if no position available (caller should skip demo sell).
+        Returns requested_qty if sufficient position exists.
+        Returns reduced qty if partial position available.
+        """
+        available = self.get_demo_position(exchange, symbol)
+        if available <= 0:
+            return 0.0
+        if requested_qty <= available:
+            return requested_qty
+        return available
 
     def can_execute(self, buy_ex: str, sell_ex: str) -> bool:
         """Check if both exchanges have executors available."""
@@ -387,6 +428,12 @@ class DemoExecutor:
             self._partial_fill_count += 1
         if sell_result.is_partial:
             self._partial_fill_count += 1
+
+        # Track demo positions from fills
+        if buy_result.success:
+            self.update_demo_position(buy_ex, symbol, "buy", buy_result.filled_qty)
+        if sell_result.success:
+            self.update_demo_position(sell_ex, symbol, "sell", sell_result.filled_qty)
 
         # Compute actual profit
         actual_profit = 0.0
@@ -609,6 +656,7 @@ class DemoExecutor:
         prices: dict[str, float],
         crypto_init_time: float,
         exchange_info: "ExchangeInfoManager | None" = None,
+        fetcher_states: dict[str, dict[str, "PriceState"]] | None = None,
     ) -> list[TradeResult]:
         """Place initial buy orders on demo/testnet to establish positions.
 
@@ -620,10 +668,12 @@ class DemoExecutor:
             prices: Current prices for all symbols
             crypto_init_time: Timestamp when initialize_crypto() completed
             exchange_info: For lot_size rounding
+            fetcher_states: {exchange: {symbol: PriceState}} for depth-aware sizing
 
         Returns list of TradeResult for every order attempted.
         """
         from decimal import Decimal
+        from slippage import compute_buy_slippage
 
         info = exchange_info or self._exchange_info
         results: list[TradeResult] = []
@@ -632,6 +682,7 @@ class DemoExecutor:
         filled_count = 0
         partial_count = 0
         rejected_count = 0
+        depth_reduced_count = 0
 
         for exchange, symbols in sorted(allocations.items()):
             if not self.has_executor(exchange):
@@ -644,6 +695,42 @@ class DemoExecutor:
                     continue
 
                 price = prices[symbol]
+                original_usd = usd_amount
+
+                # Depth-aware sizing: check order book depth before ordering
+                asks = None
+                if fetcher_states and exchange in fetcher_states:
+                    ps = fetcher_states[exchange].get(symbol)
+                    if ps:
+                        asks = ps.asks
+
+                if asks:
+                    slip = compute_buy_slippage(asks, usd_amount)
+                    if not slip.sufficient_depth and slip.total_depth_usd > 0:
+                        # Cap to 90% of available depth to avoid sweeping the entire book
+                        capped_usd = slip.total_depth_usd * 0.9
+                        if capped_usd < usd_amount:
+                            logger.info(
+                                f"[DemoSetup] {exchange} {symbol} DEPTH_CAP: "
+                                f"alloc=${usd_amount:.2f} depth=${slip.total_depth_usd:.2f} "
+                                f"capped=${capped_usd:.2f} ({slip.levels_consumed} levels)"
+                            )
+                            usd_amount = capped_usd
+                            depth_reduced_count += 1
+                    elif not slip.sufficient_depth and slip.total_depth_usd <= 0:
+                        logger.info(
+                            f"[DemoSetup] {exchange} {symbol} SKIP: "
+                            f"no order book depth available"
+                        )
+                        continue
+                    elif slip.slippage_pct > 1.0:
+                        # Warn on high slippage (>1%) but still proceed
+                        logger.warning(
+                            f"[DemoSetup] {exchange} {symbol} HIGH_SLIPPAGE: "
+                            f"est={slip.slippage_pct:.2f}% for ${usd_amount:.2f} "
+                            f"({slip.levels_consumed} levels, depth=${slip.total_depth_usd:.2f})"
+                        )
+
                 qty = usd_amount / price
 
                 # Round quantity via exchange_info if available
@@ -660,7 +747,7 @@ class DemoExecutor:
                     if rules and qty * price < float(rules.min_notional):
                         logger.info(
                             f"[DemoSetup] {exchange} {symbol} SKIP: "
-                            f"${usd_amount:.2f} below min notional ${float(rules.min_notional):.2f}"
+                            f"${original_usd:.2f} below min notional ${float(rules.min_notional):.2f}"
                         )
                         continue
 
@@ -701,12 +788,16 @@ class DemoExecutor:
                     filled_count += 1
                     if result.is_partial:
                         partial_count += 1
+                    # Track demo position from setup fill
+                    self.update_demo_position(
+                        exchange, symbol, "buy", result.filled_qty
+                    )
                 else:
                     rejected_count += 1
 
-                total_sim_alloc += usd_amount
+                total_sim_alloc += original_usd
                 total_demo_cost += demo_cost
-                diff = usd_amount - demo_cost
+                diff = original_usd - demo_cost
 
                 # Per-order log with timing
                 status = "FILLED" if result.success and not result.is_partial else (
@@ -716,14 +807,18 @@ class DemoExecutor:
                     f"fee=${result.actual_fee:.4f} ({result.fee_rate*100:.3f}% {result.fee_currency})"
                     if result.success else f"error={result.error}"
                 )
+                depth_note = (
+                    f" depth_capped=${original_usd:.2f}->${usd_amount:.2f}"
+                    if usd_amount < original_usd else ""
+                )
                 logger.info(
                     f"[DemoSetup] {exchange} {symbol} BUY: "
                     f"qty={qty:.8f} price=${price:.2f} | "
                     f"status={status} filled={result.filled_qty:.8f} "
                     f"avg=${result.actual_avg_price:.2f} | "
                     f"latency={latency_ms:.0f}ms setup_delay={setup_delay_ms:.0f}ms | "
-                    f"{fee_info} | "
-                    f"sim_alloc=${usd_amount:.2f} demo_cost=${demo_cost:.2f} diff=${diff:+.2f}"
+                    f"{fee_info}{depth_note} | "
+                    f"sim_alloc=${original_usd:.2f} demo_cost=${demo_cost:.2f} diff=${diff:+.2f}"
                 )
 
                 results.append(result)
@@ -744,9 +839,10 @@ class DemoExecutor:
         diff_total = total_sim_alloc - total_demo_cost
         diff_pct = (diff_total / total_sim_alloc * 100) if total_sim_alloc > 0 else 0
 
+        depth_info = f" depth_capped={depth_reduced_count}" if depth_reduced_count else ""
         logger.info(
             f"[DemoSetup] Complete: {filled_count}/{total_orders} filled, "
-            f"{partial_count} partial, {rejected_count} rejected | "
+            f"{partial_count} partial, {rejected_count} rejected{depth_info} | "
             f"total_span={total_span:.0f}ms | "
             f"sim_alloc=${total_sim_alloc:.2f} demo_cost=${total_demo_cost:.2f} "
             f"diff=${diff_total:+.2f} ({diff_pct:+.2f}%)"
@@ -755,12 +851,19 @@ class DemoExecutor:
         return results
 
     def to_state_dict(self) -> dict:
+        # Convert defaultdicts to plain dicts for JSON serialization
+        demo_pos = {
+            ex: {sym: qty for sym, qty in syms.items() if qty > 0}
+            for ex, syms in self._demo_positions.items()
+            if any(q > 0 for q in syms.values())
+        }
         return {
             "pending_orders": self._pending_orders,
             "total_trades": self._total_trades,
             "one_legged_count": self._one_legged_count,
             "rejection_count": self._rejection_count,
             "partial_fill_count": self._partial_fill_count,
+            "demo_positions": demo_pos,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -769,6 +872,9 @@ class DemoExecutor:
         self._one_legged_count = data.get("one_legged_count", 0)
         self._rejection_count = data.get("rejection_count", 0)
         self._partial_fill_count = data.get("partial_fill_count", 0)
+        for ex, syms in data.get("demo_positions", {}).items():
+            for sym, qty in syms.items():
+                self._demo_positions[ex][sym] = qty
 
     async def close(self) -> None:
         """Clean up all executor sessions."""
