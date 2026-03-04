@@ -1,6 +1,6 @@
 # CoirnaBot
 
-**v0.21.0-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
+**v0.21.1-alpha** — Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
 
 Monitors real-time prices across 9 crypto exchanges via WebSocket, detects price discrepancies, and executes simultaneous buy/sell orders to profit from the spread. Deployed on Bangkok VPS with auto-deploy via GitHub Actions. Supports simulation mode and demo/testnet execution with automatic discrepancy detection.
 
