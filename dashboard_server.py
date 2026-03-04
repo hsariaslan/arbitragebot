@@ -1851,6 +1851,7 @@ class DashboardServer:
 
         Handles both disabling (remove from active sets) and re-enabling
         (add back if a fetcher exists for that exchange).
+        Respects demo_only mode — never re-enables exchanges outside the demo set.
         """
         enabled = {ex for ex, cfg in fee_data.items() if cfg.get("enabled", True)}
         disabled = {ex for ex in fee_data if ex not in enabled}
@@ -1862,6 +1863,12 @@ class DashboardServer:
 
         # Only enable exchanges that actually have fetchers
         target_active = enabled & fetcher_exchanges
+
+        # Respect demo_only mode — never expand beyond demo-capable exchanges
+        execution_mode = self._settings.get("execution_mode", "simulation")
+        if execution_mode == "demo_only":
+            demo_set = {"Binance", "OKX", "Bybit"}
+            target_active = target_active & demo_set
 
         # Update monitor active exchanges
         if self._monitor:
