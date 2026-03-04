@@ -957,8 +957,9 @@ class SymbolOptimizer:
                 # Determine if this symbol's profitable ticks involve event-driven exchanges
                 involves_evd = False
                 if evd_exchanges:
+                    recent_sample = list(ticks)[-30:]
                     profitable_ticks_sample = [
-                        t for t in ticks[-30:] if t.best_net_pct > 0
+                        t for t in recent_sample if t.best_net_pct > 0
                     ]
                     if profitable_ticks_sample:
                         involves_evd = any(
