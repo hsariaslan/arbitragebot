@@ -442,6 +442,7 @@ Multiple gates prevent unprofitable rebalancing:
 5. **Transfer worthiness**: External transfers blocked if `withdrawal_fee / estimated_profit > 50`.
 6. **Hourly external transfer budget**: Rolling 1-hour window caps total external withdrawal fees at `hourly_external_transfer_cap` (default $2.00/hr). Internal rebalances (sell/buy on same exchange) are not limited. Persisted across restarts. 0 = disabled. **Zero/near-zero fee transfers (≤ $0.01) bypass the hourly cap entirely** — prevents $0-fee Bitfinex/MEXC/Bybit transfers from being blocked when the cap is exhausted by earlier expensive transfers.
 7. **Cooldown**: 60s between rebalances per exchange/direction.
+9. **EMPTY backoff**: When `try_rebalance()` returns no viable transfers, exponential backoff delays the next attempt (30s→60s→120s→240s→300s cap). Prevents flooding logs with identical failed rebalance attempts. Cleared on successful rebalance or substantial trade (≥50% of trade_amount).
 8. **Dynamic rebalance buffer**: Eligibility threshold for rebalance sources scales with trade amount (`trade_amount × 2`) instead of the fixed $50. For $10 trades, source needs $20 buffer (not $50), making internal sells and external transfers viable for smaller positions. All successful rebalance transfers logged at INFO level (`[Balance] External USDT`, `[Balance] Internal sell`, `[Balance] External crypto`, `[Balance] Internal buy`, `[Balance] External+buy`). Failures logged as `[Balance] USDT/Crypto rebalance FAILED` with diagnostics.
 
 ### Rebalance Order
@@ -884,7 +885,11 @@ Monitor._tick() detects opportunity
 
 ### Demo Position Establishment
 
-On first `initialize_crypto()`, `_run_demo_setup()` fires as `asyncio.create_task()` to place market buy orders on demo/testnet exchanges, mirroring the sim's virtual crypto allocations. Sequential per exchange (rate limit safety). Per-order logging with `[DemoSetup]` prefix includes latency, fee, sim vs demo cost diff, and `setup_delay_ms` from sim init. One-shot: `_demo_setup_complete` persisted in state. Cleared by "Restart Bot".
+On first `initialize_crypto()`, `_run_demo_setup()` fires as `asyncio.create_task()` to place market buy orders on demo/testnet exchanges, mirroring the sim's virtual crypto allocations. Sequential per exchange (rate limit safety). **Depth-aware sizing**: before each order, `compute_buy_slippage()` checks order book depth — if insufficient, qty is capped to 90% of available depth (`DEPTH_CAP` log). Warns on >1% estimated slippage (`HIGH_SLIPPAGE`). Skips if zero depth. Per-order logging with `[DemoSetup]` prefix includes latency, fee, sim vs demo cost diff, `setup_delay_ms` from sim init, and `depth_capped` when applicable. One-shot: `_demo_setup_complete` persisted in state. Cleared by "Restart Bot".
+
+### Demo Position Tracking
+
+`DemoExecutor._demo_positions` (`{exchange: {symbol: qty}}`) tracks actual crypto held on demo/testnet accounts. Updated on: setup order fills, arbitrage fills, single-leg fills. Before placing a demo sell order, `cap_sell_qty()` checks available position — returns 0 (skip) if empty, reduces qty if partial. Prevents `Insufficient balance` rejections from thin testnet positions. Persisted in state via `to_state_dict()`.
 
 ### Key Files
 
@@ -952,7 +957,7 @@ In demo mode, external USDT transfers use `InTransitFund` with estimated network
 1. **Immediate save**: `_execute_demo_trade()` calls `state_mgr.save()` after each demo result
 2. **Pending orders**: Client order IDs persisted in state before submission. On crash recovery, queried via `recover_pending_orders()`
 3. **Startup reconciliation**: `reconcile_balances()` queries exchange balances, compares with BalanceTracker, logs discrepancies
-4. **Idempotent IDs**: Format `coirna-{base}-{side}-{ts}-{uuid6}` (e.g., `coirna-BTC-buy-1740000000000-a1b2c3`)
+4. **Idempotent IDs**: Format `cb{base}{side}{ts}{uuid6}` — alphanumeric only, starts with letter, max 32 chars (e.g., `cbBTCb1740000000a1b2c3`). OKX requires no hyphens.
 
 ### What Demo Testing Reveals (vs Simulation)
 

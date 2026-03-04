@@ -994,3 +994,94 @@ Dashboard showed Zurich VPS proxy as "DOWN" despite it running correctly. Root c
 
 1. **Single-leg demo execution**: Demo mode required both exchanges to have executors. Changed to fire demo orders on ANY leg with an executor — dramatically more coverage in Demo+Sim mode.
 2. **Demo+Sim recommended over Demo Only**: Provides more arbitrage pairs (9 exchanges) while still validating all trades touching Binance/OKX/Bybit.
+
+---
+
+### Session #6 — 2026-03-04 (Demo+Sim First Run)
+
+**Date**: 2026-03-04, ~21:58 - 22:15 UTC (~17min)
+**Capital**: $1,000
+**Version**: v0.24.0-alpha
+**Mode**: Demo + Simulation (all 9 exchanges, demo on Binance/OKX/Bybit)
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+**Pionex**: Disabled
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | ~17 min |
+| Total Trades | 79 (sim), 65 demo attempts |
+| Trading PnL | $0.27 |
+| Transfer Fees | $1.32 (external: $0.91) |
+| **Net Profit** | **-$1.05** |
+| **$/hr** | **-$4.01** |
+| Active Symbols | AXSUSDT (KuCoin→OKX), DYDXUSDT (Gate.io/MEXC→Binance) |
+| Demo Fills | 8 filled (all single-leg sells), 54 OKX rejected, 3 Bybit rejected |
+| Position Cap Hits | 202 |
+
+First run using Demo+Sim mode after implementing demo position establishment (v0.24.0-alpha). Net negative due to $10 trade sizes generating $0.005-$0.012 profit per trade, insufficient to cover transfer fees.
+
+#### Demo Execution Analysis
+
+- **65 demo trade attempts**, all single-leg (buyer exchanges KuCoin/MEXC/Gate.io have no demo executors)
+- **8 successful fills**: All sell-side on Binance (DYDXUSDT) — fill rate 12.3%
+- **54 OKX rejections**: `Parameter clOrdId error` — hyphens in client order ID violate OKX format requirements
+- **3 Bybit rejections**: `Insufficient balance` — demo setup partial fill left insufficient AXS position for subsequent sells
+- **0 full arbitrage pairs**: In Demo+Sim mode, typical pairs are KuCoin→OKX or MEXC→Binance — only one exchange has a demo executor
+
+#### Setup Order Results
+
+| Exchange | Symbol | Requested | Filled | Status | Latency |
+|----------|--------|-----------|--------|--------|---------|
+| Binance | AXSUSDT | 130.08 | 130.08 | FILLED | 124ms |
+| Binance | DYDXUSDT | 907.44 | 907.44 | FILLED | 119ms |
+| Bybit | AXSUSDT | 9.57 | 7.75 (81%) | PARTIAL | 280ms |
+| Bybit | DYDXUSDT | 13.28 | 13.28 | FILLED | 277ms |
+| OKX (all) | — | — | — | REJECTED | — |
+
+Bybit AXSUSDT partial fill (81%) caused by thin testnet order book — only 7.75 of 9.57 qty available at market.
+
+#### Bugs Found
+
+**Bug #7: OKX `clOrdId` Format Rejection (HIGH)**
+
+All OKX demo orders rejected with `Parameter clOrdId error`. `generate_client_order_id()` produced `coirna-BTC-s-1740...-a1b2c3` with hyphens, but OKX requires alphanumeric-only, starting with a letter, max 32 chars.
+
+**Fix** (v0.24.1-alpha): Changed format from `coirna-{base}-{s}-{ts}-{uid}` to `cb{base}{s}{ts}{uid}` — no hyphens, starts with letters, fits all exchange requirements.
+
+**Bug #8: Bybit "Insufficient balance" Sell Rejections (MEDIUM)**
+
+After partial fill on demo setup (7.75 of 9.57 AXS), subsequent sell attempts exhausted the position and then failed with `170131: Insufficient balance`. The sim didn't know the demo account was empty.
+
+**Fix** (v0.24.1-alpha): Added `_demo_positions` tracking in `DemoExecutor`. Tracks actual crypto held on demo exchanges (updated on every setup fill, buy fill, and sell fill). Before placing a sell, `cap_sell_qty()` checks available position — returns 0 (skip) if empty, reduces qty if partial. Persisted in state.
+
+**Bug #9: Rebalance EMPTY Loop — 32 Attempts in 90s (MEDIUM)**
+
+`try_rebalance()` returned no transfers 32 consecutive times in 90 seconds for the same AXSUSDT KuCoin→OKX pair. No backoff — every tick retried the same failing rebalance.
+
+**Fix** (v0.24.1-alpha): Added `_rebalance_empty_backoff` with exponential cooldown (30s→60s→120s→240s→300s cap). After EMPTY result, next attempt delayed. Cleared on successful rebalance or trade.
+
+#### Other Observations
+
+| # | Observation | Severity | Action |
+|---|-------------|----------|--------|
+| 1 | Binance testnet 0% fees (production: 0.075%) | INFO | Expected testnet behavior |
+| 2 | Bybit testnet 0.100% fees (production: 0.075% with discount) | INFO | Testnet doesn't honor token discounts |
+| 3 | D-08 consistent +0.1% slippage on DYDXUSDT/Binance | INFO | Testnet order book spread |
+| 4 | MEXC depth 62 reconnections in 17min (~16s cycle) | INFO | Worth investigating later |
+| 5 | OKX withdrawal fee validation empty API key | LOW | Config issue, static fees unaffected |
+| 6 | Hub consolidation KuCoin→Bitfinex $0.40 on negative session | INFO | Cost gate tuning question |
+| 7 | 202 position cap hits in 15min | INFO | Working as designed |
+
+#### Improvements Implemented
+
+1. **Depth-aware setup sizing**: `execute_setup_orders()` now checks order book depth via `compute_buy_slippage()` before ordering. Caps qty to 90% of available depth if insufficient. Would have prevented the Bybit partial fill.
+2. **Demo position tracking**: `DemoExecutor._demo_positions` tracks actual crypto positions, preventing sell attempts on empty demo accounts.
+3. **Rebalance EMPTY backoff**: Exponential cooldown prevents flooding logs with identical failed rebalance attempts.
+
+#### Lessons
+
+1. **$10 trade sizes can't cover transfer fees**: Each trade generates $0.005-$0.012. A single $0.10 transfer needs 10-20 trades to recoup. At $1,000 capital this is expected.
+2. **Demo+Sim mode reveals single-leg only**: Most arbitrage pairs cross demo/non-demo exchanges. Full arbitrage validation needs Demo Only mode or more exchange demo APIs.
+3. **Testnet order books are unreliable**: Bybit testnet had insufficient depth for a $12 order. Production would handle this trivially. Depth-aware sizing is still good practice.
