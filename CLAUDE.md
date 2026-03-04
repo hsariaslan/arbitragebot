@@ -296,7 +296,7 @@ The bot only trades and transfers for **strong** (score ≥ 0.1) and **very stro
 
 ### Rules
 
-- **Discovery**: Activates symbols with score ≥ 0.01. Extends discovery duration (up to 3600s) if none qualify. At activation, symbols are filtered by two checks: (1) **recent frequency gate** — last 15 seconds of ticks must have ≥5% profitable frequency (rejects transient spikes that already closed), (2) **score trajectory** — last 5 scores all declining with >10% drop OR cliff drop (current < peak × `score_stability_factor`). Candidates are tracked in watchlist from first tick for trend analysis.
+- **Discovery**: Activates symbols with score ≥ 0.01. Extends discovery duration (up to 3600s) if none qualify. At activation, symbols are filtered by two checks: (1) **recent frequency gate** — recent ticks must have ≥5% profitable frequency (rejects transient spikes that already closed). Uses adaptive window: **60s** for symbols involving event-driven exchanges (Bitfinex updates every 10-20s, so a short window misses update cycles) and **15s** for streaming exchanges. Detects event-driven involvement by checking the last 30 profitable ticks for exchange membership. (2) **score trajectory** — last 5 scores all declining with >10% drop OR cliff drop (current < peak × `score_stability_factor`). Candidates are tracked in watchlist from first tick for trend analysis.
 - **Early discovery exit**: If any symbol reaches score ≥ 0.01 during discovery (after 60s minimum), discovery ends immediately and trading starts.
 - **Trading**: Normal tier (0.01–0.1) gets `trade_multiplier = 0.5–1.5×`. Weak symbols (< 0.01) get `trade_multiplier = 0`, **except active symbols** which get a 1.0× floor — score threshold controls activation/demotion, not execution for already-deployed capital.
 - **Rebalancing**: `should_allow_rebalance()` requires score ≥ 0.01 (`TRADING_SCORE_THRESHOLD`). ROI gate, net P&L gate, and transfer worthiness checks protect against unprofitable transfers.
@@ -601,7 +601,7 @@ Distribution strategy: uses optimizer's active symbols and dominant buyer/seller
 - **Session start**: Called after DashboardServer creation in `run.py`
 - **Settings change**: Called at end of `_apply_settings()` with before/after diff
 
-Multi-line structured output includes: trade amount, adaptive mode, symbol limits, scoring params, rebalance gates, net P&L gate, simulation realism, anomaly thresholds, Bitfinex reserve, fee configs (per-exchange effective rates), execution mode, and changed values diff.
+Each setting is logged as a separate `logger.info()` call (one per line) so every line gets its own timestamp and is individually filterable in Bot Logs. Covers: trade amount, adaptive mode, symbol limits, scoring params, rebalance gates, net P&L gate, simulation realism, anomaly thresholds, Bitfinex reserve, fee configs (per-exchange effective rates), execution mode, and changed values diff.
 
 ### Diagnostic Logging
 
