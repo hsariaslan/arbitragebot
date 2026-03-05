@@ -27,6 +27,24 @@ from config import (
     TRADE_AMOUNT_USD,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _safe_task(coro, name: str = "task") -> asyncio.Task:
+    """Create an asyncio task that logs exceptions instead of silently swallowing them."""
+    task = asyncio.create_task(coro)
+
+    def _on_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc:
+            logger.error(f"[Monitor] Async {name} failed: {exc!r}", exc_info=exc)
+
+    task.add_done_callback(_on_done)
+    return task
+
+
 if TYPE_CHECKING:
     from exchange_info import ExchangeInfoManager
     from executor import DemoExecutor
@@ -34,8 +52,6 @@ if TYPE_CHECKING:
     from fetchers.base import BaseFetcher
     from optimizer import SymbolOptimizer
     from state_manager import StateManager
-
-logger = logging.getLogger(__name__)
 
 
 
@@ -245,6 +261,8 @@ class ArbitrageMonitor:
         self._crypto_init_time: float = 0.0
         # Throttle "no demo position" logs (first per key, then silent)
         self._demo_sell_skip_log: dict[str, int] = {}
+        # Throttle D-10 rejection logs (first per exchange:symbol, then silent)
+        self._demo_reject_log: dict[str, int] = {}
 
         # Demo accuracy stats (for [Session] summary)
         self._demo_trade_count: int = 0
@@ -312,6 +330,7 @@ class ArbitrageMonitor:
         prices = self._get_current_prices()
         total_sold = 0.0
         positions_sold = 0
+        liquidated: list[dict] = []
         for ex in list(self._balance._exchanges):
             for sym in list(self._balance.crypto.get(ex, {}).keys()):
                 qty = self._balance.crypto[ex].get(sym, 0.0)
@@ -330,6 +349,11 @@ class ArbitrageMonitor:
                 self._balance.crypto[ex][sym] = 0.0
                 total_sold += gross
                 positions_sold += 1
+                liquidated.append({
+                    "exchange": ex, "symbol": sym, "qty": qty,
+                    "price": price, "gross": gross, "net": net,
+                    "fee_pct": fee_rate * 100,
+                })
                 logger.warning(
                     f"[Anomaly] EMERGENCY_SELL {sym} on {ex}: "
                     f"qty={qty:.6f} price=${price:.4f} gross=${gross:.2f} "
@@ -338,6 +362,28 @@ class ArbitrageMonitor:
         logger.warning(
             f"[Anomaly] EMERGENCY_SELL_COMPLETE: {positions_sold} positions sold, "
             f"total=${total_sold:.2f}"
+        )
+
+        # Send emergency email notification
+        from email_notifier import notify_emergency
+
+        usdt_breakdown = {
+            ex: self._balance.usdt.get(ex, 0.0)
+            for ex in self._balance._exchanges
+            if self._balance.usdt.get(ex, 0.0) > 0
+        }
+        _safe_task(
+            notify_emergency(
+                reason=self._anomaly._pause_reason,
+                drawdown_pct=self._anomaly._current_drawdown_pct,
+                peak_value=self._anomaly._peak_portfolio_value,
+                current_value=sum(usdt_breakdown.values()),
+                positions_sold=positions_sold,
+                total_sold=total_sold,
+                portfolio_breakdown=usdt_breakdown,
+                liquidated_positions=liquidated,
+            ),
+            name="emergency_email",
         )
 
     def get_net_profit_stats(self) -> dict:
@@ -833,15 +879,21 @@ class ArbitrageMonitor:
                 f"ratio={sell.fill_ratio:.2%}"
             )
 
-        # D-10: Rejection
-        if not buy.success:
-            logger.warning(
-                f"[D-10] {sym} buy rejected on {buy.exchange}: {buy.error}"
-            )
-        if not sell.success:
-            logger.warning(
-                f"[D-10] {sym} sell rejected on {sell.exchange}: {sell.error}"
-            )
+        # D-10: Rejection (throttled — log first per exchange:symbol, then suppress)
+        for leg, side in [(buy, "buy"), (sell, "sell")]:
+            if not leg.success:
+                rkey = f"{leg.exchange}:{sym}:{side}"
+                count = self._demo_reject_log.get(rkey, 0) + 1
+                self._demo_reject_log[rkey] = count
+                if count == 1:
+                    logger.warning(
+                        f"[D-10] {sym} {side} rejected on {leg.exchange}: {leg.error}"
+                    )
+                elif count == 2:
+                    logger.info(
+                        f"[D-10] {sym} {side} on {leg.exchange} rejection repeated — "
+                        f"suppressing further logs"
+                    )
 
         # D-11: One-legged trade
         if result.one_legged:
@@ -997,11 +1049,20 @@ class ArbitrageMonitor:
                     f"ratio={leg.fill_ratio:.2%}"
                 )
 
-            # D-10: Rejection
+            # D-10: Rejection (throttled — first per exchange:symbol, then suppress)
             if not leg.success:
-                logger.warning(
-                    f"[D-10] {sym} {side} rejected on {leg.exchange}: {leg.error}"
-                )
+                rkey = f"{leg.exchange}:{sym}:{side}"
+                count = self._demo_reject_log.get(rkey, 0) + 1
+                self._demo_reject_log[rkey] = count
+                if count == 1:
+                    logger.warning(
+                        f"[D-10] {sym} {side} rejected on {leg.exchange}: {leg.error}"
+                    )
+                elif count == 2:
+                    logger.info(
+                        f"[D-10] {sym} {side} on {leg.exchange} rejection repeated — "
+                        f"suppressing further logs"
+                    )
 
             # D-12: High latency
             if leg.latency_ms > 500:
@@ -1179,7 +1240,7 @@ class ArbitrageMonitor:
                 and not self._demo_setup_running
                 and self._execution_mode in ("demo", "demo_only")
                 and self._executor):
-            asyncio.create_task(self._run_demo_setup())
+            _safe_task(self._run_demo_setup(), "demo_setup")
 
         # D-17: Deliver in-transit funds that have arrived
         if self._balance and self._balance._in_transit:
@@ -1671,13 +1732,13 @@ class ArbitrageMonitor:
                                 and self._executor
                                 and (self._executor.has_executor(buy_ex)
                                      or self._executor.has_executor(sell_ex))):
-                            asyncio.create_task(self._execute_demo_trade(
+                            _safe_task(self._execute_demo_trade(
                                 buy_ex, sell_ex, sym, trade_size,
                                 ask_p, bid_p,
                                 adj.get("buy_qty_rounded", trade_size / ask_p),
                                 adj.get("sell_qty_rounded", trade_size / bid_p),
                                 trade,
-                            ))
+                            ), f"demo_trade_{sym}")
 
                 elif net > 0:
                     # Positive but below threshold — still track miss-streak
@@ -1848,7 +1909,8 @@ class ArbitrageMonitor:
                     f"drift=${drift:+.2f} "
                     f"avg_slip_sim={avg_sim_slip:.4f}% avg_slip_demo={avg_demo_slip:.4f}% "
                     f"fee_mismatch={self._demo_fee_mismatches} "
-                    f"latency_avg={avg_lat:.0f}ms"
+                    f"latency_avg={avg_lat:.0f}ms "
+                    f"reject_suppressed={sum(max(0, v - 1) for v in self._demo_reject_log.values())}"
                 )
 
         # Cleanup stale pending opportunities (spread didn't persist)
@@ -2217,6 +2279,17 @@ class ArbitrageMonitor:
         # Anomaly protection
         if "_anomaly" in data:
             self._anomaly.from_state_dict(data["_anomaly"])
+            if self._anomaly._paused:
+                # Reset pause timestamp to now so cooldown re-starts from this
+                # boot — gives the system time to collect fresh data before
+                # auto-resume rather than resuming instantly on stale state.
+                self._anomaly._pause_timestamp = time.time()
+                logger.warning(
+                    f"[Anomaly] Restored paused state on startup "
+                    f"(layer={self._anomaly._pause_layer}, "
+                    f"reason={self._anomaly._pause_reason}) — "
+                    f"cooldown restarted, will auto-resume when conditions clear"
+                )
         self._manual_stopped = data.get("_manual_stopped", False)
         self._manual_stop_timestamp = data.get("_manual_stop_timestamp", 0.0)
         # Demo accuracy stats

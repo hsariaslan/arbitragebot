@@ -48,6 +48,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _safe_task(coro, name: str = "task") -> asyncio.Task:
+    """Create an asyncio task that logs exceptions instead of silently swallowing them."""
+    task = asyncio.create_task(coro)
+
+    def _on_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc:
+            logger.error(f"[Dashboard] Async {name} failed: {exc!r}", exc_info=exc)
+
+    task.add_done_callback(_on_done)
+    return task
+
+
 class DashboardLogHandler(logging.Handler):
     """Captures recent log entries in memory for dashboard broadcast and export."""
 
@@ -603,13 +618,6 @@ class DashboardServer:
     def stop(self) -> None:
         self._running = False
         self._persist_sessions()
-        # Write restart marker so next startup suppresses emails (safety net)
-        try:
-            marker = Path("state/restart_marker")
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text(str(time.time()))
-        except OSError:
-            pass
 
     def set_demo_fetcher(self, demo_fetcher: "DemoPortfolioFetcher") -> None:
         """Attach the demo portfolio fetcher for comparison data."""
@@ -817,7 +825,7 @@ class DashboardServer:
                             remaining = self._record_failed_attempt(ip)
                             if remaining <= 0:
                                 self._record_auth_event("blocked", ip, browser=browser, os_info=os_info, details="CAPTCHA not provided")
-                                asyncio.create_task(notify_blocked(ip, browser, os_info))
+                                _safe_task(notify_blocked(ip, browser, os_info), "notify_blocked")
                                 await ws.send(json.dumps({
                                     "type": "auth_blocked",
                                     "reason": "Too many failed attempts. Try again in 60 minutes.",
@@ -837,7 +845,7 @@ class DashboardServer:
                             remaining = self._record_failed_attempt(ip)
                             if remaining <= 0:
                                 self._record_auth_event("blocked", ip, browser=browser, os_info=os_info, details="CAPTCHA verification failed")
-                                asyncio.create_task(notify_blocked(ip, browser, os_info))
+                                _safe_task(notify_blocked(ip, browser, os_info), "notify_blocked")
                                 await ws.send(json.dumps({
                                     "type": "auth_blocked",
                                     "reason": "Too many failed attempts. Try again in 60 minutes.",
@@ -869,7 +877,7 @@ class DashboardServer:
                         )
                         # Fire-and-forget email notification (skip during restart grace)
                         if not self._restart_grace:
-                            asyncio.create_task(notify_login(ip, browser, os_info))
+                            _safe_task(notify_login(ip, browser, os_info), "notify_login")
                     else:
                         remaining = self._record_failed_attempt(ip)
                         self._auth_logger.warning(f"{ip} - Login failed (user={username}, {remaining} attempts remaining)")
@@ -881,7 +889,7 @@ class DashboardServer:
                         if remaining <= 0:
                             self._record_auth_event("blocked", ip, username=username, browser=browser, os_info=os_info, details="10 failed attempts")
                             # Fire-and-forget email notification
-                            asyncio.create_task(notify_blocked(ip, browser, os_info))
+                            _safe_task(notify_blocked(ip, browser, os_info), "notify_blocked")
                             await ws.send(json.dumps({
                                 "type": "auth_blocked",
                                 "reason": "Too many failed attempts. Try again in 60 minutes.",
@@ -1861,27 +1869,55 @@ class DashboardServer:
         Ensures settings.json values changed via dashboard in previous
         sessions are applied to BalanceTracker, Monitor, etc.
         """
+        synced: list[str] = []
         # Balance settings
         if "hourly_external_transfer_cap" in settings:
-            self._balance._hourly_external_transfer_cap = float(settings["hourly_external_transfer_cap"])
+            old_val = self._balance._hourly_external_transfer_cap
+            new_val = float(settings["hourly_external_transfer_cap"])
+            self._balance._hourly_external_transfer_cap = new_val
+            if old_val != new_val:
+                synced.append(f"hourly_cap: ${old_val:.2f} -> ${new_val:.2f}")
+            # Verify the attribute was actually set
+            actual = self._balance._hourly_external_transfer_cap
+            if actual != new_val:
+                logger.warning(
+                    f"[Settings] SYNC FAILED: hourly_cap set to ${new_val:.2f} "
+                    f"but reads back as ${actual:.2f}"
+                )
         if "bitfinex_reserve_pct" in settings:
-            self._balance._bitfinex_reserve_pct = float(settings["bitfinex_reserve_pct"])
+            old_val = self._balance._bitfinex_reserve_pct
+            new_val = float(settings["bitfinex_reserve_pct"])
+            self._balance._bitfinex_reserve_pct = new_val
             self._balance._bitfinex_reserve_target = (
-                self._balance._initial_investment * self._balance._bitfinex_reserve_pct
+                self._balance._initial_investment * new_val
             )
+            if old_val != new_val:
+                synced.append(f"bfx_reserve: {old_val*100:.1f}% -> {new_val*100:.1f}%")
         if "bitfinex_reserve_hard_floor" in settings:
-            self._balance._bitfinex_reserve_hard_floor = float(settings["bitfinex_reserve_hard_floor"])
+            old_val = self._balance._bitfinex_reserve_hard_floor
+            new_val = float(settings["bitfinex_reserve_hard_floor"])
+            self._balance._bitfinex_reserve_hard_floor = new_val
             self._balance._bitfinex_reserve_hard_floor_amount = (
-                self._balance._initial_investment * self._balance._bitfinex_reserve_hard_floor
+                self._balance._initial_investment * new_val
             )
+            if old_val != new_val:
+                synced.append(f"bfx_floor: {old_val*100:.1f}% -> {new_val*100:.1f}%")
         if "rebalance_cooldown" in settings:
-            self._balance._rebalance_cooldown = int(settings["rebalance_cooldown"])
+            old_val = self._balance._rebalance_cooldown
+            new_val = int(settings["rebalance_cooldown"])
+            self._balance._rebalance_cooldown = new_val
+            if old_val != new_val:
+                synced.append(f"rebal_cooldown: {old_val}s -> {new_val}s")
         if "adaptive_mode" in settings:
             self._balance._adaptive_mode = settings["adaptive_mode"]
 
         # Monitor settings
         if "min_net_profit_pct" in settings:
-            self._monitor._min_net_profit_pct = float(settings["min_net_profit_pct"])
+            old_val = self._monitor._min_net_profit_pct
+            new_val = float(settings["min_net_profit_pct"])
+            self._monitor._min_net_profit_pct = new_val
+            if old_val != new_val:
+                synced.append(f"min_net_pct: {old_val:.4f} -> {new_val:.4f}")
         if "rebalance_roi_horizon" in settings:
             self._monitor._rebalance_roi_horizon = int(settings["rebalance_roi_horizon"])
         if "rebalance_roi_divisor" in settings:
@@ -1925,6 +1961,19 @@ class DashboardServer:
             anomaly._cb_threshold = float(settings["circuit_breaker_threshold"])
         if "drawdown_threshold_pct" in settings:
             anomaly._dd_threshold_pct = float(settings["drawdown_threshold_pct"])
+
+        # Log sync results
+        if synced:
+            logger.info(f"[Settings] Startup sync: {', '.join(synced)}")
+        else:
+            logger.info("[Settings] Startup sync: all values match constructors")
+        # Always log critical runtime values for debugging
+        logger.info(
+            f"[Settings] Verified: hourly_cap=${self._balance._hourly_external_transfer_cap:.2f}, "
+            f"bfx_reserve={self._balance._bitfinex_reserve_pct*100:.1f}%, "
+            f"rebal_cooldown={self._balance._rebalance_cooldown}s, "
+            f"min_net_pct={self._monitor._min_net_profit_pct:.4f}"
+        )
 
     def _apply_enabled_exchanges(self, fee_data: dict) -> None:
         """Hot-apply exchange enabled/disabled state to monitor/optimizer/balance.

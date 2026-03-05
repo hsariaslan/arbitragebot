@@ -514,6 +514,7 @@ class _MEXCDepthSubFetcher:
         self._parent = parent
         self._symbols = symbols
         self._last_data_time: float = 0.0
+        self._connect_count: int = 0
 
     async def run(self) -> None:
         from config import RECONNECT_INITIAL_DELAY, RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY
@@ -537,10 +538,17 @@ class _MEXCDepthSubFetcher:
         kwargs = self._parent._ws_connect_kwargs()
 
         async with websockets.connect(url, **kwargs) as ws:
-            logger.info(
-                f"[{self._parent.exchange_name}] Depth sub-connection for "
-                f"{len(self._symbols)} symbols connected"
-            )
+            self._connect_count += 1
+            if self._connect_count == 1:
+                logger.info(
+                    f"[{self._parent.exchange_name}] Depth sub-connection for "
+                    f"{len(self._symbols)} symbols connected"
+                )
+            elif self._connect_count % 10 == 0:
+                logger.info(
+                    f"[{self._parent.exchange_name}] Depth sub-connection "
+                    f"reconnected ({self._connect_count} times)"
+                )
 
             # Subscribe to depth channel
             params = [
@@ -548,10 +556,11 @@ class _MEXCDepthSubFetcher:
                 for s in self._symbols
             ]
             await ws.send(json.dumps({"method": "SUBSCRIPTION", "params": params}))
-            logger.info(
-                f"[{self._parent.exchange_name}] Subscribed to "
-                f"{len(self._symbols)} depth channels"
-            )
+            if self._connect_count == 1:
+                logger.info(
+                    f"[{self._parent.exchange_name}] Subscribed to "
+                    f"{len(self._symbols)} depth channels"
+                )
 
             listener = asyncio.create_task(self._listen(ws))
             keepalive = asyncio.create_task(self._keep_alive(ws))
@@ -619,10 +628,11 @@ class _MEXCDepthSubFetcher:
             if self._last_data_time > 0:
                 stale = time.time() - self._last_data_time
                 if stale >= self._parent.STALENESS_RECONNECT_SECONDS:
-                    logger.warning(
-                        f"[{self._parent.exchange_name}] Depth sub-connection stale "
-                        f"({stale:.0f}s), reconnecting"
-                    )
+                    if self._connect_count <= 1:
+                        logger.warning(
+                            f"[{self._parent.exchange_name}] Depth sub-connection stale "
+                            f"({stale:.0f}s), reconnecting"
+                        )
                     self._last_data_time = 0.0
                     await ws.close()
                     return
