@@ -373,7 +373,7 @@ Bitfinex has $0 withdrawal fees on 14/15 networks and 0% taker fees, making it t
 3. **Protection during trading**: `available_usdt_for_trading()` prevents trades from spending Bitfinex USDT below the reserve target. Used in both `_compute_trade_size()` and `can_execute()`. Without this, Bitfinex as a buyer exchange drains the reserve through normal trading, triggering expensive replenishment cycles.
 4. **Emergency draw**: When net P&L gate blocks rebalancing AND miss streak ≥ 2× threshold, `emergency_reserve_draw()` transfers USDT from Bitfinex to the starved exchange — **bypasses all gates** (net P&L, hourly cap, transfer worthiness). Fee = $0. Hard floor enforced: draw cannot reduce Bitfinex below `total_capital × hard_floor`.
 5. **Periodic replenishment**: Every evaluation cycle, `replenish_reserve()` tops up from ALL exchanges sorted by withdrawal fee (cheapest first). Not gated by net profit — reserve replenishment is always beneficial. Minimum transfer `max($20, trade_amount × 2)`. 10-minute cooldown per source. Respects hourly budget.
-6. **USDT consolidation**: `consolidate_to_bitfinex()` moves idle capital to Bitfinex hub. Active buyer exchanges keep a buffer unless idle for 30+ minutes (based on `last_trade_time`, updated by both trades and rebalance operations). Non-active exchanges are fully consolidated. Runs during eval cycles and discovery.
+6. **USDT consolidation**: `consolidate_to_bitfinex()` moves idle capital to Bitfinex hub. Active buyer exchanges keep a buffer unless idle for 30+ minutes (based on `last_trade_time`, updated by both trades and rebalance operations). Non-active exchanges are fully consolidated. Runs during eval cycles and discovery. **Bitfinex availability gate**: Post-discovery consolidation is skipped when no active symbol is tradeable on Bitfinex (`_any_active_on_bitfinex()` check) — prevents circular waste of paying withdrawal fees to park USDT on Bitfinex when it can't be used. Discovery consolidation is ungated (no symbols active yet). Logged as `[Optimizer] ... consolidation SKIPPED` (throttled to every 5 min on regular eval cycle).
 7. **Idle seller crypto consolidation**: `_consolidate_idle_seller_crypto()` transfers crypto from seller exchanges idle 30+ minutes directly to Bitfinex, selling at 0% taker. Only for symbols available on Bitfinex (~40-50 of 60). Uses USDT withdrawal fees as proxy for crypto transfer fees.
 8. **Demotion sell via Bitfinex**: On demotion, crypto is transferred directly to Bitfinex and sold at 0% taker (saves source exchange taker fee). Falls back to local sell for symbols not available on Bitfinex. Post-demotion USDT consolidation runs automatically.
 9. **Withdrawal fee preference**: `_rebalance_usdt()` prefers cheap rebalance sources (fee ≤ $0.10) before falling back to expensive ones. Avoids KuCoin ($0.40) and Gate.io ($0.50) when cheaper alternatives exist.
@@ -392,6 +392,7 @@ Bitfinex has $0 withdrawal fees on 14/15 networks and 0% taker fees, making it t
 | `_execute_demotion()` | `optimizer.py` | Demotion with Bitfinex-first crypto transfer |
 | `_redistribute_post_demotion()` | `optimizer.py` | Push freed Bitfinex USDT to starved buyer exchanges after demotion |
 | `_is_symbol_on_bitfinex(symbol)` | `optimizer.py` | Check if symbol has live Bitfinex price (used for expansion preference) |
+| `_any_active_on_bitfinex()` | `optimizer.py` | Check if any active symbol is tradeable on Bitfinex (gates consolidation) |
 
 ## Adaptive Trading System
 
@@ -904,7 +905,11 @@ On first `initialize_crypto()`, `_run_demo_setup()` fires as `asyncio.create_tas
 
 ### Demo Position Tracking
 
-`DemoExecutor._demo_positions` (`{exchange: {symbol: qty}}`) tracks actual crypto held on demo/testnet accounts. Updated on: setup order fills, arbitrage fills, single-leg fills. Before placing a demo sell order, `cap_sell_qty()` checks available position — returns 0 (skip) if empty, reduces qty if partial. Prevents `Insufficient balance` rejections from thin testnet positions. Persisted in state via `to_state_dict()`.
+`DemoExecutor._demo_positions` (`{exchange: {symbol: qty}}`) tracks actual crypto held on demo/testnet accounts. Updated on: setup order fills, arbitrage fills, single-leg fills. Before placing a demo sell order, `cap_sell_qty()` checks available position — returns 0 (skip) if empty, reduces qty if partial. Sell qty is then rounded via `exchange_info.round_quantity()` to match exchange lot_size_step. Prevents `Insufficient balance` and `too many decimals` rejections. Persisted in state via `to_state_dict()`.
+
+### Demo Instrument Skip Pairs
+
+`_demo_skip_pairs: set[str]` in `monitor.py` permanently tracks `exchange:symbol:side` combos that fail with "instrument not found" type errors (e.g., OKX DYDX-USDT spot doesn't exist on demo). Populated automatically from D-10 rejections. Before each demo trade, both buy and sell legs are checked against skip pairs — skipped combos set `has_buy`/`has_sell` to `False`. Counter `_demo_skip_count` tracks total skipped trades. Logged in `[Session]` summary as `demo_skipped=X` with full `demo_skip_pairs=[...]` list. Persisted in state, cleared on "Restart Bot".
 
 ### Key Files
 
@@ -935,7 +940,7 @@ On first `initialize_crypto()`, `_run_demo_setup()` fires as `asyncio.create_tas
 - **D-04b**: Per-trade fee rate validation (actual vs configured rate, WARNING if >0.001% diff)
 - **D-08**: Slippage > 0.01% (avg across legs) + slippage model accuracy check (sim vs actual)
 - **D-09**: Partial fill (fill_ratio < 0.99)
-- **D-10**: Order rejected (error reason) — throttled: first per exchange:symbol:side logs, second logs "suppressing", 3rd+ silent. Executor-level dedup: `_rejected_symbols` dict tracks per-symbol rejection count, logs first + suppresses repeats.
+- **D-10**: Order rejected (error reason) — throttled: first per exchange:symbol:side logs, second logs "suppressing", 3rd+ silent. Executor-level dedup: `_rejected_symbols` dict tracks per-symbol rejection count, logs first + suppresses repeats. **Instrument skip**: If rejection error contains "instrument"/"doesn't exist"/"not exist", the `exchange:symbol:side` combo is permanently added to `_demo_skip_pairs` — future demo orders for that combo are silently skipped. Logged as `[DemoTrade] Permanently skipping...`. Persisted in state, cleared on "Restart Bot".
 - **D-11**: One-legged (one success, one fail) → auto-unwind
 - **D-12**: High latency > 500ms
 - **D-13**: Maker fill (unexpected for market orders)
@@ -952,7 +957,7 @@ Running counters tracked in `monitor.py` and persisted via state:
 - `_demo_total_sim_slippage` vs `_demo_total_actual_slippage` (slippage model accuracy)
 - `_demo_total_latency_ms`, `_demo_fee_mismatches`
 
-Logged in `[Session]` 5-minute summary: fill/reject/partial/one-leg counts, profit drift, avg slippage comparison, fee mismatches, avg latency.
+Logged in `[Session]` 5-minute summary: fill/reject/partial/one-leg counts, profit drift, avg slippage comparison, fee mismatches, avg latency, `demo_skipped` count, `demo_skip_pairs` list.
 
 ### Fee Model (D-05)
 

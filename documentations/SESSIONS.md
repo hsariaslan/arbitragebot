@@ -1295,7 +1295,7 @@ Both blocks were appropriate — symbols experiencing consecutive losses due to 
 **Date**: 2026-03-05, 07:48–08:10 UTC (22 min)
 **Capital**: $1,000
 **Version**: v0.24.2-alpha
-**Mode**: demo (Binance/OKX/Bybit)
+**Mode**: demo (Binance/OKX/Bybit) + simulation
 **VPS**: LightNode Bangkok
 
 #### Summary
@@ -1354,3 +1354,229 @@ The reconnections themselves are harmless — MEXC depth data via protobuf WebSo
 1. **SIGTERM handling must not assume intentionality**: VPS crashes, OOM kills, and systemd stops all send SIGTERM. Only explicit user actions (dashboard "Restart Bot") should be treated as intentional.
 2. **Anomaly state should not persist across crashes**: A crash is already a disruption — starting with a clean anomaly state and letting protection re-trigger naturally is safer than blindly restoring a paused state from a potentially-stale session.
 3. **Reconnection logs need throttling**: Any sub-connection that reconnects frequently (MEXC depth, potentially others) should log first connect + periodic summaries, not every attempt.
+
+---
+
+### Session #10 — 2026-03-05 (First Beta, Transfer Fee Deficit)
+
+**Date**: 2026-03-05, 11:13–12:27 UTC (74 min)
+**Capital**: $1,000
+**Version**: v0.25.0-beta
+**Mode**: demo (Binance/OKX/Bybit) + simulation
+**VPS**: LightNode Bangkok
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | 74 min (1h 14m) |
+| Total Trades | 208 |
+| Trading PnL | $0.74 |
+| Transfer Fees | $1.94 (external: $1.70) |
+| Cashback | $0.38 (credited: $0.06, pending: $0.32) |
+| **Net Profit** | **-$1.18** |
+| **$/hr** | **-$2.46** |
+| Avg Profit/Trade | $0.0035 |
+| Avg Net% | 0.040% |
+| Avg Trade Size | $8.25 |
+| SIZE_ZERO Events | 1,036 |
+| Position Cap Hits | 585 |
+| Phantom Spreads | 311 |
+| EVD Seller Penalties | 6,863 (1 demotion) |
+| One-Leg Simulations | 4 ($0.02 cost) |
+
+#### Session Timeline
+
+| Phase | Time (UTC) | Duration | Symbols | Trades | PnL | Notes |
+|-------|-----------|----------|---------|--------|-----|-------|
+| 1. Discovery | 11:13–11:14 | 1 min | — | 0 | — | ZEC(0.014), AXS(0.012) found |
+| 2. AXS only | 11:14–11:24 | 10 min | AXSUSDT | 15 | $0.003 | 9 trades at 0.005% net — near zero |
+| 3. Rotation → COMP | 11:24–11:56 | 32 min | COMPUSDT | 6 | $0.026 | Rotation cost $0.44, score fell, demoted |
+| 4. Re-discovery | 11:56–11:57 | 1 min | — | 0 | — | All symbols demoted |
+| 5. DYDX+ADA+AXS | 11:57–12:27 | 30 min | 3 symbols | 187 | $0.71 | Most productive phase |
+
+#### Active Symbols
+
+| Symbol | Trades | Profit | Avg Net% | Top Pair | Notes |
+|--------|--------|--------|----------|----------|-------|
+| ADAUSDT | 118 | $0.567 | 0.046% | MEXC→KuCoin (70), BFX→KuCoin (45) | Best performer, Bitfinex 0% fee |
+| AXSUSDT | 43 | $0.064 | 0.027% | KuCoin→Bitget (19), Gate→MEXC (12) | Phase 1 trades nearly worthless |
+| DYDXUSDT | 39 | $0.086 | 0.023% | MEXC→Bitget (29), MEXC→Binance (5) | Low-value coin, small sizes |
+| COMPUSDT | 8 | $0.026 | 0.045% | OKX→Gate (2), Bybit→KuCoin (6) | Demoted after 32 min |
+
+#### Exchange Pair Breakdown
+
+| Pair | Trades | Combined Fee | Notes |
+|------|--------|-------------|-------|
+| MEXC→KuCoin | 71 | 0.12% | ADA workhorse |
+| Bitfinex→KuCoin | 47 | 0.08% | ADA — best margins (0.057% avg net) |
+| MEXC→Bitget | 29 | 0.12% | DYDX |
+| KuCoin→Bitget | 19 | 0.16% | AXS Phase 1 — too expensive |
+| Gate→MEXC | 12 | 0.13% | AXS Phase 5 |
+
+#### Transfer Fee Breakdown
+
+Total transfer fees: $1.94 — **2.6× the trading profit**.
+
+| Category | Amount | Details |
+|----------|--------|---------|
+| Idle consolidations (4×) | $2.10 | Moving idle capital to Bitfinex hub |
+| Rotation AXS→COMP | $0.44 | Capital reallocation across exchanges |
+| Demotion COMP + consolidation | $0.68 | Sell crypto + move USDT to Bitfinex |
+| Trading rebalances | $0.72 | Replenishing depleted buyer exchanges |
+
+#### Trade Quality Distribution
+
+| Net% Bucket | Trades | Profit | % of Total Profit |
+|-------------|--------|--------|--------------------|
+| <0.02% | 62 (30%) | $0.04 | 5% |
+| 0.02–0.03% | 53 (25%) | $0.10 | 14% |
+| 0.03–0.05% | 37 (18%) | $0.14 | 19% |
+| 0.05–0.10% | 45 (22%) | $0.33 | 45% |
+| >0.10% | 7 (3%) | $0.13 | 18% |
+
+119 trades (57%) had net <0.03% and generated only $0.14 combined — 19% of profit but 57% of trade count. These thin-margin trades consumed position cap allowance, triggered rebalance pressure, and created churn.
+
+#### Demo Comparison
+
+- **8 demo rejections** (all COMPUSDT): OKX min order amount ($15 vs $5 trade), Bybit order value too low. Rejection dedup working — 2 logged, 6 suppressed.
+- **0 demo fills**: No demo-executable pair matched (COMP traded Bybit→KuCoin and OKX→Gate, but trade sizes were below exchange minimums on demo).
+- **60 DemoCompare log entries** (all `missing_position`): Sim held positions on OKX/Bybit that had no demo orders. 655 discrepancies in dashboard from 15s polling accumulation.
+- **v0.25.0-beta fixes verified**: D-10 throttling, MEXC depth log silence, `_safe_task()` — all working correctly.
+
+#### Observations
+
+| # | Item | Notes |
+|---|------|-------|
+| 1 | Net deficit from transfers | $1.94 fees vs $0.74 PnL. Transfer overhead is 2.6× trading income. |
+| 2 | Threshold 0.01% too low | AXS activated at score=0.012, produced 9 trades at 0.005% net. Marginal symbols waste capital on setup/teardown. |
+| 3 | COMP rotation net negative | Cost $0.44 to rotate in, earned $0.026 in 32 min, then cost $0.68 to demote. Total: -$1.09 for COMP's lifecycle. |
+| 4 | Idle consolidations expensive | 4 consolidations cost $2.10 — mostly from Gate.io ($0.50) and KuCoin ($0.40) withdrawal fees. |
+| 5 | ADA+Bitfinex is the clear winner | Bitfinex→KuCoin pair averaged 0.057% net. 0% buy fee makes thin spreads viable. |
+| 6 | Position cap hit 585 times | Max position multiplier (5×) limits trading velocity on concentrated symbols. |
+| 7 | No anomaly triggers | 0 pauses, 0 warnings, 0 symbol blocks — stable session. |
+
+#### Key Takeaways
+
+1. **Transfer fees are the #1 profit killer at $1,000 capital**: With $10 trades averaging $0.004 profit, it takes ~100 trades ($0.40) to pay for one Gate.io withdrawal ($0.50). The bot must avoid expensive transfers entirely.
+2. **Trading threshold 0.01% is too low**: Symbols barely above threshold activate, consume setup fees, and get demoted — net negative. Raising to 0.03% would eliminate 57% of trades but only lose 19% of profit, while dramatically reducing rebalance pressure.
+3. **Idle consolidation is counterproductive at small capital**: Moving $30 to Bitfinex at $0.40 fee is never recouped. Consolidation should be gated by a minimum worthiness check.
+4. **Best pair confirmed: Bitfinex→cheap_exchange**: 0% taker on Bitfinex makes any spread above the seller's fee profitable. MEXC (0.04%) and Bybit (0.075%) are ideal counterparts.
+5. **Recommended settings changes**: Raise `TRADING_SCORE_THRESHOLD` to 0.03, raise `min_net_profit_pct` to 0.03%, reduce `hourly_external_transfer_cap` to $2, increase `reallocation_cost_horizon` to 4h.
+
+---
+
+### Session #11 — 2026-03-05 (Three Demotions, Non-Bitfinex Symbols)
+
+**Date**: 2026-03-05, 12:43–15:44 UTC (3h 01m)
+**Capital**: $1,000
+**Version**: v0.25.0-beta
+**Mode**: demo (Binance/OKX/Bybit)
+**VPS**: LightNode Bangkok
+
+#### Settings Changed (from Session #10)
+
+- `min_net_profit_pct`: 0.01% → **0.03%** (raised)
+- `TRADING_SCORE_THRESHOLD`: 0.01 → **0.03** (raised)
+- `hourly_external_transfer_cap`: $5.00 → **$2.00** (lowered)
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | 3h 01m |
+| Total Trades | 372 |
+| Trading PnL | $2.74 |
+| Transfer Fees | $5.47 (consolidation $2.84, demotion $2.07, trading $0.56) |
+| Cashback | $0.99 (credited: $0.33, pending: $0.66) |
+| **Net Profit** | **-$1.25** |
+| **$/hr** | **-$1.63** (improving but still negative) |
+| Avg Profit/Trade | $0.0073 |
+| Avg Net% | 0.066% |
+| Avg Trade Size | $9.87 |
+| SIZE_ZERO Events | 986 |
+| Position Cap Hits | 933 |
+| Phantom Spreads | 625 |
+| Anomaly Triggers | 0p/0w/0sb |
+| Demo Fills | 36/49 (13 rejected) |
+
+#### Session Timeline
+
+| Phase | Time (UTC) | Duration | Symbol | Trades | PnL | Notes |
+|-------|-----------|----------|--------|--------|-----|-------|
+| 1. Discovery | 12:43–12:44 | 1 min | — | 0 | — | DYDX(0.031) found |
+| 2. DYDX (1st) | 12:44–13:50 | 66 min | DYDXUSDT | 181 | $1.17 | Active 59 min, idle 7 min |
+| 3. Re-discovery | 13:50–13:56 | 6 min | — | 0 | — | Extended to 600s, DYDX barely hit 0.03 |
+| 4. DYDX (2nd) | 13:56–14:42 | 46 min | DYDXUSDT | 105 | $0.78 | Active 34 min, idle 12 min |
+| 5. Re-discovery | 14:42–14:46 | 4 min | — | 0 | — | AXS(0.030) found |
+| 6. AXS | 14:46–15:32 | 46 min | AXSUSDT | 86 | $0.78 | Active 28 min, idle 18 min |
+| 7. Final discovery | 15:32–15:44 | 12 min | — | 0 | — | No symbol ≥0.03, session ended |
+
+3 complete activate→trade→demote cycles. ~44 min idle (24% of session).
+
+#### Active Symbols
+
+| Symbol | Trades | Profit | Avg Net% | Top Pair(s) | Bitfinex? |
+|--------|--------|--------|----------|-------------|-----------|
+| DYDXUSDT | 286 | $1.95 | 0.063% | MEXC→OKX (105), MEXC→Bitget (79) | **No** |
+| AXSUSDT | 86 | $0.78 | 0.073% | KuCoin→Gate.io (74) | **No** |
+
+**Critical finding**: Neither DYDX nor AXS is available on Bitfinex. Every trade paid fees on BOTH sides (0.04%+0.10% for DYDX, 0.08%+0.09% for AXS). No 0%-fee Bitfinex leg was used at all this session.
+
+#### Exchange Pair Breakdown
+
+| Pair | Trades | Combined Fee | Avg Net% | Notes |
+|------|--------|-------------|----------|-------|
+| MEXC→OKX | 105 | 0.14% | 0.042% | Highest volume, thin margins |
+| MEXC→Bitget | 79 | 0.12% | 0.097% | Better margins |
+| KuCoin→Gate.io | 74 | 0.17% | 0.081% | Expensive pair but decent spread |
+| MEXC→Bybit | 21 | 0.115% | — | |
+| MEXC→Binance | 21 | 0.115% | — | |
+| Binance→MEXC | 16 | 0.115% | — | |
+
+#### Transfer Fee Breakdown
+
+Total overhead: **$5.47** — **2.0× the trading profit**.
+
+| Category | Amount | Count | Notes |
+|----------|--------|-------|-------|
+| Idle consolidations | $2.84 | 12 | Repeated expensive transfers to Bitfinex |
+| Post-demotion consolidation | $1.10 | 3 | Gate.io ($0.50) + KuCoin ($0.40) fees |
+| Demotion sell fees | $0.97 | 3 | Taker fees on crypto→USDT |
+| Trading rebalances | $0.56 | 135 | Mostly free (Bitfinex $0, MEXC $0) |
+
+Hourly cap ($2) was hit at end (`BLOCKED by hourly cap: $1.60+$0.40 > $2.00/hr`), but most damage came from consolidation (not capped separately).
+
+#### Trade Quality Distribution
+
+| Net% Bucket | Trades | Profit | % of Total |
+|-------------|--------|--------|------------|
+| <0.03% | 87 (23%) | $0.12 | 4% |
+| 0.03–0.05% | 78 (21%) | $0.29 | 11% |
+| 0.05–0.10% | 120 (32%) | $1.11 | 41% |
+| 0.10–0.15% | 66 (18%) | $0.95 | 35% |
+| >0.15% | 14 (4%) | $0.24 | 9% |
+
+Trade quality significantly better than Session #10 (avg 0.066% vs 0.040%). The 0.03% threshold removed the worst trades. But 87 trades still snuck under 0.03% — likely from `min_net_profit_pct` allowing some thin-margin executions.
+
+#### New Discrepancies Found
+
+| Issue | Severity | Details |
+|-------|----------|---------|
+| **Bybit fee mismatch** | Medium | Configured 0.075% (MNT discount) but demo testnet charges 0.100% base rate. 12 warnings. Demo testnet may not honor token discounts. |
+| **Bybit 1.029% fee anomaly** | Low | One trade showed 1.029% actual fee — likely a rounding artifact or testnet glitch. |
+| **OKX DYDXUSDT "Instrument ID doesn't exist"** | Medium | OKX demo trading doesn't have DYDX-USDT spot pair. Repeated rejections (7 logged). |
+| **Bybit qty too many decimals** | Medium | `qty=4.364609053497986` sent to Bybit — lot size rounding not applied for demo sell orders. |
+| **Binance NOTIONAL filter** | Low | $5.00 trade at $0.0963/DYDX = $4.96 notional, below Binance minimum. |
+| **Task exceptions** | Low | 3 "Task exception was never retrieved" from Pionex reconnections. |
+| **2,959 dashboard discrepancies** | Expected | 162 balance_mismatch + 86 missing_position, accumulated over 3h polling. |
+
+#### Key Takeaways
+
+1. **Idle consolidation is the #1 cost driver**: $2.84 in 12 consolidations — moving idle USDT to Bitfinex hub when no Bitfinex-tradeable symbol is active is pure waste. Consolidation should be paused when the active symbol isn't on Bitfinex. **Fixed in v0.25.1-beta**: `_any_active_on_bitfinex()` gate added to all 3 post-discovery consolidation call sites.
+2. **Non-Bitfinex symbols can't overcome fee drag**: DYDX (MEXC→OKX = 0.14% combined fee) needs 0.14%+ spread to profit. These thin-alt spreads rarely sustain. Bitfinex-available symbols get one leg free.
+3. **Three activate→demote cycles in 3 hours = $2.07 demotion overhead**: Each cycle costs ~$0.70 (sell fees + consolidation). With $0.90/hr trading profit, it takes ~47 min just to recoup one demotion.
+4. **The 0.03 threshold helped trade quality but not the deficit**: Avg net% doubled (0.040% → 0.066%), but marginal symbols still activate at score=0.030 and get demoted 46-66 min later. The threshold needs to be even higher, or symbols must be filtered by Bitfinex availability.
+5. **Bybit demo fee mismatch needs investigation**: If real Bybit also charges 0.10% (no MNT discount applied), the configured 0.075% overstates profitability on every Bybit trade. **Confirmed**: Bybit MNT discount requires no minimum holding — just enable toggle + hold MNT balance. Demo testnet doesn't honor token discounts (expected behavior).
+6. **Bybit lot size rounding bug**: Demo sell qty sent unrounded — exchange_info lot rounding should apply to demo orders too. **Fixed in v0.25.1-beta**: `exchange_info.round_quantity()` applied after `cap_sell_qty()` in `_execute_demo_trade()`.
+7. **OKX DYDX-USDT demo missing instrument**: OKX demo doesn't have DYDX-USDT spot pair, causing repeated D-10 rejections. **Fixed in v0.25.1-beta**: `_demo_skip_pairs` auto-detects "instrument not found" rejections and permanently skips the combo.
