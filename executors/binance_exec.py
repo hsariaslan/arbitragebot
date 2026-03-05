@@ -102,10 +102,18 @@ class BinanceExecutor(ExecutionEngine):
             if resp.status != 200 or "orderId" not in data:
                 error = data.get("msg", str(data))
                 code = data.get("code", resp.status)
-                logger.warning(
-                    f"[BinanceExec] Order rejected: {symbol} {side} "
-                    f"qty={qty} — {code}: {error}"
-                )
+                count = self._rejected_symbols.get(symbol, 0) + 1
+                self._rejected_symbols[symbol] = count
+                if count == 1:
+                    logger.warning(
+                        f"[BinanceExec] Order rejected: {symbol} {side} "
+                        f"qty={qty} — {code}: {error}"
+                    )
+                elif count == 2:
+                    logger.info(
+                        f"[BinanceExec] {symbol} rejection repeated — "
+                        f"suppressing further logs"
+                    )
                 return self._failed_result(
                     symbol, side, qty, expected_price,
                     f"{code}: {error}", client_order_id,

@@ -212,6 +212,7 @@ class ExecutionEngine(ABC):
     def __init__(self, exchange_name: str, exchange_info: ExchangeInfoManager | None = None) -> None:
         self.exchange_name = exchange_name
         self._exchange_info = exchange_info
+        self._rejected_symbols: dict[str, int] = {}  # symbol → rejection count
 
     @abstractmethod
     async def place_market_order(

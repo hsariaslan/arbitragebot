@@ -107,10 +107,18 @@ class BybitExecutor(ExecutionEngine):
             ret_code = data.get("retCode", -1)
             if ret_code != 0:
                 error = data.get("retMsg", str(data))
-                logger.warning(
-                    f"[BybitExec] Order rejected: {symbol} {side} "
-                    f"qty={qty} — {ret_code}: {error}"
-                )
+                count = self._rejected_symbols.get(symbol, 0) + 1
+                self._rejected_symbols[symbol] = count
+                if count == 1:
+                    logger.warning(
+                        f"[BybitExec] Order rejected: {symbol} {side} "
+                        f"qty={qty} — {ret_code}: {error}"
+                    )
+                elif count == 2:
+                    logger.info(
+                        f"[BybitExec] {symbol} rejection repeated — "
+                        f"suppressing further logs"
+                    )
                 return self._failed_result(
                     symbol, side, qty, expected_price,
                     f"{ret_code}: {error}", client_order_id,

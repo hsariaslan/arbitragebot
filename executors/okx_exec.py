@@ -118,10 +118,18 @@ class OKXExecutor(ExecutionEngine):
                 sdata = data.get("data", [{}])
                 if sdata:
                     error = sdata[0].get("sMsg", error) or error
-                logger.warning(
-                    f"[OKXExec] Order rejected: {symbol} {side} "
-                    f"qty={qty} — {error}"
-                )
+                count = self._rejected_symbols.get(symbol, 0) + 1
+                self._rejected_symbols[symbol] = count
+                if count == 1:
+                    logger.warning(
+                        f"[OKXExec] Order rejected: {symbol} {side} "
+                        f"qty={qty} — {error}"
+                    )
+                elif count == 2:
+                    logger.info(
+                        f"[OKXExec] {symbol} rejection repeated — "
+                        f"suppressing further logs"
+                    )
                 return self._failed_result(
                     symbol, side, qty, expected_price,
                     error, client_order_id,
