@@ -1528,7 +1528,12 @@ class SymbolOptimizer:
         )
 
         # Consolidate freed USDT from local sells to Bitfinex hub
-        if self._balance and "Bitfinex" in self._balance._exchanges:
+        # Skip if no active symbol is tradeable on Bitfinex (avoids circular waste)
+        if (
+            self._balance
+            and "Bitfinex" in self._balance._exchanges
+            and self._any_active_on_bitfinex()
+        ):
             active_buyers = set()
             active_sellers = set()
             for sym in self._active_symbols:
@@ -1549,6 +1554,12 @@ class SymbolOptimizer:
                     f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
                     f"(fees: ${hub_fee:.4f})"
                 )
+        elif self._balance and "Bitfinex" in self._balance._exchanges:
+            logger.info(
+                f"[Optimizer] Post-demotion consolidation SKIPPED: "
+                f"no active symbol tradeable on Bitfinex "
+                f"(active={list(self._active_symbols)})"
+            )
 
         # Update historical stats
         stats = self._historical_stats.get(symbol)
@@ -1684,6 +1695,15 @@ class SymbolOptimizer:
             if fetcher.exchange_name == "Bitfinex":
                 ps = fetcher.get_state().get(symbol)
                 return bool(ps and ps.bid and float(ps.bid) > 0)
+        return False
+
+    def _any_active_on_bitfinex(self) -> bool:
+        """Check if any active symbol is tradeable on Bitfinex."""
+        if not self._active_symbols:
+            return False
+        for sym in self._active_symbols:
+            if self._is_symbol_on_bitfinex(sym):
+                return True
         return False
 
     def _consolidate_idle_seller_crypto(self, idle_threshold: float = 900.0) -> None:
@@ -1927,7 +1947,12 @@ class SymbolOptimizer:
             self._update_watchlist()
             self._evaluate_demotions()
             # Consolidate to Bitfinex hub even when in deficit (not gated by PnL)
-            if self._balance and "Bitfinex" in self._balance._exchanges:
+            # Skip if no active symbol is tradeable on Bitfinex (avoids circular waste)
+            if (
+                self._balance
+                and "Bitfinex" in self._balance._exchanges
+                and self._any_active_on_bitfinex()
+            ):
                 active_buyers = set()
                 active_sellers = set()
                 for sym in self._active_symbols:
@@ -1944,6 +1969,11 @@ class SymbolOptimizer:
                 )
                 self._consolidate_idle_seller_crypto(idle_threshold=1800.0)
                 self._balance.replenish_reserve()
+            elif self._balance and "Bitfinex" in self._balance._exchanges:
+                logger.info(
+                    "[Optimizer] Consolidation SKIPPED (deficit path): "
+                    "no active symbol tradeable on Bitfinex"
+                )
             return
 
         # Clean up expired demotion cooldowns
@@ -1969,7 +1999,12 @@ class SymbolOptimizer:
         self._evaluate_demotions()
 
         # Phase 4.5: Consolidate idle capital to Bitfinex hub
-        if self._balance and "Bitfinex" in self._balance._exchanges:
+        # Skip if no active symbol is tradeable on Bitfinex (avoids circular waste)
+        if (
+            self._balance
+            and "Bitfinex" in self._balance._exchanges
+            and self._any_active_on_bitfinex()
+        ):
             active_buyers = set()
             active_sellers = set()
             for sym in self._active_symbols:
@@ -1995,6 +2030,21 @@ class SymbolOptimizer:
                 )
             # Also consolidate crypto from idle seller exchanges (30 min threshold)
             self._consolidate_idle_seller_crypto(idle_threshold=1800.0)
+        elif (
+            self._balance
+            and "Bitfinex" in self._balance._exchanges
+            and self._active_symbols
+        ):
+            # Throttle: log every 5 min
+            if not hasattr(self, "_last_consol_skip_log"):
+                self._last_consol_skip_log = 0.0
+            if now - self._last_consol_skip_log >= 300:
+                logger.info(
+                    "[Optimizer] Idle consolidation SKIPPED: "
+                    "no active symbol tradeable on Bitfinex "
+                    f"(active={list(self._active_symbols)})"
+                )
+                self._last_consol_skip_log = now
 
         active_scores = [
             self._scores[s]
