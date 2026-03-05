@@ -258,6 +258,8 @@ Bitfinex offers **free withdrawals on 14 networks**. Only ERC20 has a fee.
 | **Has last_price** | Yes |
 | **Has volume** | Yes |
 
+**OKX books5 skips unchanged snapshots**: The `books5` depth channel publishes snapshots every 100ms but skips pushes when the order book hasn't changed (per OKX docs). During low-activity periods (especially altcoins), this can slow update frequency. The `tickers` channel behaves similarly — it pushes on price changes, not at fixed intervals. Both channels slow down during quiet markets, causing data freshness metric degradation — this reflects market inactivity, not stale data. OKX is NOT marked `IS_EVENT_DRIVEN` (that flag is for Bitfinex where updates come only every 10-20s on price changes).
+
 ### USDT Withdrawal Fees
 
 All OKX fees are **dynamic** — these are conservative estimates.
@@ -369,8 +371,8 @@ All Bybit fees are **dynamic** — these are conservative estimates.
 | **Headquarters** | Seychelles |
 | **Founded** | 2018 |
 | **Base taker fee** | 0.05% |
-| **Token discount** | None needed (already lowest tier) |
-| **Effective taker fee** | 0.05% |
+| **Token discount** | MX Deduction 20% (enable "Use MX for Fees") |
+| **Effective taker fee** | 0.04% (with MX Deduction) |
 | **Fee model** | received |
 | **Fee mechanism** | instant |
 | **Demo/Testnet API** | No |
@@ -436,7 +438,7 @@ All Bybit fees are **dynamic** — these are conservative estimates.
 
 - 60/60 configured symbols available.
 - Fully accessible from Bangkok VPS (Thailand not geo-blocked).
-- 0.05% taker fee with no token requirement — excellent for arbitrage.
+- 0.05% base taker fee. MX Deduction (20% off → 0.04%) available by enabling "Use MX for Fees" in account settings — requires small MX balance, no minimum holding amount. The 500 MX holding discount (50% off → 0.025%) was **suspended** on Feb 9, 2026 — resumption date TBD.
 - No demo/testnet API — simulation only.
 - 30 subscription limit per WS connection.
 
@@ -776,7 +778,7 @@ If Pionex has migrated to Singapore (possible but unconfirmed):
 | Exchange | Base Rate | Discount | Effective Rate |
 |----------|:---------:|:--------:|:--------------:|
 | **Bitfinex** | 0.00% | — | **0.00%** |
-| **MEXC** | 0.05% | — | **0.05%** |
+| **MEXC** | 0.05% | MX Deduction 20% | **0.04%** |
 | **Pionex** | 0.05% | — | **0.05%** |
 | **Binance** | 0.10% | BNB 25% | **0.075%** |
 | **Bybit** | 0.10% | MNT/BIT 25% | **0.075%** |

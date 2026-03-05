@@ -99,6 +99,8 @@ class OKXFetcher(BaseFetcher):
         symbol = self._from_okx_symbol(inst_id)
 
         if channel == "books5":
+            # books5 pushes depth snapshots every 100ms (skips if no change).
+            # Update depth + top-of-book bid/ask, preserve ticker's updated_at.
             data = data_list[0]
             existing = self._state.get(symbol, PriceState())
 
@@ -109,12 +111,6 @@ class OKXFetcher(BaseFetcher):
             depth_bids = [(b[0], b[1]) for b in bids_raw if len(b) >= 2] or None
             depth_asks = [(a[0], a[1]) for a in asks_raw if len(a) >= 2] or None
 
-            ts_raw = data.get("ts", "0")
-            try:
-                updated_at = int(ts_raw) / 1000.0
-            except (ValueError, TypeError):
-                updated_at = existing.updated_at
-
             price_state = PriceState(
                 bid=bids_raw[0][0] if bids_raw else existing.bid,
                 ask=asks_raw[0][0] if asks_raw else existing.ask,
@@ -122,7 +118,7 @@ class OKXFetcher(BaseFetcher):
                 ask_qty=asks_raw[0][1] if asks_raw else existing.ask_qty,
                 last_price=existing.last_price,
                 volume=existing.volume,
-                updated_at=updated_at,
+                updated_at=existing.updated_at,  # keep ticker's exchange timestamp
                 bids=depth_bids,
                 asks=depth_asks,
             )
