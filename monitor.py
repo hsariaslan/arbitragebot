@@ -263,6 +263,11 @@ class ArbitrageMonitor:
         self._demo_sell_skip_log: dict[str, int] = {}
         # Throttle D-10 rejection logs (first per exchange:symbol, then silent)
         self._demo_reject_log: dict[str, int] = {}
+        # Permanently skip demo orders for exchange:symbol:side combos that
+        # fail with "instrument not found" type errors (symbol doesn't exist
+        # on that exchange's demo/testnet environment)
+        self._demo_skip_pairs: set[str] = set()
+        self._demo_skip_count: int = 0  # total skipped demo trades due to skip pairs
 
         # Demo accuracy stats (for [Session] summary)
         self._demo_trade_count: int = 0
@@ -653,6 +658,16 @@ class ArbitrageMonitor:
             has_buy = self._executor.has_executor(buy_ex)
             has_sell = self._executor.has_executor(sell_ex)
 
+            # Skip exchange:symbol:side combos permanently rejected (instrument not found)
+            buy_skip_key = f"{buy_ex}:{symbol}:buy"
+            sell_skip_key = f"{sell_ex}:{symbol}:sell"
+            if has_buy and buy_skip_key in self._demo_skip_pairs:
+                has_buy = False
+                self._demo_skip_count += 1
+            if has_sell and sell_skip_key in self._demo_skip_pairs:
+                has_sell = False
+                self._demo_skip_count += 1
+
             # Cap sell qty to available demo position to avoid "insufficient balance"
             actual_sell_qty = sell_qty
             if has_sell:
@@ -672,6 +687,13 @@ class ArbitrageMonitor:
                         f"[DemoTrade] {symbol} sell on {sell_ex} capped: "
                         f"{sell_qty:.8f}->{actual_sell_qty:.8f} (demo position limit)"
                     )
+                # Round qty to exchange lot_size_step after capping
+                if has_sell and self._exchange_info:
+                    from decimal import Decimal
+                    rounded = self._exchange_info.round_quantity(
+                        sell_ex, symbol, Decimal(str(actual_sell_qty))
+                    )
+                    actual_sell_qty = float(rounded)
 
             if has_buy and has_sell:
                 # Both legs available — use full arbitrage execution
@@ -894,6 +916,16 @@ class ArbitrageMonitor:
                         f"[D-10] {sym} {side} on {leg.exchange} rejection repeated — "
                         f"suppressing further logs"
                     )
+                # Permanently skip if instrument doesn't exist on this exchange
+                err = (leg.error or "").lower()
+                if "instrument" in err or "doesn't exist" in err or "not exist" in err:
+                    skip_key = f"{leg.exchange}:{sym}:{side}"
+                    if skip_key not in self._demo_skip_pairs:
+                        self._demo_skip_pairs.add(skip_key)
+                        logger.warning(
+                            f"[DemoTrade] Permanently skipping {side} {sym} on "
+                            f"{leg.exchange}: instrument not available on demo"
+                        )
 
         # D-11: One-legged trade
         if result.one_legged:
@@ -1063,6 +1095,16 @@ class ArbitrageMonitor:
                         f"[D-10] {sym} {side} on {leg.exchange} rejection repeated — "
                         f"suppressing further logs"
                     )
+                # Permanently skip if instrument doesn't exist on this exchange
+                err = (leg.error or "").lower()
+                if "instrument" in err or "doesn't exist" in err or "not exist" in err:
+                    skip_key = f"{leg.exchange}:{sym}:{side}"
+                    if skip_key not in self._demo_skip_pairs:
+                        self._demo_skip_pairs.add(skip_key)
+                        logger.warning(
+                            f"[DemoTrade] Permanently skipping {side} {sym} on "
+                            f"{leg.exchange}: instrument not available on demo"
+                        )
 
             # D-12: High latency
             if leg.latency_ms > 500:
@@ -1910,7 +1952,12 @@ class ArbitrageMonitor:
                     f"avg_slip_sim={avg_sim_slip:.4f}% avg_slip_demo={avg_demo_slip:.4f}% "
                     f"fee_mismatch={self._demo_fee_mismatches} "
                     f"latency_avg={avg_lat:.0f}ms "
-                    f"reject_suppressed={sum(max(0, v - 1) for v in self._demo_reject_log.values())}"
+                    f"reject_suppressed={sum(max(0, v - 1) for v in self._demo_reject_log.values())} "
+                    f"demo_skipped={self._demo_skip_count}"
+                )
+            if self._demo_skip_pairs:
+                logger.info(
+                    f"[Session] demo_skip_pairs={sorted(self._demo_skip_pairs)}"
                 )
 
         # Cleanup stale pending opportunities (spread didn't persist)
@@ -2236,6 +2283,8 @@ class ArbitrageMonitor:
             "_demo_fee_mismatches": self._demo_fee_mismatches,
             # Demo setup
             "_demo_setup_complete": self._demo_setup_complete,
+            "_demo_skip_pairs": list(self._demo_skip_pairs),
+            "_demo_skip_count": self._demo_skip_count,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -2306,3 +2355,5 @@ class ArbitrageMonitor:
         self._demo_fee_mismatches = data.get("_demo_fee_mismatches", 0)
         # Demo setup
         self._demo_setup_complete = data.get("_demo_setup_complete", False)
+        self._demo_skip_pairs = set(data.get("_demo_skip_pairs", []))
+        self._demo_skip_count = data.get("_demo_skip_count", 0)
