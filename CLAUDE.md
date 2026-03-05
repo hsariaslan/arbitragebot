@@ -36,13 +36,13 @@ All 9 exchanges have working WebSocket fetchers implemented.
 | 2 | **Binance** | 0.075% | BNB (25% off) | URL-param streams | 58/60 (no HYPEUSDT) |
 | 3 | **OKX** | 0.10% | OKB (requires 500 OKB ~$25k) | Post-connect JSON | 60/60 |
 | 4 | **Bybit** | 0.075% | MNT/BIT (25% off) | Post-connect JSON | 58/60 (no ZECUSDT) |
-| 5 | **MEXC** | 0.05% | None needed (already lowest) | Post-connect JSON | 60/60 |
+| 5 | **MEXC** | 0.04% | MX Deduction (20% off 0.05%) | Post-connect JSON | 60/60 |
 | 6 | **Bitget** | 0.08% | BGB (20% off) | Post-connect JSON | 60/60 |
 | 7 | **KuCoin** | 0.08% | KCS (20% off) | REST token + WS | 60/60 |
 | 8 | **Gate.io** | 0.09% | GT (10% off, enabled) | Post-connect JSON | 60/60 |
 | 9 | **Pionex** | 0.05% | None (VIP tiers only, volume-gated) | Post-connect JSON | 60/60 |
 
-**MEXC note:** Accessible from Bangkok VPS. 0.05% taker fee (lowest after Bitfinex), no discount token needed. Uses protobuf binary WS messages. 30 sub limit per connection — uses 2 connections for 60 symbols.
+**MEXC note:** Accessible from Bangkok VPS. 0.04% effective taker fee with MX Deduction (20% off 0.05% base). Enable "Use MX for Fees" — requires small MX balance. The 500 MX holding discount (50% off) was suspended Feb 9, 2026. Uses protobuf binary WS messages. 30 sub limit per connection — uses 2 connections for 60 symbols.
 **Pionex note:** Aggregates ~50-60% of order book from Binance (per CTO statement) — Pionex↔Binance arbitrage will be near-zero. Value is in Pionex vs OKX/KuCoin/Gate.io/Bybit/Bitget pairs.
 **Bitfinex note:** 0% taker/maker fees permanent since Dec 17, 2025. Free USDT withdrawals on 14 networks. Uses `tBTCUST` symbol format (UST not USDT). 30 sub limit per WS connection — uses 2 connections for 60 symbols. No BEP20 support. ~40-50 of 60 symbols available as UST pairs.
 
@@ -61,7 +61,7 @@ All 9 exchanges have working WebSocket fetchers implemented.
 For arbitrage, fees are critical. A typical opportunity is 0.1-0.3%. Fee math:
 - Buy fee + Sell fee = total cost
 - If total cost >= price gap, no profit
-- **MEXC/Pionex (0.05% taker)** and **Binance/Bybit (0.075% with token discount)** are the most cost-effective pairs
+- **MEXC (0.04% with MX)/Pionex (0.05% taker)** and **Binance/Bybit (0.075% with token discount)** are the most cost-effective pairs
 
 ### How to Claim Fee Discounts
 
@@ -72,6 +72,7 @@ For arbitrage, fees are critical. A typical opportunity is 0.1-0.3%. Fee math:
 | **Bitget** | Buy BGB, enable "Pay fees with BGB" | 20% off (0.10% → 0.08%) |
 | **KuCoin** | Buy KCS, enable "Pay fees with KCS" | 20% off (0.10% → 0.08%) |
 | **OKX** | Hold 500+ OKB (~$25k investment) | Tiered discount (not practical at start) |
+| **MEXC** | Enable "Use MX for Fees", hold small MX balance | 20% off (0.05% → 0.04%) |
 | **Gate.io** | Buy GT, enable "Pay fees with GT" | 10% off at VIP 0 (0.10% → 0.09%) |
 
 ### Binance FDUSD 0% Maker Fees
@@ -555,7 +556,7 @@ Tracks portfolio value vs session peak. Pauses on significant decline, emergency
 | `drawdown_resume_pct` | 3.0% | 0.1–10.0 | Auto-resume when recovered |
 | `drawdown_emergency_mult` | 2.0 | 1.5–5.0 | Emergency sell at threshold × mult (10%) |
 
-Emergency sell-all: iterates all crypto positions, sells at current price minus taker fee, credits USDT. Requires manual resume from dashboard.
+Emergency sell-all: iterates all crypto positions, sells at current price minus taker fee, credits USDT. Sends email notification with drawdown info, liquidated positions (exchange/symbol/qty/price/gross/fee/net), and per-exchange USDT breakdown. Requires manual resume from dashboard.
 
 ### Layer 3: Per-Symbol Loss Streak — Targeted
 
@@ -613,6 +614,14 @@ Each setting is logged as a separate `logger.info()` call (one per line) so ever
 
 All events use `[Anomaly]` component prefix. Every trigger includes multi-line state snapshots: rolling P&L, loss rate, top losers/winners, portfolio breakdown, crypto exposure, per-symbol recent trades. Events stored in deque (maxlen=100), persisted in state, viewable in dashboard. Session summary: `anomaly=Xp/Xw/Xsb` (pauses/warnings/symbol-blocks).
 
+### Anomaly State on Restart
+
+When anomaly `_paused` is restored from state after a restart, `_pause_timestamp` is reset to now. This restarts the cooldown timer so `_check_recovery()` can properly evaluate with fresh data. Circuit breaker auto-resumes after cooldown (stale rolling P&L entries pruned). Drawdown auto-resumes when portfolio recovers. Emergency stays paused (manual resume required). Logged as WARNING: `[Anomaly] Restored paused state on startup`.
+
+### Emergency Email Notification
+
+On emergency sell-all, an email is sent via `notify_emergency()` in `email_notifier.py` with: trigger reason, drawdown % and $ amount, current portfolio value, full liquidated positions table (exchange/symbol/qty/price/gross/fee/net sorted by value), and per-exchange USDT breakdown. Sent as fire-and-forget async task.
+
 ### Integration Points
 
 - **monitor.py**: `_anomaly` instance, `_anomaly_paused` and `_manual_stopped` flags. Main loop checks `should_block_trading`. `_tick()` checks `should_emergency_sell` and `is_symbol_blocked(sym)`. `_compute_trade_size()` applies `trade_size_multiplier`. `record_trade()` called after each trade.
@@ -626,9 +635,10 @@ All events use `[Anomaly]` component prefix. Every trigger includes multi-line s
 | `anomaly_protection.py` | `AnomalyProtection` class — all 3 layers, state persistence, diagnostic logging |
 | `config.py` | 11 anomaly protection constants |
 | `settings.py` | Default settings for anomaly protection |
-| `monitor.py` | Integration: pause checks, emergency sell, per-symbol blocking, trade recording |
+| `monitor.py` | Integration: pause checks, emergency sell + email notification, per-symbol blocking, trade recording |
 | `dashboard_server.py` | Hot-apply, portfolio update, message handlers, `_hard_stop_all()`, `_distribute_from_bitfinex()`, `_log_all_settings()` |
 | `balance.py` | `force_sell_crypto_via_bitfinex()` — bypasses cooldowns/budget for Hard Stop |
+| `email_notifier.py` | `notify_emergency()` — email with drawdown info, liquidated positions, USDT breakdown |
 | `dashboard/src/components/Header.tsx` | Anomaly status indicators with rich hover tooltips (desktop) + tappable badge popups (mobile) |
 | `dashboard/src/components/SettingsPage.tsx` | Anomaly protection settings UI, Danger Zone (Hard Stop, Distribute, Stop/Start, Restart) |
 
@@ -695,7 +705,7 @@ Persistent uptime that survives VPS crashes and reboots. Stored separately from 
 - **Downtime detection**: On startup, compares `now` vs `last_heartbeat` from `state/uptime.json`. Gap > 90s = downtime event recorded with `{start, end, duration}`. Last 50 events kept.
 - **Heartbeat**: `_save_uptime_heartbeat()` writes `last_heartbeat` to `state/uptime.json` every 60s (in the broadcast loop).
 - **Intentional restart resets everything**: "Restart Bot" button deletes `state/uptime.json` before `os.execv()` — next startup begins fresh with no downtime history.
-- **VPS crash/reboot**: No restart marker → `state/uptime.json` exists → gap detected → downtime recorded → uptime continues from original `first_start`.
+- **VPS crash/reboot**: No restart marker (only `_trigger_restart()` writes one, not `stop()`) → `state/uptime.json` exists → gap detected → downtime recorded → uptime continues from original `first_start`.
 - **Header display**: Uptime shown in header (desktop only). Hover tooltip shows: "Running since" (UTC), "Total downtime" with restart count, and scrollable downtime log with timestamps and durations.
 - **All times in UTC**: Consistent with bot logs and performance charts.
 
@@ -925,7 +935,7 @@ On first `initialize_crypto()`, `_run_demo_setup()` fires as `asyncio.create_tas
 - **D-04b**: Per-trade fee rate validation (actual vs configured rate, WARNING if >0.001% diff)
 - **D-08**: Slippage > 0.01% (avg across legs) + slippage model accuracy check (sim vs actual)
 - **D-09**: Partial fill (fill_ratio < 0.99)
-- **D-10**: Order rejected (error reason)
+- **D-10**: Order rejected (error reason) — throttled: first per exchange:symbol:side logs, second logs "suppressing", 3rd+ silent. Executor-level dedup: `_rejected_symbols` dict tracks per-symbol rejection count, logs first + suppresses repeats.
 - **D-11**: One-legged (one success, one fail) → auto-unwind
 - **D-12**: High latency > 500ms
 - **D-13**: Maker fill (unexpected for market orders)
@@ -997,7 +1007,7 @@ Comprehensive fee system replacing the flat `EXCHANGE_TAKER_FEES` dict. Managed 
 | Binance | 0.10% | BNB 25% (enabled) | 0.075% | 10% | 10% | 60 min (hourly) | instant | token |
 | OKX | 0.10% | OKB (disabled) | 0.10% | 20% | 10% | 90 min | tier | received |
 | Bybit | 0.10% | MNT/BIT (disabled) | 0.10% | 20% (90 days) | 20% | 1440 min (daily) | tier | received |
-| MEXC | 0.05% | MX (disabled) | 0.05% | 10% | 40% | 1440 min (daily) | instant | received |
+| MEXC | 0.05% | MX 20% (enabled) | 0.04% | 10% | 40% | 1440 min (daily) | instant | received |
 | Bitget | 0.10% | BGB 20% (enabled) | 0.08% | 20% | 20% | 0 min (instant) | instant | token |
 | KuCoin | 0.10% | KCS 20% (enabled) | 0.08% | 20% | 0% | 1440 min (daily) | rebate | token |
 | Gate.io | 0.10% | GT 10% (enabled) | 0.09% | 30% | 10% | 1440 min (daily) | instant | token |

@@ -543,8 +543,9 @@ The cycle:
 
 | Pattern | First Seen | Sessions | Avg $/hr | Notes |
 |---------|-----------|----------|----------|-------|
-| Bitfinex buyer + altcoin strong/very_strong | Session #1 | 4 | $37.43 | STRK. S1: $81.91/hr ($3k), S2: $107.95/hr ($3k), S3: $11.06/hr ($1k), S4: $28.11/hr STRK-only phase ($1k) |
+| Bitfinex buyer + altcoin strong/very_strong | Session #1 | 5 | $36.20 | STRK/POL. S1: $81.91/hr ($3k), S2: $107.95/hr ($3k), S3: $11.06/hr ($1k), S4: $28.11/hr STRK-only ($1k), S8: $31.52/hr POL ($1k) |
 | Non-Bitfinex pair expansion is net negative | Session #3 | 3 | -$2.81 | AXS Gate.io→KuCoin/Bitget. S3: demoted 2× (thin margins). S4: 728 trades, $11.63 gross but -$7.65 net after fees |
+| MEXC→Bitfinex ultra-low fee pair | Session #8 | 1 | $31.52 | POL 0.025%+0.000% combined. Nearly any spread is profitable |
 
 ### Exchange Performance Summary
 
@@ -565,7 +566,10 @@ The cycle:
 | Symbol | Sessions Active | Best $/hr | Avg $/hr | Typical Tier | Best Buyer | Notes |
 |--------|----------------|-----------|----------|-------------|------------|-------|
 | STRKUSDT | 4 | $107.95 | $37.43 | strong-very_strong | Bitfinex | Persistent structural spread. S1: 16h/$81.91, S2: 18m/$107.95, S3: 1h37m/$11.06, S4: 2h13m/$28.11. $1k capital bottlenecks at ~30min |
-| AXSUSDT | 3 | — | -$2.81 | normal | Gate.io | Thin margins (0.04-0.12% avg net), expensive pairs (0.17% combined). S3: demoted 2×. S4: 728 trades, net negative |
+| POLUSDT | 1 | $31.52 | $31.52 | normal | MEXC | S8: MEXC→Bitfinex (0.025% combined). 527 trades in 2h29m. Ultra-low fee pair |
+| SNXUSDT | 3 | — | -$1.30 | strong | MEXC/KuCoin | S6-S8: Thin markets, repeated demotions. S8: 2 demotions, elevated threshold. OKX demo rejects |
+| DYDXUSDT | 2 | — | — | strong | MEXC | S6-S8: Low margins, OKX demo instrument missing. Demoted after ~4h in S8 |
+| AXSUSDT | 3 | — | -$2.81 | normal | Gate.io | Thin margins (0.04-0.12% avg net), expensive pairs (0.17% combined). S3: demoted 2×. S4: 728 trades, net negative. S8: EXPAND_BLOCKED 8× |
 | DOTUSDT | 1 | — | — | normal | Bitfinex | S3: Expanded then demoted after 24m, 0 trades. Score faded |
 
 ---
@@ -1171,3 +1175,182 @@ All testnet artifacts — no production impact.
 1. **Settings desync is silent and dangerous**: The log showed the correct value ($5.00) but the component used the wrong one ($2.00). The settings logging reads from `self._settings` (in-memory), not from the component's actual field. Added startup sync to prevent this.
 2. **Single-seller concentration creates fragile capital loops**: When 100% of sell volume goes to one exchange, the bot enters: trade → deplete → rebalance → trade → deplete. Each $30 rebalance only covers ~3 trades at $10.
 3. **Log throttling is essential**: Emergency draw spam (60+ msgs) drowns out useful diagnostic information.
+
+---
+
+### Session #8 — 2026-03-05 (Two-Phase: Transfer Fee Burn → POL Goldmine)
+
+**Date**: 2026-03-05, 00:00:08 - 07:28:25 UTC (7h 28m)
+**Capital**: $1,000
+**Version**: v0.24.2-alpha
+**Mode**: Demo + Simulation (8 exchanges, Pionex disabled)
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | 7h 28m (Phase 1: 4h55m, Phase 2: 2h29m) |
+| Total Trades | 574 (Phase 1) + 527 (Phase 2) = ~1,101 |
+| Phase 1 PnL | $6.51 (transfer fees: $12.42, net: -$5.38) |
+| Phase 2 PnL | $79.80 (transfer fees: $1.79, net: $78.60) |
+| Phase 2 $/hr | **$31.52** |
+| Cashback | $1.96 (credited: $0.58, pending: $1.38) |
+| Phantom Spreads Filtered | 3,214 |
+| One-Legged Failures (sim) | 18 ($0.16 cost) |
+| Position Cap Skips | 1,336 |
+| SIZE_ZERO Events | 19,290 |
+| Rebalance BLOCKED | 239 |
+| Rebalance EMPTY | 701 |
+| Anomaly Symbol Blocks | 2 (SNXUSDT, DYDXUSDT) |
+| EVD Seller Demotions | 11 |
+| Demo Fill Rate | 13/87 (14.9%) — 71 rejects from OKX instrument errors |
+
+#### Phase 1 — Transfer Fee Burn (00:00–04:55)
+
+**Symbols**: SNX + DYDX activated at discovery. AXS EXPAND_BLOCKED 8× (pair_fee 0.115% > avg_net 0.053-0.066%). POL expanded at 02:49 (bfx=yes). Symbols rotated through demotions/re-activations.
+
+| Symbol | Activated | Demoted | Trades | Notes |
+|--------|-----------|---------|--------|-------|
+| SNXUSDT | 00:00:08 | 04:55:36 | ~136 | Stalled early, re-activated at 04:01, demoted again |
+| DYDXUSDT | 00:00:08 | 04:35:29 | ~130 | Low margins, repeated OKX demo rejections |
+| POLUSDT | 02:49:03 | 03:25:12 | ~17 | First activation, demoted after 36min |
+| AXSUSDT | — | — | 0 | EXPAND_BLOCKED 8× (pair_fee_exceeds_net) |
+
+**Why unprofitable**: Transfer fees ($12.42) consumed all PnL ($6.51). Expensive consolidation via KuCoin ($0.40/transfer) and Gate.io ($0.50/transfer) repeated many times. Hourly cap bug (see below) blocked cheaper alternatives at $2.00 instead of $5.00, forcing capital starvation cycles.
+
+**Net P&L gate closed** at 04:25 (`net=$-0.14`), blocking all rebalancing. Reopened at 04:56 after final demotions freed capital.
+
+#### Phase 2 — POL Goldmine (04:56–07:28)
+
+**Single symbol**: POLUSDT on MEXC→Bitfinex (0.025% + 0.000% = 0.025% combined fees).
+
+| Time | Duration | Trades | Net | $/hr |
+|------|----------|--------|-----|------|
+| 05:02 | 5m | 25 | $1.20 | $12.59 |
+| 05:28 | 31m | 87 | $7.90 | $15.06 |
+| 06:03 | 1h06m | 244 | $29.86 | $26.90 |
+| 06:38 | 1h41m | 381 | $50.96 | $30.14 |
+| 07:08 | 2h11m | 490 | $69.09 | $31.54 |
+| 07:26 | 2h29m | 527 | $78.60 | $31.52 |
+
+**Why so profitable**: MEXC→Bitfinex is the cheapest possible pair (0.025% MEXC taker + 0% Bitfinex taker). POL had a persistent ~0.28% spread. With only $1.79 total transfer fees over 2.5 hours, nearly all PnL was retained.
+
+#### Discrepancies (16 instances, all testnet artifacts)
+
+| Type | Count | Details | Severity |
+|------|-------|---------|----------|
+| D-10 (rejected) | 68 | SNX/DYDX not on OKX demo | Log spam, harmless |
+| D-10 (canceled) | 3 | POL thin OKX testnet liquidity | Harmless |
+| D-08 (slippage) | 4 | SNX +0.30% Binance, +0.18% Bybit | Expected for low-cap |
+| D-09 (partial fill) | 3 | AXS 82.71% on Bybit (consistent ratio) | Testnet cap |
+| D-12 (high latency) | 3 | POL 1.6-2.0s on OKX (cancel retry flow) | Harmless |
+| D-04b (fee mismatch) | 10 | Bybit 0.075%→0.301%/0.083% | Testnet no discount |
+| FeeValidation | 2 | Binance 0%, Bybit 0.10% testnet | Expected |
+
+**Verdict**: All 16 discrepancies are demo/testnet artifacts. No production code bugs.
+
+#### Bugs / Issues
+
+**Bug #12: Hourly Transfer Cap STILL Enforced as $2.00 (Persists from S7)**
+
+`_sync_settings_on_startup()` (added in v0.24.2-alpha) logged `hourly_transfer_cap=$5.00` at 23:59:17 but BalanceTracker enforced `$2.00/hr` throughout the entire session (370 blocked transfers). The code at `dashboard_server.py:1865-1866` correctly sets the attribute and the name matches `balance.py:160`. Root cause unclear without VPS access — may be a race condition or naming issue. **Need to add a verification log** in `_sync_settings_on_startup()` that reads back the BalanceTracker attribute after setting it.
+
+**Impact**: 370 transfers blocked. Phase 1 transfer starvation was significantly worsened.
+
+**Other observations**:
+
+| # | Item | Status |
+|---|------|--------|
+| 1 | MEXC fee 0.025% (VPS config) | Verify intentional — CLAUDE.md says 0.05% with no discount token |
+| 2 | asyncio "Task exception never retrieved" (9×) | Silent failures near MEXC/Pionex reconnects |
+| 3 | OKX freshness degraded 288ms→1,394ms over 7h | Monitor for progressive staleness |
+| 4 | Rebalance EMPTY backoff working | 701 messages (down from uncontrolled loops in S7) |
+| 5 | Emergency draw throttle working | No spam (fixed in v0.24.2-alpha) |
+| 6 | Demo position tracking working | `cap_sell_qty()` correctly skips empty positions |
+| 7 | Settings sync logged $5.00 but enforced $2.00 | Same bug as S7, fix incomplete |
+
+#### Anomaly Protection
+
+| Event | Time | Details |
+|-------|------|---------|
+| SYMBOL_BLOCKED SNXUSDT | 01:29:20 | 4 consecutive losses, blocked 300s |
+| SYMBOL_BLOCKED DYDXUSDT | 02:26:26 | 4 consecutive losses, blocked 300s |
+| Circuit breaker | — | Not triggered (0 pauses, 0 warnings) |
+
+Both blocks were appropriate — symbols experiencing consecutive losses due to balance depletion.
+
+#### Key Takeaways
+
+1. **MEXC→Bitfinex is the most profitable pair discovered**: 0.025% combined fees means nearly any spread is profitable. POL generated $31.52/hr — highest sustained $/hr since Session #1's STRK.
+2. **Phase 1 transfer fees remain the primary drag**: $12.42 fees on $6.51 PnL. The hourly cap bug ($2 vs $5) made it worse, but the fundamental issue is multi-symbol trading with expensive exchange pairs.
+3. **Single-symbol concentration works when the pair is cheap**: Phase 2 had $1.79 fees on $79.80 PnL (2.2% fee ratio vs Phase 1's 190%).
+4. **Hourly cap sync bug is persistent**: v0.24.2-alpha fix logged correctly but didn't actually change the runtime value. Needs deeper investigation.
+5. **POL is a new profit engine alongside STRK**: Both benefit from Bitfinex's 0% fee, but POL uses MEXC (0.025%) vs STRK's typical OKX (0.10%) pairing.
+
+---
+
+### Session #9 — 2026-03-05 (VPS Crash Recovery)
+
+**Date**: 2026-03-05, 07:48–08:10 UTC (22 min)
+**Capital**: $1,000
+**Version**: v0.24.2-alpha
+**Mode**: demo (Binance/OKX/Bybit)
+**VPS**: LightNode Bangkok
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | 22 min |
+| Total Trades | 0 |
+| Trading PnL | $0.00 |
+| Transfer Fees | $0.00 |
+| Net Total | +$0.58 (credited cashback from Session #8) |
+| Active Symbols | 1 (POLUSDT, from state restore) |
+| Exchanges | 8/9 (Pionex disabled) |
+
+Session #9 was an unintentional VPS crash/reboot ~20 min after Session #8 ended. No trades were executed because anomaly protection was paused from Session #8 state and persisted through the crash. The session ran for 22 minutes producing only latency/reconnection logs before being terminated.
+
+#### Bugs Found (3 bugs, all fixed in v0.24.3)
+
+**Bug #13: `stop()` writes restart marker on SIGTERM — false "intentional restart"**
+
+`dashboard_server.py:stop()` wrote a `state/restart_marker` file on every SIGTERM signal (including VPS crash). On next startup, `_check_restart_marker()` found it, set `_restart_grace=True`, and `_load_uptime_data()` treated it as an intentional restart — deleting `state/uptime.json` and starting fresh. Result: uptime counter reset, downtime not recorded, log says "intentional restart" for a crash.
+
+**Root cause**: `stop()` was meant as a safety net for email suppression but had the side effect of making every crash look intentional. Only `_trigger_restart()` (explicit dashboard "Restart Bot" button) should write the marker.
+
+**Fix**: Removed restart marker write from `stop()`. Only `_trigger_restart()` writes it.
+
+**Bug #14: Anomaly `_paused` persisted across crash — trading blocked with 0 trades**
+
+Session #8 ended with anomaly protection paused (circuit breaker or drawdown). State was saved to `session.json` with `_paused=True`. On Session #9 startup, `from_state_dict()` restored `_paused=True` immediately. With 0 trades and no new rolling P&L data, the auto-resume conditions could never be met. Trading was permanently blocked.
+
+Log evidence: `[Monitor] Anomaly protection activated, trading paused` at 07:48:24 (instant, before any data).
+
+**Fix**: On startup, if `_paused` is restored, reset `_pause_timestamp` to now and log a WARNING. This restarts the cooldown timer so `_check_recovery()` can properly evaluate with fresh data — circuit breaker auto-resumes after cooldown (300s) once rolling P&L is above threshold (stale entries pruned to 0), drawdown auto-resumes when portfolio recovers. Emergency stays paused (requires manual resume). Prevents both permanent stuck-pause AND unsafe instant-resume.
+
+**Bug #15: MEXC depth sub-connection log spam (~162 lines in 22 min)**
+
+Two MEXC depth sub-connections (30 symbols each) reconnected every ~30s due to staleness watchdog (no depth data received within 30s). Each reconnect logged 2 INFO lines ("connected" + "Subscribed"). 82 "connected" + 80 "Subscribed" = 162 log lines, consuming ~28% of the 570-line session log.
+
+The reconnections themselves are harmless — MEXC depth data via protobuf WebSocket is unreliable and the staleness watchdog correctly closes stale connections. The issue is only the log noise.
+
+**Fix**: Added `_connect_count` tracker to `_MEXCDepthSubFetcher`. First connect logs normally. Subsequent reconnects are silent except every 10th (summary log). Staleness warnings also throttled after first occurrence.
+
+#### Other Observations
+
+| # | Item | Notes |
+|---|------|-------|
+| 1 | +$0.58 net with 0 trades | Pending cashback from Session #8 credited during state restore. Expected behavior. |
+| 2 | MEXC fee still 0.025% on VPS | VPS config uses 50% MX holding discount (suspended Feb 9). Should be 0.04% (20% MX Deduction). |
+| 3 | DemoCompare discrepancies | Binance/Bybit show extra_position (SNX, AXS) from Session #8 demo orders. Expected stale state. |
+| 4 | Candidates tracked | DYDXUSDT, BTCUSDT tracked as EXPAND_TRACK but never activated (paused). |
+| 5 | All 8 exchanges connected | Latency normal. OKX freshness 334ms–1392ms (variable, within expected range for books5 skip behavior). |
+| 6 | No Session summary log | Session summary requires trades; with 0 trades, no summary was emitted. Acceptable — no data to summarize. |
+
+#### Key Takeaways
+
+1. **SIGTERM handling must not assume intentionality**: VPS crashes, OOM kills, and systemd stops all send SIGTERM. Only explicit user actions (dashboard "Restart Bot") should be treated as intentional.
+2. **Anomaly state should not persist across crashes**: A crash is already a disruption — starting with a clean anomaly state and letting protection re-trigger naturally is safer than blindly restoring a paused state from a potentially-stale session.
+3. **Reconnection logs need throttling**: Any sub-connection that reconnects frequently (MEXC depth, potentially others) should log first connect + periodic summaries, not every attempt.

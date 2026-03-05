@@ -6,7 +6,7 @@ All symbols, exchange settings, and operational parameters.
 
 import os
 
-__version__ = "0.24.2-alpha"
+__version__ = "0.25.0-beta"
 
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
@@ -135,7 +135,7 @@ EXCHANGE_TAKER_FEES: dict[str, float] = {
     "Binance": 0.00075,  # 0.075% (base 0.10%, 25% discount paying fees in BNB)
     "OKX": 0.0010,       # 0.10% (base tier, OKB discount requires 500 OKB ~$25k)
     "Bybit": 0.0010,     # 0.10% (MNT/BIT discount NOT available for API users)
-    "MEXC": 0.0005,      # 0.05% (no discount token needed, already lowest tier)
+    "MEXC": 0.0005,      # 0.05% base (0.04% with MX Deduction 20% enabled)
     "Bitget": 0.0008,    # 0.08% (base 0.10%, 20% discount paying fees in BGB)
     "KuCoin": 0.0008,    # 0.08% (base 0.10%, 20% discount paying fees in KCS)
     "Gate.io": 0.0010,   # 0.10% (base tier, GT discount is minimal ~10%)

@@ -12,6 +12,7 @@ export/
 screenshots/
 state/
 settings.json
+misc/html/
 
 # Secrets
 api_keys.json
