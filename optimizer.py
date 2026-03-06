@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 TRADING_SCORE_THRESHOLD = 0.01     # trading + rebalance gate (minimum to trade/transfer)
 STRONG_SCORE_THRESHOLD = 0.1       # strong tier (higher multiplier, more exchanges)
 VERY_STRONG_SCORE_THRESHOLD = 0.3  # very strong tier (highest multiplier, most exchanges)
+FEE_THRESHOLD_MULTIPLIER = 0.5     # activation threshold scales with pair fee excess over cheapest
 
 
 @dataclass
@@ -253,6 +254,7 @@ class SymbolOptimizer:
         self._trading_threshold: float = TRADING_SCORE_THRESHOLD
         self._strong_threshold: float = STRONG_SCORE_THRESHOLD
         self._very_strong_threshold: float = VERY_STRONG_SCORE_THRESHOLD
+        self._fee_threshold_multiplier: float = FEE_THRESHOLD_MULTIPLIER
 
         # Net profit awareness: block rotations when in deficit
         self._rotation_budget_ok: bool = True
@@ -373,7 +375,7 @@ class SymbolOptimizer:
                     tradeable_found = sorted(
                         [
                             s for s in self._scores.values()
-                            if s.score >= self._trading_threshold and s.total_ticks > 0
+                            if s.score >= self._get_activation_threshold(s.symbol) and s.total_ticks > 0
                         ],
                         key=lambda s: s.score,
                         reverse=True,
@@ -397,13 +399,25 @@ class SymbolOptimizer:
                         # Duration elapsed, none found — extend discovery
                         self._complete_discovery()
 
-                    # During discovery, consolidate idle capital to Bitfinex
+                    # During discovery, only consolidate from cheap sources
+                    # (skip KuCoin $0.40, Gate.io $0.50, OKX $0.10 — too expensive
+                    # when we don't know if next symbol will use Bitfinex)
                     if (
                         now - self._last_evaluation >= self._evaluation_interval
                         and self._balance
                         and "Bitfinex" in self._balance._exchanges
                     ):
-                        self._balance.consolidate_to_bitfinex(None)
+                        transfers = self._balance.consolidate_to_bitfinex(
+                            None, max_fee_per_source=0.02,
+                        )
+                        if transfers:
+                            hub_fee = sum(t.fee_usd for t in transfers)
+                            hub_amt = sum(t.amount_usd for t in transfers)
+                            logger.info(
+                                f"[Optimizer] Discovery consolidation (cheap only): "
+                                f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
+                                f"(fees: ${hub_fee:.4f}, max_fee=$0.02)"
+                            )
                         self._balance.replenish_reserve()
                         self._last_evaluation = now
 
@@ -938,7 +952,7 @@ class SymbolOptimizer:
         )
         tradeable_symbols_raw = [
             s.symbol for s in ranked_symbols
-            if s.score >= self._trading_threshold
+            if s.score >= self._get_activation_threshold(s.symbol)
         ]
 
         # Filter out symbols with declining scores or fading profitable frequency
@@ -1026,8 +1040,8 @@ class SymbolOptimizer:
                              if s.symbol in best_symbols and s.score >= self._strong_threshold)
             logger.info(
                 f"[Optimizer] Discovery: {len(tradeable_symbols)} tradeable symbols found "
-                f"(score >= {self._trading_threshold}), {strong_count} strong (>= {self._strong_threshold}), "
-                f"activating {len(best_symbols)}"
+                f"(fee-aware threshold, base={self._trading_threshold}, mult={self._fee_threshold_multiplier}), "
+                f"{strong_count} strong (>= {self._strong_threshold}), activating {len(best_symbols)}"
             )
         else:
             # No tradeable symbols found — extend discovery and keep scanning
@@ -1203,13 +1217,13 @@ class SymbolOptimizer:
                 stats.times_activated += 1
                 stats.last_activated_at = now_ts
 
-        # Reset balance tracker in-place with new config
+        # Reconfigure balance tracker with new allocations (preserves cumulative fees/transfers)
         self._balance._exchanges = list(all_exchanges)
         self._balance._symbols = list(best_symbols)
-        self._balance.reset(allocations=allocations)
+        self._balance.reconfigure(allocations=allocations)
 
-        # Reset monitor with new config (all exchanges stay active)
-        self._monitor.reset(
+        # Reconfigure monitor with new symbols/exchanges (preserves cumulative trades/P&L)
+        self._monitor.reconfigure(
             symbols=best_symbols,
             exchanges=all_exchanges,
             trade_amount=self._trade_amount,
@@ -1672,20 +1686,109 @@ class SymbolOptimizer:
     # ── Activation threshold ─────────────────────────────────────────────
 
     def _get_activation_threshold(self, symbol: str) -> float:
-        """Minimum score for activation, elevated for frequently-demoted symbols."""
-        base = self._trading_threshold  # 0.01
+        """Minimum score for activation, fee-aware and demotion-aware.
+
+        The threshold scales with the dominant pair's combined taker fees.
+        Cheap pairs (Bitfinex involved, ~0.04%) get the base threshold.
+        Expensive pairs (no Bitfinex, ~0.14%+) need proportionally higher
+        scores to justify the setup/transfer overhead.
+
+        Formula: threshold = base + (pair_fee_pct - cheapest_possible_fee) * fee_threshold_mult
+        """
+        base = self._trading_threshold
+
+        # Fee-aware component: compute cheapest pair fee from recent tick data
+        fee_adj = self._compute_fee_threshold_adjustment(symbol)
+        threshold = base + fee_adj
+
+        # Demotion penalty: each demotion adds 50% of base
         stats = self._historical_stats.get(symbol)
-        if not stats or stats.times_demoted <= 0:
-            return base
-        # Each demotion adds 50% of base, cap at strong threshold
-        elevated = base * (1.0 + stats.times_demoted * 0.5)
-        result = min(elevated, self._strong_threshold)
+        if stats and stats.times_demoted > 0:
+            threshold += base * stats.times_demoted * 0.5
+
+        # Cap at strong threshold
+        result = min(threshold, self._strong_threshold)
+
         if result > base:
+            parts = []
+            if fee_adj > 0:
+                parts.append(f"fee_adj=+{fee_adj:.4f}")
+            if stats and stats.times_demoted > 0:
+                parts.append(f"demoted={stats.times_demoted}")
             logger.info(
-                f"[Optimizer] Activation threshold elevated for {symbol}: "
-                f"{result:.3f} (demoted {stats.times_demoted} times)"
+                f"[Optimizer] Activation threshold for {symbol.replace('USDT', '')}: "
+                f"{result:.4f} (base={base}, {', '.join(parts)})"
             )
         return result
+
+    def _compute_fee_threshold_adjustment(self, symbol: str) -> float:
+        """Compute threshold adjustment based on dominant pair's combined fees.
+
+        Returns 0 for Bitfinex-involved pairs (cheapest possible).
+        Returns positive value for expensive pairs, scaling with fee level.
+
+        The cheapest possible pair fee is used as baseline (typically Bitfinex
+        0% + MEXC 0.04% = 0.04%). Any pair above that gets a proportional
+        threshold increase via fee_threshold_multiplier.
+        """
+        if not self._fee_manager:
+            return 0.0
+
+        # Get cheapest possible combined fee across all enabled exchanges
+        cheapest_fee = self._get_cheapest_pair_fee(symbol)
+
+        # Get this symbol's dominant pair fee from tick data
+        pair_fee = self._get_symbol_pair_fee(symbol)
+
+        if pair_fee <= cheapest_fee:
+            return 0.0  # Already using cheapest pair
+
+        # Scale adjustment: how much more expensive is this pair?
+        fee_excess = pair_fee - cheapest_fee  # e.g., 0.14% - 0.04% = 0.10%
+        adjustment = fee_excess * self._fee_threshold_multiplier
+        return adjustment
+
+    def _get_cheapest_pair_fee(self, symbol: str) -> float:
+        """Get the cheapest possible combined taker fee for any exchange pair."""
+        if not self._fee_manager:
+            return 0.0
+
+        fees = []
+        for ex in self._active_exchanges:
+            fee = self._fee_manager.get_scoring_fee(ex, symbol)
+            fees.append(fee)
+
+        if len(fees) < 2:
+            return 0.0
+
+        fees.sort()
+        return (fees[0] + fees[1]) * 100  # Two cheapest as percentage
+
+    def _get_symbol_pair_fee(self, symbol: str) -> float:
+        """Get the dominant pair's combined fee from recent tick data."""
+        ticks = self._ticks.get(symbol, deque())
+        profitable = [t for t in ticks if t.best_net_pct > 0]
+
+        if not profitable:
+            # No tick data — estimate from all exchanges
+            return self._get_cheapest_pair_fee(symbol)
+
+        # Find most common buyer and seller from profitable ticks
+        buy_counts: dict[str, int] = defaultdict(int)
+        sell_counts: dict[str, int] = defaultdict(int)
+        for t in profitable[-100:]:  # Last 100 profitable ticks
+            buy_counts[t.buy_exchange] += 1
+            sell_counts[t.sell_exchange] += 1
+
+        top_buyer = max(buy_counts, key=buy_counts.get) if buy_counts else ""
+        top_seller = max(sell_counts, key=sell_counts.get) if sell_counts else ""
+
+        if not top_buyer or not top_seller or not self._fee_manager:
+            return self._get_cheapest_pair_fee(symbol)
+
+        buy_fee = self._fee_manager.get_scoring_fee(top_buyer, symbol)
+        sell_fee = self._fee_manager.get_scoring_fee(top_seller, symbol)
+        return (buy_fee + sell_fee) * 100  # As percentage
 
     def _is_symbol_on_bitfinex(self, symbol: str) -> bool:
         """Check if symbol has a live Bitfinex price."""

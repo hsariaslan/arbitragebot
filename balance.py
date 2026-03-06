@@ -240,25 +240,67 @@ class BalanceTracker:
                 if sym not in self.crypto[ex]:
                     self.crypto[ex][sym] = 0.0
 
-    def reset(self, allocations: dict | None = None) -> None:
-        """Reset all balances and state. Optionally apply new allocations."""
+    def reconfigure(self, allocations: dict | None = None) -> None:
+        """Reconfigure balances for new symbols/exchanges, preserving cumulative state.
+
+        Resets USDT/crypto balances and initialization state for the new
+        allocation, but keeps cumulative data (transfers, fees, trade times,
+        external fee log, in-transit funds, skipped trades) intact across
+        demotion→discovery→activation cycles.
+        """
         if allocations:
             self._allocations = allocations
-        self.__init__(
-            exchanges=self._exchanges,
-            symbols=self._symbols,
-            allocations=self._allocations,
-            rebalance_amount=self._rebalance_amount,
-            rebalance_cooldown=self._rebalance_cooldown,
-            trade_amount=self._trade_amount,
-            adaptive_mode=self._adaptive_mode,
-            exchange_info=self._exchange_info,
-            fee_manager=self._fee_manager,
-            transfer_fee_manager=self._transfer_fee_mgr,
-            bitfinex_reserve_pct=self._bitfinex_reserve_pct,
-            bitfinex_reserve_hard_floor=self._bitfinex_reserve_hard_floor,
+
+        # Reset balance allocation state
+        if self._allocations:
+            self.usdt = {
+                ex: self._allocations.get(ex, {}).get("usdt", 0.0)
+                for ex in self._exchanges
+            }
+            self._crypto_usd = {
+                ex: {
+                    sym: self._allocations.get(ex, {}).get("crypto", {}).get(sym, 0.0)
+                    for sym in self._symbols
+                }
+                for ex in self._exchanges
+            }
+            self._initial_investment = sum(self.usdt.values())
+            for ex in self._exchanges:
+                for sym in self._symbols:
+                    self._initial_investment += self._crypto_usd[ex][sym]
+        else:
+            half = INITIAL_BALANCE_PER_SYMBOL / 2.0
+            self.usdt = {ex: half * len(self._symbols) for ex in self._exchanges}
+            self._crypto_usd = {
+                ex: {sym: half for sym in self._symbols} for ex in self._exchanges
+            }
+            self._initial_investment = (
+                INITIAL_BALANCE_PER_SYMBOL * len(self._symbols) * len(self._exchanges)
+            )
+
+        # Reset crypto quantities and initialization
+        self.crypto = {
+            ex: {sym: 0.0 for sym in self._symbols} for ex in self._exchanges
+        }
+        self._initialized = False
+        self._last_rebalance.clear()
+        self._max_rebalance = self._trade_amount * 4
+
+        # Update Bitfinex reserve targets
+        self._bitfinex_reserve_target = self._initial_investment * self._bitfinex_reserve_pct
+        self._bitfinex_reserve_hard_floor_amount = (
+            self._initial_investment * self._bitfinex_reserve_hard_floor
         )
-        logger.info("[Balance] Reset complete")
+
+        # Preserve: transfers, total_transfer_fees, total_external_transfer_fees,
+        # skipped_trades, last_trade_time, _in_transit, _external_fee_log,
+        # _execution_mode, _estimated_profit_per_trade
+
+        logger.info(
+            f"[Balance] Reconfigured (cumulative: {len(self.transfers)} transfers, "
+            f"${self.total_transfer_fees:.4f} total fees, "
+            f"${self.total_external_transfer_fees:.4f} external fees)"
+        )
 
     def initialize_crypto(self, prices: dict[str, float]) -> None:
         """
@@ -970,6 +1012,7 @@ class BalanceTracker:
         active_buyer_exchanges: set[str] | None = None,
         idle_threshold: float = 600.0,
         active_seller_exchanges: set[str] | None = None,
+        max_fee_per_source: float | None = None,
     ) -> list[Transfer]:
         """Consolidate USDT from non-essential exchanges to Bitfinex hub.
 
@@ -993,6 +1036,9 @@ class BalanceTracker:
                 accumulated from sells isn't immediately pulled back to Bitfinex
                 (which would cause expensive crypto rebalance cycles).
                 None = no seller protection.
+            max_fee_per_source: If set, skip sources with withdrawal fee above
+                this amount. Used during discovery to avoid expensive consolidation
+                when the next symbol's exchanges are unknown.
         """
         if self._bitfinex_reserve_pct <= 0:
             return []
@@ -1038,6 +1084,10 @@ class BalanceTracker:
                 continue
 
             fee = self._get_withdrawal_fee(ex, available)
+
+            # Skip expensive sources during discovery
+            if max_fee_per_source is not None and fee > max_fee_per_source:
+                continue
 
             # Check hourly budget
             if not self._check_hourly_transfer_budget(fee):

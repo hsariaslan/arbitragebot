@@ -1188,7 +1188,7 @@ class ArbitrageMonitor:
         self._symbols = list(symbols)
         logger.info(f"[Monitor] Symbols updated: {symbols}")
 
-    def reset(
+    def reconfigure(
         self,
         symbols: list[str] | None = None,
         exchanges: list[str] | None = None,
@@ -1197,7 +1197,13 @@ class ArbitrageMonitor:
         min_net_profit_pct: float | None = None,
         rebalance_roi_horizon: int | None = None,
     ) -> None:
-        """Reset simulation state, optionally with new configuration."""
+        """Reconfigure for new symbols/exchanges while preserving cumulative state.
+
+        Resets per-cycle operational state (observations, miss streaks, stale
+        tracking) but keeps cumulative session data (trades, tick count, start
+        time, P&L buckets, simulation realism counters, demo stats, anomaly
+        protection) intact across demotion→discovery→activation cycles.
+        """
         if symbols is not None:
             self._symbols = symbols
         if exchanges is not None:
@@ -1211,7 +1217,7 @@ class ArbitrageMonitor:
         if rebalance_roi_horizon is not None:
             self._rebalance_roi_horizon = rebalance_roi_horizon
 
-        self._trades.clear()
+        # Reset per-cycle operational state only
         self._all_observations.clear()
         self._low_profit_skips = 0
         self._stale_skips.clear()
@@ -1225,11 +1231,16 @@ class ArbitrageMonitor:
         self._exchange_spread_count.clear()
         self._miss_streak.clear()
         self._rebalance_empty_backoff.clear()
-        self._tick_count = 0
-        self._start_time = time.time()
+        self._pending_opportunities.clear()
+
+        # Preserve: _trades, _tick_count, _start_time, _hourly_pnl, _daily_pnl,
+        # _config_history, simulation realism counters, demo accuracy stats,
+        # _anomaly, _manual_stopped, _demo_skip_pairs, _demo_setup_complete
+
         logger.info(
-            f"[Monitor] Reset: {len(self._symbols)} symbols, "
-            f"{len(self._active_exchanges)} exchanges, ${self._trade_amount}/trade"
+            f"[Monitor] Reconfigured: {len(self._symbols)} symbols, "
+            f"{len(self._active_exchanges)} exchanges, ${self._trade_amount}/trade "
+            f"(cumulative: {len(self._trades)} trades, tick #{self._tick_count})"
         )
 
     async def run(self) -> None:
