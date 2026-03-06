@@ -547,17 +547,21 @@ Detects systemic P&L decline across all symbols using a rolling window of `(time
 | `circuit_breaker_resume_pct` | 0.5 | 0.1–1.0 | Resume when P&L > threshold × resume_pct |
 | `circuit_breaker_cooldown` | 300 (5min) | 30–3600 | Min wait before auto-resume |
 
-### Layer 2: Drawdown Protection (Peak-to-Trough) — Global
+### Layer 2: Drawdown Protection (Peak-to-Trough) — Per-Symbol + Emergency
 
-Tracks portfolio value vs session peak. Pauses on significant decline, emergency sell-all on severe decline.
+Tracks portfolio value vs session peak. Blocks declining symbols on threshold breach, emergency sell-all on severe decline.
 
 | Setting | Default | Range | Description |
 |---------|---------|-------|-------------|
-| `drawdown_threshold_pct` | 5.0% | 0.5–20.0 | Pause threshold ($50 on $1000) |
+| `drawdown_threshold_pct` | 5.0% | 0.5–20.0 | Per-symbol block threshold ($50 on $1000) |
 | `drawdown_resume_pct` | 3.0% | 0.1–10.0 | Auto-resume when recovered |
 | `drawdown_emergency_mult` | 2.0 | 1.5–5.0 | Emergency sell at threshold × mult (10%) |
 
-Emergency sell-all: iterates all crypto positions, sells at current price minus taker fee, credits USDT. Sends email notification with drawdown info, liquidated positions (exchange/symbol/qty/price/gross/fee/net), and per-exchange USDT breakdown. Requires manual resume from dashboard.
+**Non-emergency drawdown** (≥ threshold): Instead of global pause, blocks only symbols with crypto exposure (the ones causing the drawdown). Other symbols continue trading. Uses per-symbol blocking mechanism (`_symbol_blocked_until`). Falls back to global pause only if `crypto_symbols` context is unavailable.
+
+**Emergency drawdown** (≥ threshold × mult): Global pause + sell-all crypto positions. Sends email notification. Requires manual resume from dashboard.
+
+**Peak reset after liquidation**: When all crypto is sold (emergency sell or demotion), `reset_peak_if_no_crypto()` resets `_peak_portfolio_value` to current portfolio value. Breaks the deadlock where drawdown stays permanently above resume threshold after crypto is liquidated. Called from `monitor._tick()` (after emergency sell) and `optimizer._evaluate_demotions()` (after demotion sells all crypto).
 
 ### Layer 3: Per-Symbol Loss Streak — Targeted
 
