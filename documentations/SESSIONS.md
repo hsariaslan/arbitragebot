@@ -1738,3 +1738,93 @@ The bot entered discovery and scanned all 60 symbols for 5.5 hours. Discovery ex
 - **Recommended settings for Session #14**: `trading_score_threshold=0.03`, `fee_threshold_multiplier=0.3`, `min_net_profit_pct=0.03` — makes non-Bitfinex thresholds reachable (0.053–0.071 vs previous 0.082–0.118).
 - **Discovery window inflation fix**: Early discovery exit now requires `scoring_window / 2` elapsed time AND ticks per symbol (default 900s/900 ticks). Previously used hardcoded 60s — allowed activation with 100% frequency from thin windows (real frequency was 55% over full 1800s window). DYDX scored 0.127 after reset vs 0.050 with full window — a 2.5× inflation.
 - **Smart settings apply**: `_apply_settings()` no longer restarts discovery for every settings change. Only `scoring_window`, `num_active_symbols`, `auto_rotate` trigger restart. All other settings hot-applied without wiping tick windows.
+
+### Session #14 — 2026-03-06 (Drawdown Pause Deadlock)
+
+- **Version**: v0.25.4-beta
+- **Duration**: 1h 59m (11:36–13:36 UTC)
+- **Capital**: $1,000, execution_mode=demo
+- **Enabled exchanges**: 6 (Binance, Bitfinex, Bitget, Bybit, MEXC, OKX)
+- **Disabled exchanges**: Gate.io, KuCoin, Pionex
+- **Trades**: 25 (all DYDX, 8m 33s trading window)
+- **Trading profit**: $0.55
+- **Transfer fees**: $0.02 (13 transfers, mostly $0 via MEXC/Bybit)
+- **Demotion sell fees**: $0.39
+- **Net result**: ~$0.14 profit (before demotion sell), ~-$0.25 after demotion sell fees
+- **Anomaly**: Drawdown pause at 12:00:11 — never auto-resumed
+
+#### Settings
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| `trading_score_threshold` | 0.03 | Lowered from 0.05 (Session #13 fix) |
+| `fee_threshold_multiplier` | 0.3 | Lowered from 0.5 (Session #13 fix) |
+| `min_net_profit_pct` | 0.03% | Lowered from 0.05 |
+| `scoring_window` | 1800s | Half-window (900s) used for discovery exit |
+| `drawdown_threshold_pct` | 5.0% | Default |
+| `drawdown_resume_pct` | 3.0% | Default |
+
+#### Timeline
+
+| Time | Event |
+|------|-------|
+| 11:36 | Session start, discovery begins |
+| 11:38 | Discovery consolidation: 4 transfers to Bitfinex ($0.01 fees) |
+| 11:51:28 | Discovery complete after 15m (900s gate worked). DYDX activated: score=0.073, freq=81.6%, 709/869 ticks, threshold=0.056 |
+| 11:51:31 | First trade: DYDX OKX→MEXC, $0.013 profit |
+| 11:51–12:00 | 25 trades in 8m 33s. All DYDX: 19 OKX→MEXC, 4 Bybit→MEXC, 2 Binance→MEXC |
+| 12:00:11 | **PAUSED (drawdown)**: 5.36% >= 5.0% threshold. DYDX price dropped ~5% while bot held crypto on seller exchanges |
+| 12:00–12:51 | Paused. No trades. DYDX score decaying. |
+| 12:51:46 | DYDX demoted (score below threshold 900s). Crypto sold: freed $520.48, fees $0.39 |
+| 12:51:46 | All symbols demoted — re-entering discovery |
+| 12:53 | Discovery consolidation: 3 transfers to Bitfinex ($0.01) |
+| 12:53–13:36 | Second discovery. DYDX peaked at 0.058 but threshold=0.064 — never reactivated |
+
+#### What Happened
+
+The discovery window inflation fix worked correctly — DYDX activated at 15 minutes with a stable score (0.073, 81.6% freq) instead of the inflated 0.135 from Session #13. Trading was profitable at $0.55 over 25 trades ($0.022/trade avg).
+
+**The drawdown trigger was a false positive.** DYDX price dropped ~5% during the 8-minute trading window. The bot held ~$520 of DYDX crypto across seller exchanges (MEXC). Portfolio value = USDT + crypto_qty × price. When DYDX price dropped from ~$0.0894 to ~$0.0847, the unrealized crypto loss (~$53) triggered the 5% drawdown threshold.
+
+**The drawdown pause created a deadlock:**
+1. Pause stops all trading → no new profits possible
+2. Crypto still held → value continues dropping with DYDX price
+3. Eventually demoted → crypto sold at the lower price, locking in the loss
+4. Portfolio now ~$947 vs peak ~$1000 → drawdown stays at ~5.3%
+5. Auto-resume requires drawdown ≤ 3.0% → needs portfolio to reach $970
+6. But trading is paused → can never earn the $23 needed to recover
+7. **Deadlock**: can't trade because paused, can't recover because can't trade
+
+#### Key Issues
+
+1. **Drawdown protection is crypto-price-sensitive**: The 5% threshold triggers on unrealized crypto price movements, not on trading losses. A 5% dip in any held crypto (normal for altcoins) instantly pauses trading.
+2. **Drawdown pause + demotion sell = locked-in loss**: Pause prevents trading → score decays → demotion triggers → crypto sold at loss → drawdown is now permanent.
+3. **Auto-resume impossible after demotion sell**: Once crypto is sold at the lower price, the loss is realized. Portfolio value can't recover without trading, but trading is blocked.
+4. **Position cap too aggressive**: 43 position cap skips in the session summary — many profitable trades were blocked because MEXC accumulated too much DYDX crypto (single seller exchange).
+
+#### Recommendations
+
+- **Increase `drawdown_threshold_pct`**: 5% is too sensitive for altcoin crypto holdings. Consider 10-15% for simulation, or disable drawdown protection until live (circuit breaker on rolling P&L is more appropriate for trading losses).
+- **Or**: After demotion sells all crypto (portfolio is 100% USDT), reset the peak to current value — the "drawdown" is no longer meaningful since there's no crypto exposure.
+- **Increase `max_position_multiplier`**: From 5 to 10-15 to reduce position cap skips, or disable (0) during simulation.
+
+#### Fixes Implemented (v0.25.5-beta)
+
+Two fixes to address the drawdown deadlock:
+
+**Fix 1: Reset peak after full crypto liquidation.** When all crypto is sold (emergency sell or demotion) and portfolio is 100% USDT, `_peak_portfolio_value` is reset to the current value. This breaks the deadlock because drawdown becomes 0% and auto-resume triggers immediately. The rationale: once there's no crypto exposure, the "peak" from when crypto was held is meaningless — the loss is realized and the portfolio is now a clean USDT baseline.
+
+**Fix 2: Per-symbol drawdown blocking instead of global pause.** Drawdown no longer triggers a global trading pause. Instead, it identifies the symbol(s) causing the decline and blocks only them via the existing per-symbol blocking mechanism (`_symbol_blocked_until`). Other profitable symbols continue trading. Global pause is reserved for emergency level only (2× threshold). This prevents a single declining altcoin from freezing the entire bot.
+
+#### Trend-Awareness Discussion
+
+Considered adding EMA-based trend detection (fast/slow crossover) to detect bearish trends earlier and exit positions before drawdown triggers. **Verdict: Not implemented.** Reasons:
+
+1. **Arbitrage is direction-neutral** — the bot profits from price differences between exchanges, not price direction. A bearish symbol can still have excellent arbitrage spreads (volatile downtrends often increase cross-exchange discrepancies).
+2. **Timeframe dilemma** — 15m EMAs too noisy (false signals every hour), 4h too slow (5% drop already happened). No good answer for a sub-second trading bot.
+3. **Historical data dependency** — needs REST candle API calls per symbol per exchange, adding rate limits, failure points, and a new data pipeline.
+4. **Parameter tuning rabbit hole** — EMA 9/21? 12/26? 20/50? Each symbol behaves differently. Weeks of tuning with still unreliable signals.
+5. **Not the bot's edge** — HFT firms with PhDs do trend detection. This bot's edge is arbitrage execution.
+6. **The two fixes above solve the actual problem** — the deadlock was an inventory management issue, not a prediction problem.
+
+**Future consideration: rate-of-decline detection.** A simpler alternative to EMAs that doesn't require historical data: monitor "has this held position dropped >X% in Y minutes?" using existing WebSocket price data. No candles, no EMAs, no new data pipeline — just a rolling price window per held crypto. Could trigger early demotion before drawdown threshold hits. Not implemented now since per-symbol blocking should handle most cases, but worth revisiting if inventory risk issues persist in live trading.
