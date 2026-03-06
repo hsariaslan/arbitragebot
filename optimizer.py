@@ -371,17 +371,23 @@ class SymbolOptimizer:
                 elapsed = now - self._discovery_start
 
                 if self._tick_count >= self._min_warmup_ticks:
-                    # Check every tick for tradeable candidates (>= 0.01)
+                    # Require scoring window to be substantially filled before
+                    # trusting frequency — prevents inflated scores from thin
+                    # windows after reset/restart (e.g., 100% freq from 60
+                    # ticks vs real 55% freq from 1800 ticks)
+                    min_ticks = self._scoring_window // 2
+                    min_early_exit_time = float(self._scoring_window // 2)
+                    # Check every tick for tradeable candidates (>= threshold)
                     tradeable_found = sorted(
                         [
                             s for s in self._scores.values()
-                            if s.score >= self._get_activation_threshold(s.symbol) and s.total_ticks > 0
+                            if s.score >= self._get_activation_threshold(s.symbol)
+                            and s.total_ticks >= min_ticks
                         ],
                         key=lambda s: s.score,
                         reverse=True,
                     )
-                    # Early exit: at least 1 tradeable + 60s for stable scores
-                    min_early_exit_time = 60.0
+                    # Early exit: at least 1 tradeable + half scoring window elapsed
                     if (
                         tradeable_found
                         and elapsed >= min_early_exit_time
