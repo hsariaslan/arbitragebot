@@ -126,6 +126,37 @@ class AnomalyProtection:
         """Called by monitor after executing the emergency sell."""
         self._emergency_sell_pending = False
 
+    def reset_peak_if_no_crypto(self, portfolio_value: float) -> None:
+        """Reset peak portfolio value when portfolio is 100% USDT.
+
+        Called after emergency sell or demotion sell liquidates all crypto.
+        Breaks the drawdown deadlock: once crypto exposure is zero, the old
+        peak from when crypto was held is meaningless.
+        """
+        if not self._enabled or portfolio_value <= 0:
+            return
+        old_peak = self._peak_portfolio_value
+        old_dd = self._current_drawdown_pct
+        self._peak_portfolio_value = portfolio_value
+        self._current_drawdown_pct = 0.0
+        logger.info(
+            f"[Anomaly] PEAK_RESET: Portfolio is 100% USDT after crypto liquidation\n"
+            f"  | old_peak=${old_peak:.2f} new_peak=${portfolio_value:.2f}\n"
+            f"  | old_drawdown={old_dd:.2f}% new_drawdown=0.00%"
+        )
+        self._events.append(AnomalyEvent(
+            timestamp=time.time(), layer="drawdown", level="resume",
+            reason="Peak reset after full crypto liquidation",
+            value=portfolio_value, threshold=old_peak,
+            details={"old_peak": f"${old_peak:.2f}", "old_drawdown": f"{old_dd:.2f}%"},
+        ))
+        # If paused due to drawdown, auto-resume now
+        if self._paused and self._pause_layer == "drawdown":
+            self._auto_resume(
+                f"Peak reset after liquidation (drawdown 0% <= resume {self._dd_resume_pct}%)",
+                {"old_peak": f"${old_peak:.2f}", "new_peak": f"${portfolio_value:.2f}"},
+            )
+
     def is_symbol_blocked(self, symbol: str) -> bool:
         """Check if a symbol is in loss streak cooldown."""
         if not self._enabled:
@@ -370,23 +401,57 @@ class AnomalyProtection:
 
         elif self._current_drawdown_pct >= self._dd_threshold_pct:
             drop = self._peak_portfolio_value * self._current_drawdown_pct / 100
-            details = {
-                "portfolio": f"${ctx.get('portfolio_value', 0):.2f}",
-                "peak": f"${self._peak_portfolio_value:.2f}",
-                "drop": f"${drop:.2f}",
-                "usdt_total": f"${ctx.get('usdt_total', 0):.2f}",
-                "crypto_total": f"${ctx.get('crypto_total', 0):.2f}",
-                "rolling_pnl": f"${self._rolling_pnl_sum:.2f} ({self._cb_window // 60}min)",
-                "active_symbols": str(ctx.get("active_symbols", "?")),
-            }
-            reason = (
-                f"Drawdown {self._current_drawdown_pct:.2f}% "
-                f">= threshold {self._dd_threshold_pct:.1f}%"
-            )
-            self._trigger_pause(
-                timestamp, "drawdown", "pause", reason,
-                self._current_drawdown_pct, self._dd_threshold_pct, details,
-            )
+            # Per-symbol blocking instead of global pause:
+            # Block symbols with crypto exposure (they cause the drawdown)
+            crypto_symbols = ctx.get("crypto_symbols", [])
+            if crypto_symbols:
+                blocked_count = 0
+                for sym in crypto_symbols:
+                    if sym not in self._symbol_blocked_until:
+                        self._symbol_blocked_until[sym] = (
+                            timestamp + self._sls_cooldown
+                        )
+                        self._total_symbol_blocks += 1
+                        blocked_count += 1
+                details = {
+                    "portfolio": f"${ctx.get('portfolio_value', 0):.2f}",
+                    "peak": f"${self._peak_portfolio_value:.2f}",
+                    "drop": f"${drop:.2f}",
+                    "blocked_symbols": ", ".join(crypto_symbols),
+                    "rolling_pnl": f"${self._rolling_pnl_sum:.2f} ({self._cb_window // 60}min)",
+                    "active_symbols": str(ctx.get("active_symbols", "?")),
+                }
+                reason = (
+                    f"Drawdown {self._current_drawdown_pct:.2f}% "
+                    f">= threshold {self._dd_threshold_pct:.1f}% — "
+                    f"blocked {len(crypto_symbols)} symbol(s) instead of global pause"
+                )
+                logger.warning(
+                    f"[Anomaly] DRAWDOWN_BLOCK: {reason}\n"
+                    + "\n".join(f"  | {k}={v}" for k, v in details.items())
+                )
+                self._events.append(AnomalyEvent(
+                    timestamp=timestamp, layer="drawdown", level="block",
+                    reason=reason, value=self._current_drawdown_pct,
+                    threshold=self._dd_threshold_pct, details=details,
+                ))
+            else:
+                # No crypto symbols info — fall back to global pause
+                details = {
+                    "portfolio": f"${ctx.get('portfolio_value', 0):.2f}",
+                    "peak": f"${self._peak_portfolio_value:.2f}",
+                    "drop": f"${drop:.2f}",
+                    "rolling_pnl": f"${self._rolling_pnl_sum:.2f} ({self._cb_window // 60}min)",
+                    "active_symbols": str(ctx.get("active_symbols", "?")),
+                }
+                reason = (
+                    f"Drawdown {self._current_drawdown_pct:.2f}% "
+                    f">= threshold {self._dd_threshold_pct:.1f}%"
+                )
+                self._trigger_pause(
+                    timestamp, "drawdown", "pause", reason,
+                    self._current_drawdown_pct, self._dd_threshold_pct, details,
+                )
 
     def _check_symbol_streak(self, timestamp: float, symbol: str) -> None:
         """Check if a symbol should be blocked due to loss streak."""

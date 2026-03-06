@@ -1444,6 +1444,18 @@ class SymbolOptimizer:
         for sym in to_demote:
             self._execute_demotion(sym)
 
+        # After all demotions: if portfolio is 100% USDT, reset drawdown peak
+        if to_demote and self._balance:
+            has_crypto = any(
+                qty > 0
+                for ex in self._balance._exchanges
+                for qty in self._balance.crypto.get(ex, {}).values()
+            )
+            if not has_crypto:
+                prices = self._get_all_prices()
+                portfolio = self._balance.get_portfolio_value(prices)
+                self._monitor._anomaly.reset_peak_if_no_crypto(portfolio)
+
     def _execute_demotion(self, symbol: str) -> None:
         """Remove an underperforming symbol from the active set.
 

@@ -1280,6 +1280,10 @@ class ArbitrageMonitor:
         if self._anomaly.should_emergency_sell and self._balance:
             self._emergency_sell_all()
             self._anomaly.clear_emergency_sell()
+            # Reset peak: portfolio is now 100% USDT, old peak is meaningless
+            prices = self._get_current_prices()
+            portfolio = self._balance.get_portfolio_value(prices)
+            self._anomaly.reset_peak_if_no_crypto(portfolio)
 
         # Initialize balance tracker as soon as prices are available
         if self._balance and not self._balance.initialized:

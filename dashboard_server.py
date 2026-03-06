@@ -2367,11 +2367,19 @@ class DashboardServer:
         transfer_fees = self._balance.total_transfer_fees
 
         # Anomaly protection: update drawdown tracking with portfolio context
+        # Collect symbols with crypto exposure (for per-symbol drawdown blocking)
+        crypto_symbols = set()
+        if self._balance.initialized:
+            for ex in self._balance._exchanges:
+                for sym, qty in self._balance.crypto.get(ex, {}).items():
+                    if qty > 0 and prices.get(sym, 0) > 0:
+                        crypto_symbols.add(sym)
         self._monitor._anomaly.update_portfolio_value(portfolio_value, context={
             "portfolio_value": portfolio_value,
             "active_symbols": len(active_symbols),
             "connected_exchanges": connected,
             "total_exchanges": len(active_exchanges),
+            "crypto_symbols": sorted(crypto_symbols),
         })
 
         # Net profit awareness: update optimizer to gate rotations when in deficit
