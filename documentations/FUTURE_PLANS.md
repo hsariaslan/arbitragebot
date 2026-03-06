@@ -136,3 +136,117 @@ Based on log analysis (bot-logs-2026-03-01):
 - Estimated profit increase: 15–30% from better capital allocation on high-quality ticks
 
 The improvement compounds: more profit per fat tick → better net P&L → rotation/rebalance gates stay open → more trading activity.
+
+## Incremental Symbol Activation
+
+### Problem
+
+Currently, when `_complete_discovery()` activates new symbols after a demotion→discovery cycle, it calls `balance.reconfigure()` and `monitor.reconfigure()` which reset USDT/crypto balances and re-initialize everything from scratch with new allocations. This is a shortcut that treats activation as a "wipe and rebuild" operation.
+
+This has several drawbacks:
+- Capital movements during activation are invisible — balances are teleported, not transferred
+- Transfer fees from activation are not counted in net P&L (hidden costs)
+- Rebalance gates (ROI, worthiness, hourly cap) are bypassed during activation
+- The `reconfigure()` code path is a special case that diverges from normal trading/transfer logic
+- Simulation does not reflect what real trading would look like (you cannot magically move money between exchanges)
+
+### Solution: Incremental Activation via Normal Pipelines
+
+Instead of wiping balances and rebuilding from scratch, activation should work incrementally using the existing trade and transfer pipelines:
+
+1. **Demotion sells all crypto back to USDT** — this already works. After demotion, all capital is USDT spread across exchanges.
+2. **New symbols activate without balance reset** — just update the active symbol list and dominant pairs.
+3. **Normal rebalance logic moves USDT** — the rebalance loop detects that buyer exchanges need USDT and transfers it from exchanges with excess.
+4. **Normal trading loop buys crypto** — seller exchanges acquire crypto organically through arbitrage trades (buying on buyer exchange, selling on seller exchange).
+5. **No special `reconfigure()` path needed** — everything flows through the same trade/transfer pipeline used during normal operation.
+
+### Example Flow
+
+```
+Session starts:
+  DYDXUSDT active, capital on Binance ($100 USDT) + MEXC ($100 crypto)
+
+DYDX demoted:
+  Crypto sold on MEXC → $100 USDT on Binance, $99.96 USDT on MEXC (after taker fee)
+
+Discovery finds AXSUSDT:
+  Dominant pair = KuCoin (buy) → Bybit (sell)
+
+Instead of reconfigure():
+  Bot sets AXSUSDT as active symbol, sets dominant pairs
+  ↓
+  Normal rebalance loop:
+    Detects KuCoin needs USDT → transfers from Binance ($0.01 BEP20 fee)
+    Detects Bybit needs USDT → transfers from MEXC ($0.00 Arbitrum fee)
+  ↓
+  Normal trading loop:
+    First few ticks: buys AXS on KuCoin, sells AXS on Bybit
+    Crypto positions build up organically on seller exchanges
+  ↓
+  All movements tracked as normal transfers/trades with real fees
+```
+
+### Benefits
+
+| Aspect | Current (`reconfigure()`) | Incremental |
+|--------|--------------------------|-------------|
+| Capital movement visibility | Hidden (instant teleport) | Full audit trail in XLSX + dashboard |
+| Transfer fees in P&L | Not counted | Counted as normal transfer fees |
+| Rebalance gate compliance | Bypassed | ROI, worthiness, hourly cap all apply |
+| Code complexity | Special `reconfigure()` path | Removed — uses existing pipelines |
+| Simulation realism | Unrealistic (instant move) | Matches real trading behavior |
+| Multi-symbol activation | Atomic (all at once) | Sequential (may need coordination) |
+
+### Challenges
+
+#### Slower Activation
+
+Activation would take minutes instead of being instant. The rebalance loop runs every tick but has cooldowns (60s per exchange/direction). During the transition period, the bot might miss trading opportunities while capital is still moving to the right exchanges.
+
+**Mitigation**: Could temporarily reduce rebalance cooldowns during post-activation phase, or add an "urgent rebalance" mode that runs transfers back-to-back until capital is positioned.
+
+#### Multi-Symbol Activation
+
+The current system activates multiple symbols atomically via `reconfigure()`. With incremental activation, multiple symbols competing for the same USDT pool could cause thrashing (transfer to KuCoin for symbol A, then transfer away from KuCoin for symbol B).
+
+**Mitigation**: Activate symbols sequentially with a brief settling period between each. Or compute the aggregate capital needs across all new symbols first, then execute a single round of transfers.
+
+#### `initialize_crypto()` Replacement
+
+`initialize_crypto()` currently converts USDT to crypto instantly on seller exchanges. With incremental activation, the initial crypto positions would need to be established through actual market buy orders (internal buys), which incur taker fees and slippage.
+
+**Mitigation**: Use the existing internal buy rebalance path (`[Balance] Internal buy`) which already handles this. The first few trades might have reduced position sizes until crypto builds up on seller exchanges.
+
+#### Capital Fragmentation
+
+After demotion, USDT may be scattered across many exchanges in small amounts. The rebalance logic might not consolidate efficiently if individual amounts fall below transfer minimums.
+
+**Mitigation**: Run `consolidate_to_bitfinex()` after demotion (already implemented via `_redistribute_post_demotion()`), then distribute from Bitfinex hub at $0 withdrawal fee.
+
+### Implementation Sketch
+
+```python
+# In optimizer.py: _complete_discovery()
+
+# Current approach (to be replaced):
+#   balance.reconfigure(new_symbols, dominant_pairs, allocations)
+#   monitor.reconfigure(new_symbols)
+
+# Incremental approach:
+def _complete_discovery_incremental(self):
+    # 1. Update active symbols and dominant pairs (no balance changes)
+    self._active_symbols = new_symbols
+    self._dominant_pairs = dominant_pairs
+
+    # 2. Notify monitor of new symbols (no balance reset)
+    self._monitor.update_active_symbols(new_symbols)
+
+    # 3. Normal rebalance loop handles capital positioning
+    #    - _rebalance_usdt() moves USDT to buyer exchanges
+    #    - _rebalance_crypto() handles seller exchanges via internal buy
+    #    - All transfers go through normal gates and fee tracking
+```
+
+### Priority
+
+**Low** — the current `reconfigure()` approach is functional and sufficient for simulation and demo modes. This improvement becomes more important when transitioning to live trading, where every dollar movement must be auditable and transfer fees are real costs. It is primarily a polish/realism improvement that also simplifies the codebase by removing a special-case code path.

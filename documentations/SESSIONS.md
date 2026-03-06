@@ -1580,3 +1580,108 @@ Trade quality significantly better than Session #10 (avg 0.066% vs 0.040%). The 
 5. **Bybit demo fee mismatch needs investigation**: If real Bybit also charges 0.10% (no MNT discount applied), the configured 0.075% overstates profitability on every Bybit trade. **Confirmed**: Bybit MNT discount requires no minimum holding — just enable toggle + hold MNT balance. Demo testnet doesn't honor token discounts (expected behavior).
 6. **Bybit lot size rounding bug**: Demo sell qty sent unrounded — exchange_info lot rounding should apply to demo orders too. **Fixed in v0.25.1-beta**: `exchange_info.round_quantity()` applied after `cap_sell_qty()` in `_execute_demo_trade()`.
 7. **OKX DYDX-USDT demo missing instrument**: OKX demo doesn't have DYDX-USDT spot pair, causing repeated D-10 rejections. **Fixed in v0.25.1-beta**: `_demo_skip_pairs` auto-detects "instrument not found" rejections and permanently skips the combo.
+
+---
+
+### Session #12 — 2026-03-05 (Long Run, Discovery Consolidation Exposed)
+
+**Date**: 2026-03-05, 19:10 – 2026-03-06 01:07 UTC (5h 57m)
+**Capital**: $1,000
+**Version**: v0.25.1-beta
+**Mode**: demo (Binance/OKX/Bybit) + simulation
+**VPS**: LightNode Bangkok
+**Pionex**: Disabled
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| **Trades** | 483 |
+| **Trading PnL** | $3.81 |
+| **True transfer costs** | $5.79 |
+| **Cashback** | $1.36 ($0.51 credited, $0.85 pending) |
+| **True net** | **-$1.47** (-$0.62 w/ pending cashback) |
+| **$/hr** | -$0.25 |
+| **Avg net%** | 0.069% |
+| **Discrepancies** | 5,047 |
+
+#### Settings (unchanged from Session #11)
+
+trade_amount=$10 (1% of $1000), min_net_pct=0.03%, hourly_cap=$2, TRADING_SCORE_THRESHOLD=0.03, max_pos_mult=5, bitfinex_reserve=15%.
+
+#### Timeline — 4 Demotion Cycles
+
+| Phase | Time | Symbol | Trades | PnL | Xfer Fees | Net |
+|-------|------|--------|-------:|----:|----------:|----:|
+| Cycle 1 | 19:11–19:49 (38m) | AXSUSDT | 65 | $0.77 | $0.93 | -$0.13 |
+| Cycle 2 | 20:38–22:32 (114m) | DYDX→SNX | 172 | $1.77 | $1.56 | +$0.59 |
+| Cycle 3 | 22:41–23:29 (48m) | DYDXUSDT | 126 | $0.74 | $0.42 | +$0.68 |
+| Cycle 4 | 23:59–00:57 (58m) | DYDXUSDT | 114 | $0.53 | $1.30 | -$0.26 |
+
+Each cycle: discover → activate → trade → demote → discover again. None of the traded symbols (AXSUSDT, DYDXUSDT, SNXUSDT) are available on Bitfinex.
+
+#### Transfer Fee Breakdown
+
+| Category | Amount | % of Total |
+|----------|-------:|:----------:|
+| Hub consolidation (discovery) | $3.03 | 52% |
+| Internal buy/sell (rebalancing) | $1.33 | 23% |
+| Rotation (DYDX→SNX) | $0.65 | 11% |
+| External USDT transfers | $0.39 | 7% |
+| External crypto transfers | $0.39 | 7% |
+| **Total** | **$5.79** | |
+
+**Hub consolidation breakdown by exchange**:
+
+| Exchange | Transfers | Total Fee | Fee/Transfer |
+|----------|----------:|---------:|:--------:|
+| KuCoin | 4 | $1.60 | $0.40 |
+| Gate.io | 2 | $1.00 | $0.50 |
+| OKX | 4 | $0.40 | $0.10 |
+| Binance | 3 | $0.03 | $0.01 |
+| Bitget | 4 | $0.004 | $0.001 |
+| MEXC/Bybit | 5 | $0.00 | $0.00 |
+
+#### Trade Distribution
+
+| Symbol | Trades | Dominant Pairs | On Bitfinex |
+|--------|-------:|---------------|:-----------:|
+| DYDXUSDT | 409 | Binance→MEXC (125), OKX→MEXC (67), MEXC→Binance (64) | No |
+| AXSUSDT | 65 | Gate.io→OKX (20), Gate.io→MEXC (19), KuCoin→OKX (15) | No |
+| SNXUSDT | 9 | MEXC→Bitget (9) | No |
+
+MEXC was involved in 90%+ of trades (low fees: 0.04%).
+
+#### v0.25.1-beta Features Verified
+
+| Feature | Result |
+|---------|--------|
+| **Idle consolidation gate** | 37 idle consolidations SKIPPED — working correctly |
+| **Post-demotion consolidation gate** | 4 post-demotion consolidations SKIPPED — working correctly |
+| **Demo instrument skip pairs** | OKX:DYDXUSDT:buy permanently skipped after first rejection. 66 demo trades skipped total. Working correctly. |
+| **Bybit qty rounding** | No "too many decimals" errors. Fixed. |
+| **Discovery consolidation** | NOT GATED — this is the remaining leak. 22 hub consolidations during discovery cost $3.03. |
+
+#### Demo Stats
+
+| Metric | Value |
+|--------|-------|
+| Fill rate | 183/199 = 92% |
+| Rejections | 16 (Binance NOTIONAL) |
+| Fee mismatches | 9 (Bybit DYDX: 0.075% vs ~1.085%) |
+| Avg latency | 153ms |
+| Demo setup | AXSUSDT on OKX — rejected (order not filled) |
+
+#### Key Takeaways
+
+1. **Discovery consolidation is the remaining cost leak**: The v0.25.1-beta gate blocks post-discovery consolidation (eval cycles, post-demotion), but discovery-phase consolidation (line 406 in optimizer.py) is ungated. Each demotion→discovery cycle consolidates everything to Bitfinex ($0.76 avg cost), then redistributes out when a non-Bitfinex symbol activates. 4 cycles × $0.76 = $3.03 — more than the entire trading PnL ($3.81).
+2. **4 demotion cycles in 6 hours is too volatile**: Average cycle length 65 min. Each cycle costs ~$1.45 (consolidation + rebalancing). Bot needs to either not demote as quickly or not consolidate during discovery.
+3. **Still only trading non-Bitfinex symbols**: DYDX, AXS, SNX — all require both legs to pay taker fees. No Bitfinex-available symbol scored above 0.03 threshold during this session.
+4. **MEXC is the best exchange for arbitrage**: Involved in 90%+ of trades, $0 withdrawal fees, 0.04% taker. The bot naturally gravitates toward MEXC pairs.
+5. **Bybit demo fee anomaly**: 1.085% actual fee on DYDX — far exceeds the 0.10% base rate. Likely a testnet artifact, not a real trading concern.
+6. **Trade counts reset on each demotion cycle**: `_complete_discovery()` called nuclear `monitor.reset()` and `balance.reset()` which wiped all cumulative state — trades, transfer fees, P&L, tick count, start time. This prevented the net P&L gate from seeing cumulative losses across cycles, made $/hr inaccurate, and lost trade history in XLSX export.
+
+#### Fixes Applied (v0.25.2-beta)
+
+- **Discovery consolidation gate**: Added `max_fee_per_source=0.02` to `consolidate_to_bitfinex()` during discovery — skips expensive sources (KuCoin $0.40, Gate.io $0.50, OKX $0.10), only consolidates from free/near-free exchanges.
+- **Cumulative state preservation**: Replaced nuclear `monitor.reset()` / `balance.reset()` with `reconfigure()` methods that only reset per-cycle operational state (observations, miss streaks) while preserving cumulative session data (trades, fees, P&L, tick count, start time, demo stats, anomaly protection). Net P&L gate now sees true cumulative losses across demotion cycles.
