@@ -1188,7 +1188,7 @@ class DashboardServer:
             save_settings(self._settings)
             self._apply_settings(self._settings)
             await ws.send(json.dumps({"type": "settings_applied", "ok": True}))
-            logger.info("[Dashboard] Settings applied and simulation reset")
+            logger.info("[Dashboard] Settings applied")
 
         elif msg_type == "save_security_settings":
             now = time.time()
@@ -1704,11 +1704,14 @@ class DashboardServer:
         else:
             trade_amount = settings.get("trade_amount_usd", self._monitor._trade_amount)
 
-        # Reset optimizer if present — triggers new discovery
+        # Update optimizer parameters — only restart discovery when scoring
+        # fundamentals change (scoring_window, num_active_symbols, auto_rotate).
+        # All other settings are hot-applied without wiping tick windows,
+        # preserving 15+ minutes of collected scoring data.
         if self._optimizer:
             opt = self._optimizer
             opt._total_capital = total_capital
-            # Update Phase 2-4 parameters directly (not in reset())
+            # Hot-apply all optimizer parameters
             if "max_active_symbols" in settings:
                 opt._max_active_symbols = max(int(settings["max_active_symbols"]), int(settings.get("num_active_symbols", opt._min_active_symbols)))
             if "min_rebalance_score" in settings:
@@ -1735,14 +1738,31 @@ class DashboardServer:
                 opt._fee_threshold_multiplier = float(settings["fee_threshold_multiplier"])
             if "discovery_duration" in settings:
                 opt._discovery_duration = int(settings["discovery_duration"])
-            opt.reset(
-                trade_amount=trade_amount,
-                num_active_symbols=settings.get("num_active_symbols"),
-                scoring_window=settings.get("scoring_window"),
-                evaluation_interval=settings.get("evaluation_interval"),
-                safety_multiplier=settings.get("safety_multiplier"),
-                auto_rotate=settings.get("auto_rotate"),
+            if "trade_amount_usd" in settings or "trade_amount_pct" in settings:
+                opt._trade_amount = trade_amount
+            if "evaluation_interval" in settings:
+                opt._evaluation_interval = int(settings["evaluation_interval"])
+            if "safety_multiplier" in settings:
+                opt._safety_multiplier = float(settings["safety_multiplier"])
+            if "auto_rotate" in settings:
+                opt._auto_rotate = settings["auto_rotate"]
+
+            # Only restart discovery if scoring fundamentals changed
+            # (these affect what data the score is computed from)
+            discovery_triggers = {"scoring_window", "num_active_symbols", "auto_rotate"}
+            needs_discovery_restart = any(
+                k in settings and settings[k] != old_settings.get(k)
+                for k in discovery_triggers
             )
+            if needs_discovery_restart:
+                if "num_active_symbols" in settings:
+                    opt._min_active_symbols = int(settings["num_active_symbols"])
+                if "scoring_window" in settings:
+                    opt._scoring_window = int(settings["scoring_window"])
+                opt.reset(trade_amount=trade_amount)
+                logger.info("[Settings] Discovery restarted (scoring fundamentals changed)")
+            else:
+                logger.info("[Settings] Hot-applied without discovery restart")
 
         # Update monitor thresholds
         if "min_net_profit_pct" in settings:
