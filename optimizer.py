@@ -596,13 +596,16 @@ class SymbolOptimizer:
             drop_from_peak = ((wl.peak_score - s.score) / wl.peak_score * 100) if wl.peak_score > 0 else 0.0
 
             status = "NEW" if is_new else "WATCH"
+            act_thresh = self._get_activation_threshold(s.symbol)
+            fee_adj = self._compute_fee_threshold_adjustment(s.symbol)
             logger.info(
                 f"[Candidate] {status} {s.symbol}: "
                 f"score={s.score:.6f} peak={wl.peak_score:.6f} "
                 f"drop={drop_from_peak:.0f}% tier={tier} "
                 f"avg_net={s.avg_profitable_net:.4f}% freq={s.frequency:.1%} "
                 f"ticks={s.profitable_ticks}/{s.total_ticks} "
-                f"trend={trend} phase=discovery"
+                f"trend={trend} phase=discovery "
+                f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f})"
             )
 
         # Drop watchlist entries that fell below threshold
@@ -1369,12 +1372,15 @@ class SymbolOptimizer:
                     else:
                         block = "unknown"
                     status = "NEW" if is_new else "WATCH"
+                    act_thresh = self._get_activation_threshold(sym)
+                    fee_adj = self._compute_fee_threshold_adjustment(sym)
                     logger.info(
                         f"[Candidate] {status} {sym}: "
                         f"score={score_val:.6f} peak={entry.peak_score:.6f} "
                         f"avg_net={score_obj.avg_profitable_net:.4f}% freq={score_obj.frequency:.1%} "
                         f"ticks={score_obj.profitable_ticks}/{score_obj.total_ticks} "
-                        f"trend={trend} block={block}"
+                        f"trend={trend} block={block} "
+                        f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f})"
                     )
             else:
                 # Score dropped below threshold — remove from watchlist
@@ -1708,17 +1714,6 @@ class SymbolOptimizer:
 
         # Cap at strong threshold
         result = min(threshold, self._strong_threshold)
-
-        if result > base:
-            parts = []
-            if fee_adj > 0:
-                parts.append(f"fee_adj=+{fee_adj:.4f}")
-            if stats and stats.times_demoted > 0:
-                parts.append(f"demoted={stats.times_demoted}")
-            logger.info(
-                f"[Optimizer] Activation threshold for {symbol.replace('USDT', '')}: "
-                f"{result:.4f} (base={base}, {', '.join(parts)})"
-            )
         return result
 
     def _compute_fee_threshold_adjustment(self, symbol: str) -> float:
