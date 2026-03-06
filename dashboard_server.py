@@ -956,6 +956,7 @@ class DashboardServer:
         "trading_score_threshold": (float, 0.0001, 0.5),
         "strong_score_threshold": (float, 0.01, 1.0),
         "very_strong_score_threshold": (float, 0.05, 2.0),
+        "fee_threshold_multiplier": (float, 0.0, 5.0),
         "net_pnl_gate_warmup_trades": (int, 1, 200),
         "net_pnl_gate_grace_seconds": (int, 60, 7200),
         "rebalance_roi_divisor": (int, 2, 20),
@@ -1730,6 +1731,8 @@ class DashboardServer:
                 opt._strong_threshold = float(settings["strong_score_threshold"])
             if "very_strong_score_threshold" in settings:
                 opt._very_strong_threshold = float(settings["very_strong_score_threshold"])
+            if "fee_threshold_multiplier" in settings:
+                opt._fee_threshold_multiplier = float(settings["fee_threshold_multiplier"])
             if "discovery_duration" in settings:
                 opt._discovery_duration = int(settings["discovery_duration"])
             opt.reset(
@@ -1952,6 +1955,8 @@ class DashboardServer:
                 self._optimizer._strong_threshold = float(settings["strong_score_threshold"])
             if "very_strong_score_threshold" in settings:
                 self._optimizer._very_strong_threshold = float(settings["very_strong_score_threshold"])
+            if "fee_threshold_multiplier" in settings:
+                self._optimizer._fee_threshold_multiplier = float(settings["fee_threshold_multiplier"])
 
         # Anomaly protection
         anomaly = self._monitor._anomaly
@@ -2234,7 +2239,7 @@ class DashboardServer:
             f"min_net_pct={s.get('min_net_profit_pct', 0.02):.2f}%, rebalance_cooldown={s.get('rebalance_cooldown', 30)}s, roi_horizon={s.get('rebalance_roi_horizon', 300)}s, roi_divisor={s.get('rebalance_roi_divisor', 5)}",
             f"net_pnl_gate: warmup={s.get('net_pnl_gate_warmup_trades', 10)} trades, grace={s.get('net_pnl_gate_grace_seconds', 1800)}s",
             f"net_pct_sizing={s.get('net_pct_sizing_enabled', True)}, cap={s.get('net_pct_multiplier_cap', 2.5)}",
-            f"spread_persistence={s.get('spread_persistence_ticks', 1)} ticks, evd_penalty={s.get('event_driven_seller_penalty_pct', 0.05)}, one_leg_rate={s.get('one_leg_failure_rate', 0.02)}, max_pos_mult={s.get('max_position_multiplier', 5.0)}",
+            f"spread_persistence={s.get('spread_persistence_ticks', 1)} ticks, evd_penalty={s.get('event_driven_seller_penalty_pct', 0.05)}, one_leg_rate={s.get('one_leg_failure_rate', 0.02)}, max_pos_mult={s.get('max_position_multiplier', 5.0)}, fee_threshold_mult={s.get('fee_threshold_multiplier', 0.5)}",
             f"anomaly: enabled={ano_enabled}, cb_window={cb_w}s, cb_threshold=${cb_t:.2f}, cb_cooldown={cb_c}s",
             f"anomaly: dd_threshold={dd_t:.1f}%, dd_emergency={dd_e:.1f}x, streak_threshold={sls_t}, streak_cooldown={sls_c}s",
             f"bitfinex_reserve={bfx_pct * 100:.1f}% (${capital * bfx_pct:.0f}), hard_floor={bfx_floor * 100:.1f}% (${capital * bfx_floor:.0f})",
@@ -2263,6 +2268,7 @@ class DashboardServer:
                 "symbol_loss_streak_cooldown", "bitfinex_reserve_pct",
                 "hourly_external_transfer_cap", "execution_mode",
                 "net_pct_sizing_enabled", "net_pct_multiplier_cap",
+                "fee_threshold_multiplier",
             ]
             for k in keys_to_check:
                 old_v = old_settings.get(k)

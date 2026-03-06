@@ -6,7 +6,7 @@ All symbols, exchange settings, and operational parameters.
 
 import os
 
-__version__ = "0.25.1-beta"
+__version__ = "0.25.2-beta"
 
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
@@ -321,6 +321,7 @@ NET_PCT_MULTIPLIER_CAP: float = 2.5      # Max net%-based trade size multiplier
 TRADING_SCORE_THRESHOLD: float = 0.01    # Min score to trade/rebalance
 STRONG_SCORE_THRESHOLD: float = 0.1      # Strong tier threshold
 VERY_STRONG_SCORE_THRESHOLD: float = 0.3 # Very strong tier threshold
+FEE_THRESHOLD_MULTIPLIER: float = 0.5    # Activation threshold scales with pair fee excess
 
 # Net P&L gate params (configurable via settings page)
 NET_PNL_GATE_WARMUP_TRADES: int = 10     # Min trades before net P&L gate activates
