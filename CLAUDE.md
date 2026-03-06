@@ -299,7 +299,7 @@ The bot only trades and transfers for **strong** (score ≥ 0.1) and **very stro
 ### Rules
 
 - **Discovery**: Activates symbols with score ≥ 0.01. Extends discovery duration (up to 3600s) if none qualify. At activation, symbols are filtered by two checks: (1) **recent frequency gate** — recent ticks must have ≥5% profitable frequency (rejects transient spikes that already closed). Uses adaptive window: **60s** for symbols involving event-driven exchanges (Bitfinex updates every 10-20s, so a short window misses update cycles) and **15s** for streaming exchanges. Detects event-driven involvement by checking the last 30 profitable ticks for exchange membership. (2) **score trajectory** — last 5 scores all declining with >10% drop OR cliff drop (current < peak × `score_stability_factor`). Candidates are tracked in watchlist from first tick for trend analysis.
-- **Early discovery exit**: If any symbol reaches score ≥ 0.01 during discovery (after 60s minimum), discovery ends immediately and trading starts.
+- **Early discovery exit**: Requires `scoring_window / 2` elapsed time AND `scoring_window / 2` total ticks per symbol before trusting scores (default: 900s/900 ticks with 1800s window). Prevents inflated scores from thin windows after restart — frequency needs time to normalize (e.g., 100% from 60 ticks vs real 55% from 900 ticks).
 - **Trading**: Normal tier (0.01–0.1) gets `trade_multiplier = 0.5–1.5×`. Weak symbols (< 0.01) get `trade_multiplier = 0`, **except active symbols** which get a 1.0× floor — score threshold controls activation/demotion, not execution for already-deployed capital.
 - **Rebalancing**: `should_allow_rebalance()` requires score ≥ 0.01 (`TRADING_SCORE_THRESHOLD`). ROI gate, net P&L gate, and transfer worthiness checks protect against unprofitable transfers.
 - **Expansion/Rotation**: Only strong/very_strong candidates can be activated or replace existing symbols. Expansion has two gates: (1) **cost gate** — `_estimate_expansion_cost()` computes the total setup fee (USDT rebalancing to buyer/seller exchanges + demotion sell) based on current balance state. If estimated cost > `est_hourly_profit × reallocation_cost_horizon`, expansion is blocked (`EXPAND_BLOCKED` log). (2) **pair fee viability gate** — computes dominant pair's combined taker fees (`buy_fee + sell_fee`) and blocks if `combined_fee > avg_profitable_net × 0.8` (pair fees would consume most of the spread). Logged as `EXPAND_BLOCKED ... pair_fee_exceeds_net`. **Bitfinex-available symbols are preferred**: non-Bitfinex candidates receive a 0.7× score penalty in expansion ranking (deprioritized, not blocked). `_is_symbol_on_bitfinex()` checks live price data. `bfx=yes/no` logged in EXPAND_READY.
@@ -602,6 +602,18 @@ Distribution strategy: uses optimizer's active symbols and dominant buyer/seller
 ### Settings Sync at Startup
 
 `_sync_settings_on_startup()` in `dashboard_server.py:run()` applies all persisted `settings.json` values to components (BalanceTracker, Monitor, Optimizer, AnomalyProtection) before the main loop starts. This ensures settings changed via dashboard in previous sessions are applied — `run.py` only passes a subset of settings to constructors. Targeted method: no optimizer reset or discovery restart.
+
+### Smart Settings Apply (No Unnecessary Discovery Restart)
+
+`_apply_settings()` only triggers discovery restart when **scoring fundamentals** change (`scoring_window`, `num_active_symbols`, `auto_rotate`). All other settings are hot-applied without wiping tick windows, preserving 15+ minutes of collected scoring data. Fee settings (`save_fee_settings`, `save_transfer_settings`) are separate handlers and never trigger discovery restart.
+
+| Setting Category | Discovery Restart? | Examples |
+|-----------------|-------------------|---------|
+| Scoring fundamentals | Yes | `scoring_window`, `num_active_symbols`, `auto_rotate` |
+| Thresholds & gates | No (hot-apply) | `trading_score_threshold`, `fee_threshold_multiplier`, `min_net_profit_pct` |
+| Trade sizing & rebalance | No (hot-apply) | `trade_amount`, `rebalance_cooldown`, `hourly_external_transfer_cap` |
+| Simulation realism & anomaly | No (hot-apply) | `spread_persistence_ticks`, `circuit_breaker_threshold` |
+| Fee & transfer configs | No (separate handler) | Taker rates, discounts, withdrawal fees, enable/disable exchange |
 
 ### Comprehensive Settings Logging
 
