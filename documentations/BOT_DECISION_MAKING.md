@@ -218,7 +218,7 @@ On startup, the bot enters discovery mode to scan all 60 symbols across all exch
 
 - Default: configurable (typically 120-300 seconds)
 - Extended: if no tradeable symbols found (score ≥ 0.01), duration doubles up to 3600s max
-- Early exit: if any symbol reaches score ≥ 0.01 after 60s minimum, discovery ends immediately
+- Early exit: requires `scoring_window / 2` elapsed time AND `scoring_window / 2` total ticks per symbol (default 900s/900 ticks with 1800s window). Prevents inflated scores from thin windows after restart — frequency needs time to normalize
 
 ### 3.2 What Happens During Discovery
 
