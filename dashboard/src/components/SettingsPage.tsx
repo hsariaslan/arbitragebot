@@ -58,6 +58,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [netPctSizingEnabled, setNetPctSizingEnabled] = useState(currentSettings.net_pct_sizing_enabled ?? true);
   const [netPctMultiplierCap, setNetPctMultiplierCap] = useState(currentSettings.net_pct_multiplier_cap ?? 2.5);
   const [tradingScoreThreshold, setTradingScoreThreshold] = useState(currentSettings.trading_score_threshold ?? 0.01);
+  const [feeThresholdMultiplier, setFeeThresholdMultiplier] = useState(currentSettings.fee_threshold_multiplier ?? 0.5);
   const [strongScoreThreshold, setStrongScoreThreshold] = useState(currentSettings.strong_score_threshold ?? 0.1);
   const [veryStrongScoreThreshold, setVeryStrongScoreThreshold] = useState(currentSettings.very_strong_score_threshold ?? 0.3);
   const [netPnlGateWarmupTrades, setNetPnlGateWarmupTrades] = useState(currentSettings.net_pnl_gate_warmup_trades ?? 10);
@@ -127,6 +128,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setNetPctSizingEnabled(currentSettings.net_pct_sizing_enabled ?? true);
       setNetPctMultiplierCap(currentSettings.net_pct_multiplier_cap ?? 2.5);
       setTradingScoreThreshold(currentSettings.trading_score_threshold ?? 0.01);
+      setFeeThresholdMultiplier(currentSettings.fee_threshold_multiplier ?? 0.5);
       setStrongScoreThreshold(currentSettings.strong_score_threshold ?? 0.1);
       setVeryStrongScoreThreshold(currentSettings.very_strong_score_threshold ?? 0.3);
       setNetPnlGateWarmupTrades(currentSettings.net_pnl_gate_warmup_trades ?? 10);
@@ -179,6 +181,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     min_misses_before_rebalance: minMissesBeforeRebalance,
     rebalance_roi_horizon: rebalanceRoiHorizon,
     trading_score_threshold: tradingScoreThreshold,
+    fee_threshold_multiplier: feeThresholdMultiplier,
     strong_score_threshold: strongScoreThreshold,
     very_strong_score_threshold: veryStrongScoreThreshold,
     net_pnl_gate_warmup_trades: netPnlGateWarmupTrades,
@@ -549,6 +552,15 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             </label>
             <input type="number" value={tradingScoreThreshold} min={0.001} max={0.5} step={0.001}
               onChange={d(setTradingScoreThreshold, 0.01)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Fee Threshold Multiplier
+              <Tooltip text="Scales activation threshold based on exchange pair fees. Higher values make expensive pairs (non-Bitfinex) harder to activate. Formula: threshold = base + (pair_fee - cheapest_fee) × multiplier. 0 = disabled (all pairs use base threshold). Default: 0.5. Config key: fee_threshold_multiplier" />
+            </label>
+            <input type="number" value={feeThresholdMultiplier} min={0} max={5.0} step={0.1}
+              onChange={d(setFeeThresholdMultiplier, 0.5)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
           <div>

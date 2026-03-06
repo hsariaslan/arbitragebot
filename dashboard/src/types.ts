@@ -134,6 +134,7 @@ export interface Settings {
   net_pct_multiplier_cap?: number;
   // Score thresholds
   trading_score_threshold?: number;
+  fee_threshold_multiplier?: number;
   strong_score_threshold?: number;
   very_strong_score_threshold?: number;
   // Net P&L gate params
