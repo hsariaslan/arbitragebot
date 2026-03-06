@@ -1685,3 +1685,54 @@ MEXC was involved in 90%+ of trades (low fees: 0.04%).
 
 - **Discovery consolidation gate**: Added `max_fee_per_source=0.02` to `consolidate_to_bitfinex()` during discovery — skips expensive sources (KuCoin $0.40, Gate.io $0.50, OKX $0.10), only consolidates from free/near-free exchanges.
 - **Cumulative state preservation**: Replaced nuclear `monitor.reset()` / `balance.reset()` with `reconfigure()` methods that only reset per-cycle operational state (observations, miss streaks) while preserving cumulative session data (trades, fees, P&L, tick count, start time, demo stats, anomaly protection). Net P&L gate now sees true cumulative losses across demotion cycles.
+
+### Session #13 — 2026-03-06 (Fee-Aware Threshold Too Aggressive)
+
+- **Version**: v0.25.2-beta
+- **Duration**: 5h 32m (02:37–08:10 UTC)
+- **Capital**: $1,000, execution_mode=demo
+- **Enabled exchanges**: 6 (Binance, Bitfinex, Bitget, Bybit, MEXC, OKX)
+- **Disabled exchanges**: Gate.io, KuCoin, Pionex
+- **Trades**: 0
+- **Transfers**: 4 (discovery consolidation, $0.011 total fees)
+- **Result**: $0 profit — stuck in discovery the entire session
+
+#### Settings
+
+| Setting | Value | Impact |
+|---------|-------|--------|
+| `trading_score_threshold` | 0.05 | Base threshold — already elevated from default 0.01 |
+| `fee_threshold_multiplier` | 0.5 | Adds up to +0.05 for expensive pairs |
+| `min_net_profit_pct` | 0.05% | Per-trade minimum |
+| `demotion_cooldown_multiplier` | 10 | Not tested — nothing activated |
+| `hourly_external_transfer_cap` | $2.00 | Not tested |
+
+#### What Happened
+
+The bot entered discovery and scanned all 60 symbols for 5.5 hours. Discovery extended 8 times (doubling each time, capping at 3600s). No symbol ever met the fee-aware activation threshold.
+
+**Best candidate**: DYDX peaked at score **0.066** (avg_net=0.09%, profitable frequency=57%). But its dominant pair (MEXC→OKX at 0.14% combined fee) triggered a fee adjustment of +0.032, raising the effective threshold to **0.082**. At its best (BIN→OKX, 0.175% combined), the threshold was **0.093**. DYDX never came close.
+
+| Symbol | Peak Score | Dominant Pair Fee | Fee-Adjusted Threshold | Gap |
+|--------|-----------|------------------|----------------------|-----|
+| DYDX | 0.066 | 0.14% (MEXC→OKX) | 0.082 | -19% |
+| TRX | 0.036 | ~0.14% | 0.082 | -56% |
+| NEAR | 0.007 | ~0.14% | 0.082 | -91% |
+| SOL | 0.002 | ~0.12% | 0.064 | -97% |
+
+**4 discovery consolidation transfers**: At 02:39:20, $133.33 moved to Bitfinex hub from Bybit ($0), MEXC ($0), Bitget ($0.001), Binance ($0.01). Total fee $0.011. Gated correctly (max_fee=$0.02), but pointless since nothing activated.
+
+**Log spam**: 186,484 activation threshold log lines — `_get_activation_threshold()` logs at INFO level on every tick for every symbol during discovery, producing 93% of the entire log file.
+
+#### Key Takeaways
+
+1. **Fee-aware threshold too aggressive at 0.5**: Combined with base=0.05, the effective threshold for non-Bitfinex symbols becomes 0.064–0.093. No symbol in current market conditions scores that high without Bitfinex involvement.
+2. **Zero trades = zero risk but also zero learning**: The bot couldn't validate any of the v0.25.2-beta fixes (reconfigure, consolidation gate) because nothing activated.
+3. **Discovery consolidation ran despite nothing activating**: The $0.011 cost is negligible, but capital was misallocated (moved away from potential buyer exchanges).
+4. **Activation threshold logging needs throttling**: 186K log lines from a single `logger.info()` call is unacceptable.
+
+#### Fixes Applied (v0.25.3-beta)
+
+- **Activation threshold log spam**: Removed per-call `logger.info()` from `_get_activation_threshold()`. Added `threshold=X.XXXX(fee_adj=+X.XXXX)` to `[Candidate]` logs instead — same info, once per candidate per eval cycle instead of once per symbol per tick.
+- **Fee threshold multiplier in dashboard**: Added `fee_threshold_multiplier` setting to Settings → Score Thresholds section, allowing runtime tuning without code changes.
+- **Recommended settings for Session #14**: `trading_score_threshold=0.03`, `fee_threshold_multiplier=0.3`, `min_net_profit_pct=0.03` — makes non-Bitfinex thresholds reachable (0.053–0.071 vs previous 0.082–0.118).
