@@ -250,3 +250,132 @@ def _complete_discovery_incremental(self):
 ### Priority
 
 **Low** — the current `reconfigure()` approach is functional and sufficient for simulation and demo modes. This improvement becomes more important when transitioning to live trading, where every dollar movement must be auditable and transfer fees are real costs. It is primarily a polish/realism improvement that also simplifies the codebase by removing a special-case code path.
+
+### Status (as of Session #15, 2026-03-07)
+
+**Still relevant but lower urgency than initially written.** The core problem (hidden activation costs not counted in P&L) is real — Session #15 showed $2.10 in rotation fees that were tracked but still caught users off guard. However, the `reconfigure()` path now uses `balance.reconfigure()` (not nuclear `reset()`), which preserves trades, transfer fees, P&L buckets, and cumulative state. The bigger problem observed in practice is **rotation churn** (7 rotations in 5h, 62% of gross eaten by fees) — incremental activation would make rotation slower but wouldn't prevent bad rotations. The newly added `pair_fee_exceeds_net` gate on rotations addresses the root cause more directly.
+
+**Recommendation**: Defer until live trading preparation. The simulation already tracks rotation fees accurately. The value of this feature is in real-mode auditability, not simulation accuracy.
+
+## Time-of-Day Adaptive Trading
+
+### Problem
+
+Arbitrage profitability varies significantly by hour. Analysis of Session #15 (24h, 506 trades, 6 active exchanges) reveals that some hours produce 10-50x more profit than others, with some hours producing zero or near-zero returns.
+
+### Session #15 Hourly Analysis (Mar 6-7, 2026)
+
+| Rank | Hour (UTC) | Trades | PNL | Neg% | Avg Net% | Best Net% | Symbol(s) | Condition |
+|:----:|------------|:------:|----:|:----:|:--------:|:---------:|-----------|-----------|
+| 1 | 10:00 | 56 | +$0.99 | 0% | +0.088% | +0.198% | SNX, DYDX | Excellent — wide spreads, zero losers |
+| 2 | 03:00 | 106 | +$0.79 | 0% | +0.044% | +0.068% | ORDI | Very good — high frequency, all profitable |
+| 3 | 23:00 | 73 | +$0.49 | 4% | +0.060% | +0.138% | DYDX | Good — strong spread, few losers |
+| 4 | 14:00 | 63 | +$0.32 | 14% | +0.033% | +0.045% | EIGEN, PENDLE | Moderate — volume but thin margins |
+| 5 | 00:00 | 47 | +$0.18 | 17% | +0.038% | +0.137% | DYDX | Moderate — decent spread, some losers |
+| 6 | 15:00 | 25 | +$0.16 | 0% | +0.039% | +0.045% | PENDLE | Moderate — clean but low frequency |
+| 7 | 22:00 | 28 | +$0.13 | 4% | +0.034% | +0.079% | DYDX | Moderate — steady, thin margins |
+| 8 | 05:00 | 20 | +$0.08 | 0% | +0.033% | +0.068% | ORDI | Thin — all profitable but low volume |
+| 9 | 07:00 | 2 | +$0.06 | 0% | +0.102% | +0.102% | DYDX | Sparse — only 2 trades but wide spread |
+| 10 | 12:00 | 14 | +$0.04 | 64% | +0.015% | +0.106% | W | Poor — 64% losers, barely positive |
+| 11 | 11:00 | 7 | +$0.04 | 0% | +0.032% | +0.071% | SNX | Thin — low volume, decent margins |
+| 12 | 21:00 | 48 | +$0.02 | 0% | +0.007% | +0.033% | SNX | Very thin — high volume but $0.0004/trade |
+| 13 | 01:00 | 7 | +$0.01 | 14% | +0.021% | +0.021% | DYDX | Very thin — barely profitable |
+| 14 | 13:00 | 11 | +$0.01 | 45% | +0.009% | +0.028% | EIGEN, ORDI | Near-zero — 45% losers, break-even |
+| — | 15-20:00* | 0 | — | — | — | — | — | Discovery (6h scoring) |
+| — | 02,04,06,08-09 | 0 | — | — | — | — | — | Rotation churn / gate closures / discovery |
+
+*Mar 6 hours. All other hours are Mar 7.
+
+### Observed Patterns
+
+1. **Asian afternoon/evening (22:00-03:00 UTC = 5AM-10AM BKK / 7AM-12PM JST)** produced the best results: $2.43 combined from 6 hours. Cross-exchange price discrepancies are widest when Asian markets are active but European markets haven't started competing.
+
+2. **European midday (11:00-13:00 UTC)** was the worst active period: $0.09 from 3 hours combined, with 30-50% losing trades. HFT competition from co-located European firms tightens spreads.
+
+3. **Average net% is the best predictor**: Hours with avg net% > 0.04% were all solidly profitable with <5% losers. Below 0.02%, most hours had 30-60% losers.
+
+4. **44% of the session had zero trades** — caused by discovery, rotation churn, gate closures, and restarts. Trading uptime is a major lever.
+
+### Proposed Feature: Time-of-Day Adaptive Mode
+
+**Concept**: Use historical hourly profitability data to adjust trading behavior by time of day. During consistently profitable hours, be more aggressive (larger trades, lower thresholds). During consistently poor hours, be more conservative (smaller trades, higher thresholds, or pause entirely).
+
+**Possible adaptive behaviors:**
+
+| Behavior | Profitable Hours | Poor Hours |
+|----------|-----------------|------------|
+| Trade size multiplier | 1.5-2.0x | 0.5-0.75x |
+| min_net_profit_pct | Lower (more trades) | Higher (filter losers) |
+| Rotation willingness | Higher (capture opportunities) | Lower (avoid churn costs) |
+| Position cap | Relaxed | Tighter |
+| Rebalance aggressiveness | Higher | Conservative |
+
+### Data Requirements
+
+**One day is not enough.** Session #15 had too many confounding factors:
+- 6h initial discovery (no trading data for those hours)
+- Rotation churn created artificial gaps
+- Different symbols active at different hours (SNX was great at 10:00, but was it the hour or the symbol?)
+- Gate closures distorted some hours (04:00 had zero trades due to net_pnl_gate, not market conditions)
+
+**What we need before implementing:**
+- **Minimum 5-7 sessions** (5-7 days) of continuous 24h data
+- **Consistent configuration** across sessions (same exchanges, similar settings) to isolate time-of-day effects from config changes
+- **Per-hour averages across days** to identify statistically reliable patterns vs one-off noise
+- **Separate symbol effects from time effects** — is 10:00 UTC always good, or was it just because SNX happened to be active?
+- **Day-of-week analysis** — weekday vs weekend crypto market behavior differs (lower institutional volume on weekends)
+
+### Data Collection Plan
+
+Each session should log or export (already available in XLSX hourly P&L sheet):
+- Per-hour: trade count, gross PNL, avg net%, % losers, active symbols
+- Per-hour-per-symbol: to separate symbol quality from time quality
+
+After 5+ sessions, aggregate into:
+
+```
+Hour (UTC) | Avg Trades | Avg PNL | Avg Net% | % Sessions Profitable | Confidence
+10:00      |    45      |  $0.50  |  0.08%   |        80%           |   High
+03:00      |    80      |  $0.40  |  0.04%   |        60%           |   Medium
+12:00      |    10      |  $0.02  |  0.01%   |        40%           |   Low
+```
+
+### Implementation Sketch (Deferred)
+
+```python
+# In monitor.py or optimizer.py
+class TimeOfDayProfile:
+    """Tracks hourly profitability across sessions."""
+    def __init__(self):
+        self._hourly_stats: dict[int, HourlyStats] = {}  # hour (0-23) -> stats
+        self._min_sessions: int = 5  # minimum sessions before acting
+
+    def get_hour_multiplier(self, hour_utc: int) -> float:
+        """Returns trade size multiplier for current hour."""
+        stats = self._hourly_stats.get(hour_utc)
+        if not stats or stats.session_count < self._min_sessions:
+            return 1.0  # default, no adjustment
+        # Scale based on historical avg PNL relative to session average
+        ratio = stats.avg_pnl / self._overall_avg_pnl
+        return max(0.5, min(2.0, ratio))
+```
+
+### Priority
+
+**Low — data collection phase.** Cannot implement until we have 5+ days of consistent data. For now, focus on collecting clean hourly data across sessions. The feature itself is a multiplier on existing profitability — it only helps if the bot is already net-positive.
+
+### Next Steps
+
+1. Run 5+ sessions with stable configs (v0.25.6+ with rotation pair fee gate)
+2. After each session, log the hourly table in SESSIONS.md
+3. After 5 sessions, compare hourly patterns across days
+4. If consistent patterns emerge (e.g., 22:00-03:00 UTC is always 3x better), implement the adaptive mode
+5. Start conservative: only adjust trade size multiplier (0.75x-1.5x range), no pausing
+
+## Plan Status Summary (as of Session #15)
+
+| Plan | Priority | Status | Recommendation |
+|------|----------|--------|----------------|
+| Net%-Based Dynamic Trade Sizing | — | **Implemented** (v0.22.0) | Already live as `net_pct_sizing_enabled`. Working well — fat spreads get bigger trades. |
+| Incremental Symbol Activation | Low | Deferred | Root cause (rotation churn) better addressed by pair fee gate. Defer until live trading prep. |
+| Time-of-Day Adaptive Trading | Low | Data collection | Need 5+ sessions of clean data before implementing. Log hourly tables each session. |

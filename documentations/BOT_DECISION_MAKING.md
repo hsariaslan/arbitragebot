@@ -254,9 +254,10 @@ score = avg_profitable_net × frequency
 Where:
 - `avg_profitable_net` = average `best_net_pct` across only profitable ticks (net > 0)
 - `frequency` = profitable_ticks / total_ticks (0.0 to 1.0)
-- `best_net_pct` in each tick = `spread_pct - (scoring_fee_buy + scoring_fee_sell) × 100 - slippage_pct`
+- `best_net_pct` in each tick = `spread_pct - (scoring_fee_buy + scoring_fee_sell) × 100 - slippage_pct - evd_penalty`
+- `evd_penalty` = `event_driven_seller_penalty_pct` (default 0.05%) when seller is event-driven (e.g., Bitfinex), 0 otherwise
 
-**Note**: Because scoring uses `get_scoring_fee()`, symbols that trade on exchanges with fast cashback (Bitget instant) will have higher `best_net_pct` in their ticks, leading to higher scores.
+**Note**: Because scoring uses `get_scoring_fee()`, symbols that trade on exchanges with fast cashback (Bitget instant) will have higher `best_net_pct` in their ticks, leading to higher scores. The EVD penalty in scoring prevents symbols from being inflated during discovery when their best pair involves an event-driven seller whose stale bids make the spread appear wider than reality.
 
 ### 4.2 Rolling Window
 
@@ -670,7 +671,8 @@ Replace a weak active symbol with a stronger candidate.
 2. Candidate score ≥ `TRADING_SCORE_THRESHOLD` (0.01)
 3. Candidate score > worst active score × 3 (significant improvement)
 4. `hourly_improvement > switching_cost × safety_multiplier`
-5. Net profit must be positive (`_rotation_budget_ok`)
+5. **Pair fee viability gate**: dominant pair's combined taker fees (`buy_fee + sell_fee`) must be < `avg_profitable_net × 0.8`. Same gate as expansion — blocks rotation when pair fees would make every trade negative. Logged as `ROTATE_BLOCKED ... pair_fee_exceeds_net`.
+6. Net profit must be positive (`_rotation_budget_ok`)
 
 **Switching cost**:
 ```

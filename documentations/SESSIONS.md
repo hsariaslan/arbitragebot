@@ -1828,3 +1828,358 @@ Considered adding EMA-based trend detection (fast/slow crossover) to detect bear
 6. **The two fixes above solve the actual problem** — the deadlock was an inventory management issue, not a prediction problem.
 
 **Future consideration: rate-of-decline detection.** A simpler alternative to EMAs that doesn't require historical data: monitor "has this held position dropped >X% in Y minutes?" using existing WebSocket price data. No candles, no EMAs, no new data pipeline — just a rolling price window per held crypto. Could trigger early demotion before drawdown threshold hits. Not implemented now since per-symbol blocking should handle most cases, but worth revisiting if inventory risk issues persist in live trading.
+
+---
+
+### Session #15 — 2026-03-06 (24h Market Discovery Run)
+
+Multi-phase session designed to run 24+ hours to reveal market conditions across time zones. Settings changed between phases without restarting the bot.
+
+#### Phase 1: Conservative Baseline (0 trades, 3.5h)
+
+- **Version**: v0.25.5-beta
+- **Duration**: 3h 30m (14:58–18:28 UTC)
+- **Capital**: $1,000, execution_mode=demo
+- **Enabled exchanges**: 6 (Binance, Bitfinex, Bitget, Bybit, MEXC, OKX)
+- **Disabled exchanges**: Gate.io, KuCoin, Pionex
+- **Trades**: 0
+
+##### Settings
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| `trade_amount` | $10.0 (1% of $1000) | Auto-scaling |
+| `trading_score_threshold` | 0.03 | Too high — best score was 0.014 |
+| `fee_threshold_multiplier` | 0.3 | Inflated non-Bitfinex thresholds to 0.045–0.059 |
+| `min_net_profit_pct` | 0.03% | |
+| `scoring_window` | 1800s | |
+| `max_position_multiplier` | 15 | Increased from 5 (Session #14 fix) |
+| `drawdown_threshold_pct` | 15.0% | Increased from 5% (Session #14 fix) |
+| `hourly_external_transfer_cap` | $5.00 | Increased from $2 |
+| `spread_persistence` | 1 tick | |
+| `evd_penalty` | 0.05 | |
+
+##### What Happened
+
+Zero trades across 3.5 hours. The market had very low arbitrage activity — best scores never reached the 0.03 threshold:
+
+| Time (UTC) | #1 Symbol | Score | Fee-Adjusted Threshold | Gap |
+|------------|-----------|-------|----------------------|-----|
+| 15:28 | STRK | 0.0063 | 0.059 | 9.4× below |
+| 17:00 | STRK | 0.0081 | 0.059 | 7.3× below |
+| 18:07 | DYDX | 0.039 | 0.049 | 1.3× below |
+| 18:28 | EIGEN | 0.014 | 0.030 | 2.1× below |
+
+DYDX briefly reached 0.039 (best of session) but its fee-adjusted threshold was 0.049 (Bitget→MEXC pair, no Bitfinex involvement = higher threshold). Bitfinex was intermittent throughout — dropping to 0 symbols periodically, removing the cheapest exchange pairs from scoring.
+
+Discovery cycled through 7+ full windows (each hitting 3600s max, then restarting). No symbol ever passed the early exit gate (score ≥ threshold AND 900 ticks AND 900s elapsed).
+
+##### Diagnosis
+
+Three settings compounded to create the 0-trade outcome:
+1. `trading_score_threshold=0.03` — unreachable in this market (best was 0.014 EIGEN)
+2. `fee_threshold_multiplier=0.3` — inflated thresholds for non-Bitfinex pairs by +0.015 to +0.029
+3. `min_net_profit_pct=0.03%` — additional filter on thin spreads
+
+##### Phase 2 Settings Changes (applied at 18:59 UTC without restart)
+
+| Setting | Phase 1 | Phase 2 | Reason |
+|---------|---------|---------|--------|
+| `trading_score_threshold` | 0.03 | 0.01 | Best scores were 0.008–0.014; 0.01 would catch them |
+| `fee_threshold_multiplier` | 0.3 | 0.15 | DYDX threshold drops from 0.049 to ~0.04; more reachable |
+| `min_net_profit_pct` | 0.03% | 0.02% | Catches thinner but still profitable spreads |
+
+#### Phase 2 — Lower Thresholds (18:59–01:53 UTC, ~7h)
+
+- **Duration**: 6h 54m of Phase 2 runtime (10h 55m total session)
+- **Trades**: 196 (0 in Phase 1 + 196 in Phase 2)
+- **Gross P&L**: $0.81
+- **Transfer fees**: $0.79 (of which $0.50 = demotion sell fees)
+- **Cashback**: $0.45 (credited $0.33, pending $0.12)
+- **Net P&L**: $0.35 ($0.03/hr)
+
+##### Changed Settings (Phase 2)
+
+| Setting | Value | Change from Phase 1 |
+|---------|-------|---------------------|
+| `trading_score_threshold` | 0.01 | ↓ from 0.03 |
+| `fee_threshold_multiplier` | 0.15 | ↓ from 0.3 |
+| `min_net_profit_pct` | 0.02% | ↓ from 0.03% |
+
+All other settings unchanged from Phase 1.
+
+##### Timeline
+
+| Time (UTC) | Event | Details |
+|------------|-------|---------|
+| 18:59 | Settings applied | Hot-applied without restart |
+| 18:59–21:24 | Discovery | 2h 25m waiting — early exit gate (900 ticks + 900s) forced full scoring window |
+| 21:24 | **SNX activated** | Score 0.01+, MEXC→Bitget pair (0.04%+0.08%=0.12% combined fees) |
+| 21:24–22:08 | SNX trading | 48 trades, mostly $5 size, avg $0.0003/trade (net +0.0066%) |
+| 22:08 | **SNX demoted** | Score below threshold for 900s. Sold $555.80 crypto, **$0.34 demotion fee** |
+| 22:13 | **DYDX activated** | Score 0.01+, Bitget→MEXC pair (0.08%+0.04%=0.12% combined fees) |
+| 22:13–01:34 | DYDX trading | 148 trades, $5–$30 size, best burst at 23:09–23:17 (net +0.138%, $0.02/trade) |
+| 01:34 | **DYDX demoted** | Score below threshold for 900s. Sold $201.93 crypto, **$0.16 demotion fee** |
+| 01:49 | **DYDX re-activated** | 3rd discovery cycle, but no trades before log export |
+
+##### Trade Breakdown
+
+| Symbol | Trades | Gross P&L | Avg Profit/Trade | Best Net% | Pair |
+|--------|--------|-----------|-----------------|-----------|------|
+| SNXUSDT | 48 | $0.02 | $0.0004 | +0.033% | MEXC→Bitget |
+| DYDXUSDT | 148 | $0.79 | $0.0053 | +0.138% | Bitget→MEXC, Bitget→OKX, Bitget→Binance |
+
+##### Key Blockers
+
+| Blocker | Count | Impact |
+|---------|-------|--------|
+| **pos_cap** (position cap) | 560 | #1 volume killer — $150 cap fills in ~15 trades, blocks all subsequent opportunities |
+| **SIZE_ZERO** (insufficient USDT) | 931 | Buyer exchange USDT drains from rapid $5 trades, rebalance can't keep up |
+| **phantom spreads** | 84 | Spread didn't persist across 2 ticks |
+| **one_leg failures** | 2 | Simulated execution failures, $0.04 cost |
+| **symbol_blocked** (anomaly) | 1 | DYDX blocked 300s after 4 consecutive losses at 22:13 |
+
+##### Demotion Sell Costs
+
+| Symbol | Crypto Sold | Taker Fee | % of Gross P&L |
+|--------|------------|-----------|----------------|
+| SNXUSDT | $555.80 | $0.34 | 42% |
+| DYDXUSDT | $201.93 | $0.16 | 20% |
+| **Total** | $757.73 | **$0.50** | **62%** |
+
+Demotion sell fees consumed 62% of gross trading profit — the dominant cost by far.
+
+##### Diagnosis
+
+The settings changes worked — the bot went from 0 trades (Phase 1) to 196 trades (Phase 2). But profit per trade is microscopically small ($0.004 avg), and demotion sell fees ($0.50) nearly wiped out all gains ($0.81 gross).
+
+Root causes:
+1. **Market spreads are genuinely thin** — 0.006%–0.14% net after fees. This is not a bug.
+2. **Demotion cycle is too expensive** — activate → trade micro-profits → demote → pay large sell fee → repeat. The sell fee of a single demotion ($0.34) requires ~85 SNX trades to recover.
+3. **Position cap too aggressive** — 560 blocked opportunities from `max_position_multiplier=15`. Cap fills in ~15 trades.
+4. **Trade size too small** — $5–$10 trades yield $0.0003–$0.02 profit. Not enough to overcome fixed costs.
+
+##### Phase 3 Recommended Changes
+
+| Setting | Phase 2 | Phase 3 | Reason |
+|---------|---------|---------|--------|
+| `trading_score_threshold` | 0.01 | 0.005 | Symbols hover at 0.005–0.016; faster activation, less idle discovery |
+| `fee_threshold_multiplier` | 0.15 | 0.0 (disabled) | With 6 exchanges, fee inflation blocks marginal but real opportunities. Let `min_net_pct` filter instead |
+| `min_net_profit_pct` | 0.02% | 0.01% | Many trades at +0.006%–0.009% were profitable but filtered |
+| `max_position_multiplier` | 15 | 0 (disabled) | 560 pos_cap blocks — the #1 volume killer |
+| `demotion_cooldown_multiplier` | 5.0 | 10.0 | Longer before demotion = fewer expensive sell-offs |
+| `trade_amount_pct` | 1% ($10) | 2% ($20) | Bigger trades = more profit per trade to overcome fixed costs |
+
+#### Phase 3 — Lower Threshold + Bigger Trades (02:10–10:03 UTC, ~8h)
+
+- **Duration**: 7h 53m of Phase 3 runtime (19h 05m total session)
+- **Trades**: 331 total (135 new in Phase 3: 7 DYDX + 126 ORDI + 0 APE + 0 ZEC + 2 DYDX)
+- **Gross P&L**: $1.76
+- **Transfer fees**: $4.23 (of which $2.54 external, $1.69 internal taker fees from demotions)
+- **Cashback**: $1.02 (credited $0.77, pending $0.25)
+- **Net P&L**: **$-1.70** ($-0.09/hr)
+
+##### Changed Settings (Phase 3, applied at 02:10 UTC)
+
+| Setting | Phase 2 | Phase 3 | Notes |
+|---------|---------|---------|-------|
+| `trading_score_threshold` | 0.01 | 0.005 | Lowered — faster activation |
+| `fee_threshold_multiplier` | 0.15 | 1e-08 | Effectively disabled (UI doesn't allow 0) |
+| `trade_amount_pct` | 1% ($10) | 2% ($20) | Doubled trade size |
+| `max_position_multiplier` | 15 | 5 | Lowered (opposite of recommendation) — caps at $100/exchange |
+| `min_net_profit_pct` | 0.02% | 0.02% | Unchanged |
+
+##### Timeline
+
+| Time (UTC) | Event | Details |
+|------------|-------|---------|
+| 02:10 | Phase 3 settings applied | Hot-applied without restart |
+| 01:49–03:02 | DYDX active (3rd cycle) | 7 trades #197–#203, then APE confirmed but 0 trades |
+| 03:02 | **APE demoted** | 0 trades, $0 crypto freed |
+| 03:32 | **ORDI activated** | MEXC→OKX pair (0.04%+0.10%=0.14% combined fees) |
+| 03:32–03:49 | ORDI trading burst | 106 trades, $0.003 avg profit |
+| 03:37–03:44 | **OKX→MEXC rebalancing** | 19 transfers × $0.10 = **$1.90** in external fees |
+| 03:49 | **net_pnl_gate CLOSED** | ext_fees ($2.03) > pnl ($1.61) + cashback ($0.37) |
+| 03:49–07:07 | **Dead zone** | Rebalancing blocked, SIZE_ZERO, no meaningful trades |
+| 07:07 | **ZEC activated** | Bitfinex was best seller |
+| 07:07–07:19 | **91 EVD_DEMOTED events** | EVD penalty (0.05%) blocked Bitfinex as seller every tick. 0 trades. |
+| 07:19 | **ZEC demoted** | 0 trades, $4.21 crypto freed |
+| 07:51 | **DYDX activated** (4th cycle) | |
+| 09:01 | **DYDX demoted** (2nd time) | $430.03 freed, $0.18 fee |
+| 09:51 | **DYDX activated** (5th cycle) | Active at log export with 0 trades |
+
+##### The OKX Rebalance Disaster
+
+ORDI pair was MEXC(buyer)→OKX(seller). Crypto transfers MEXC→OKX are free, but USDT rebalancing OKX→MEXC costs $0.10 per transfer:
+
+| Metric | Value |
+|--------|-------|
+| ORDI trades | 126 |
+| ORDI gross profit | ~$0.35 (avg $0.003/trade) |
+| OKX→MEXC transfers | 19 |
+| OKX transfer cost | $1.90 |
+| **Cost/profit ratio** | **5.4× — transfers cost 5.4× the trading profit** |
+
+This single pair's rebalancing wiped out the entire session's profitability.
+
+##### Cumulative Demotion Costs (All Phases)
+
+| # | Symbol | Time | Crypto Freed | Taker Fee |
+|---|--------|------|-------------|-----------|
+| 1 | SNXUSDT | 22:08 | $555.80 | $0.34 |
+| 2 | DYDXUSDT | 01:34 | $201.93 | $0.16 |
+| 3 | APEUSDT | 03:02 | $0.00 | $0.00 |
+| 4 | ZECUSDT | 07:19 | $4.21 | $0.00 |
+| 5 | DYDXUSDT | 09:01 | $430.03 | $0.18 |
+| | **Total** | | $1,191.97 | **$0.69** |
+
+##### Key Blockers (Phase 3 incremental)
+
+| Blocker | Count (total session) | Notes |
+|---------|----------------------|-------|
+| **SIZE_ZERO** | 8,629 | Buyer USDT exhausted, rebalancing blocked |
+| **rebal_blocked** | 6,752 | net_pnl_gate blocked all rebalancing from 03:49 onward |
+| **pos_cap** | 852 | max_pos_mult=5 caps at $100/exchange, fills in 5 trades |
+| **EVD_DEMOTED** | 91 | ZEC: Bitfinex demoted as seller every tick, 0 trades |
+| **phantom** | 517 | Spread didn't persist across 2 ticks |
+
+##### Diagnosis
+
+The Phase 3 settings partially worked — `threshold=0.005` activated symbols faster, `fee_mult≈0` removed threshold inflation, `trade_amount=$20` doubled per-trade profit. But two critical issues overwhelmed the gains:
+
+1. **OKX rebalancing killed the session** — 19 transfers × $0.10 = $1.90, far exceeding ORDI's $0.35 gross profit. The bot doesn't consider the seller exchange's withdrawal fee when selecting pairs. OKX as a seller means expensive USDT rebalancing.
+
+2. **net_pnl_gate death spiral** — Once external fees exceeded profits (03:49), all rebalancing stopped permanently. No rebalancing → no USDT replenishment → SIZE_ZERO → no trades → no profit → gate stays closed. The bot was effectively dead for 6+ hours.
+
+3. **EVD penalty too harsh for the only viable seller** — ZEC's best pair was Bitfinex→anywhere, but 0.05% EVD penalty killed it every tick. 91 demotions, 0 trades. The penalty is larger than many profitable spreads (0.02-0.06%).
+
+4. **max_pos_mult=5 made pos_cap worse** — Recommended 0 or 30, got 5. With $20 trades, cap fills in 5 trades per exchange.
+
+##### Phase 4 Recommended Changes
+
+| Setting | Phase 3 | Phase 4 | Reason |
+|---------|---------|---------|--------|
+| `max_position_multiplier` | 5 | 0 (disabled) | 852 pos_cap blocks, fills in 5 trades. No real risk with $1000 capital |
+| `min_net_profit_pct` | 0.02% | 0.01% | Still filtering profitable trades |
+| `evd_penalty` | 0.05 | 0.02 | 0.05% is larger than many spreads. Reduce to let Bitfinex-seller pairs execute |
+
+**Structural issues requiring code changes:**
+- **Pair selection should penalize expensive-withdrawal seller exchanges** — OKX as seller means $0.10/rebalance. The bot's `_seller_withdrawal_fee_penalty` exists but wasn't enough to prevent ORDI MEXC→OKX selection. The penalty needs to be stronger, or OKX seller pairs should be blocked when spreads are thin.
+- **EVD_DEMOTED log should be throttled** — 91 identical lines in 12 minutes is excessive noise.
+
+#### Phase 4 — Final Phase (09:46–15:18 UTC, ~5h32m)
+
+- **Duration**: 5h 32m of Phase 4 runtime (24h 17m total session)
+- **Trades**: 506 total (176 new in Phase 4: 16 DYDX + 47 SNX + 14 W + 7 ORDI + 12 EIGEN + 80 PENDLE)
+- **PNL**: $3.32 cumulative ($1.56 Phase 4 delta)
+- **Transfer fees**: $5.48 cumulative ($1.25 Phase 4: $0.19 external + $1.06 internal)
+- **Cashback**: $1.20 credited + $0.49 pending cumulative ($0.43 credited in Phase 4)
+- **Net**: -$0.95 cumulative (+$0.74 Phase 4 improvement)
+- **$/hr**: -$0.04 cumulative; Phase 4 standalone: +$0.14/hr
+
+##### Changed Settings (Phase 4, applied at 10:17 UTC)
+
+| Setting | Phase 3 | Phase 4 | Notes |
+|---------|---------|---------|-------|
+| `min_net_profit_pct` | 0.02% | 0.01% | Lower threshold to allow more trades |
+| `max_position_multiplier` | 5 | 1e-07 | Intended as "disabled" but 0 is the documented disable value; 1e-07 still causes 338 pos_cap blocks |
+
+##### Timeline
+
+| Time (UTC) | Event |
+|------------|-------|
+| 09:46 | Phase 4 starts (state-preserving restart) |
+| 09:51 | Discovery complete: DYDXUSDT activated (1 symbol, MEXC buyer) |
+| 10:04 | First trade (#332, DYDXUSDT MEXC->Binance, $0.03) |
+| 10:17 | Settings change: min_net 0.02%->0.01%, max_pos_mult 5->1e-07 |
+| 10:31 | Rotation #1: DYDX -> SNXUSDT (score 0.034->0.111) |
+| 10:55 | Drawdown block 15.47% — SNXUSDT blocked 5 min |
+| 11:39 | Rotation #2: SNX -> STRKUSDT (score 0.002->0.006) — **0 trades** |
+| 12:06 | Rotation #3: STRK -> WUSDT (score 0.0001->0.009) |
+| 12:08 | WUSDT: 4 consecutive losses, SYMBOL_BLOCKED |
+| 13:02 | Rotation #4: W -> ORDIUSDT (score 0->0.017) |
+| 13:30 | Rotation #5: ORDI -> DYDXUSDT (score 0.004->0.017) — **0 trades** |
+| 13:56 | Rotation #6: DYDX -> EIGENUSDT (score 0.003->0.009) — **12/12 negative** |
+| 14:01 | 3x EVD_DEMOTED EIGENUSDT |
+| 14:24 | Rotation #7: EIGEN -> PENDLEUSDT (score 0.004->0.014) |
+| 14:25 | First PENDLEUSDT trade, dominant pair Bitget->MEXC |
+| 15:17 | Last trade (#507), session ends |
+
+##### Per-Symbol Performance (Phase 4)
+
+| Symbol | Trades | Neg | Total PNL | Avg/Trade | Pair | Duration |
+|--------|:------:|:---:|----------:|----------:|------|----------|
+| SNXUSDT | 47 | 0 | $0.9443 | $0.0201 | MEXC->Bitget/Bybit | 40 min |
+| PENDLEUSDT | 80 | 1 | $0.4903 | $0.0061 | Bitget->MEXC | 53 min+ |
+| DYDXUSDT | 16 | 0 | $0.0874 | $0.0055 | MEXC->OKX/Binance | 26 min |
+| WUSDT | 14 | 9 | $0.0427 | $0.0030 | Bitget->MEXC | 19 min |
+| ORDIUSDT | 7 | 1 | $0.0156 | $0.0022 | Bitget->MEXC/OKX | 21 min |
+| **EIGENUSDT** | **12** | **12** | **-$0.0119** | **-$0.0010** | Bitget->OKX/MEXC | 24 min |
+
+STRKUSDT and DYDXUSDT (2nd activation) produced **0 trades** each despite being activated via rotation.
+
+##### Rotation Churn Analysis
+
+7 rotations in 5h32m, total rotation fees: **$0.97** (62% of gross PNL).
+
+| Rotation | Fee | Symbol Trades | Symbol PNL | ROI on Rotation |
+|----------|----:|:------------:|----------:|----|
+| DYDX -> SNX | $0.16 | 47 | $0.94 | +$0.78 |
+| SNX -> STRK | $0.14 | 0 | $0.00 | -$0.14 |
+| STRK -> W | $0.10 | 14 | $0.04 | -$0.06 |
+| W -> ORDI | $0.17 | 7 | $0.02 | -$0.15 |
+| ORDI -> DYDX | $0.18 | 0 | $0.00 | -$0.18 |
+| DYDX -> EIGEN | $0.18 | 12 | -$0.01 | -$0.19 |
+| EIGEN -> PENDLE | $0.05 | 80 | $0.49 | +$0.44 |
+
+Only 2 of 7 rotations had positive ROI. The other 5 lost $0.72 combined.
+
+##### Bug Found: Rotation Bypasses Pair Fee Check
+
+**EIGENUSDT was correctly EXPAND_BLOCKED** at 13:52 and 13:54 because `pair_fee=0.120% > avg_net=0.014%×0.8=0.011%`. But 2 minutes later, the rotation logic activated it anyway because `_evaluate_rotation()` only checks score improvement and switching cost — it does NOT check `pair_fee_exceeds_net`. Result: 12 trades, all negative, every single one losing money because combined fees (0.12-0.18%) exceeded the spread.
+
+##### Exchange Analysis
+
+- **Buyers**: Bitget (104), MEXC (69), Bybit (3)
+- **Sellers**: MEXC (92), Bitget (44), OKX (23), Bybit (12), Binance (5)
+- **Bitfinex**: Zero trades. $150 reserve + $46 consolidation = $196 idle. None of the 8 traded symbols are available on Bitfinex.
+- **No Bitfinex = no fee advantage**: All trades paid 0.08-0.18% combined fees. Expansion was perpetually blocked by `pair_fee_exceeds_net` since minimum combined fees without Bitfinex were 0.12%.
+
+##### Diagnosis
+
+Phase 4 was net positive (+$0.74) — an improvement over Phase 3's trajectory. But the session ended at -$0.95 cumulative deficit. Three root causes:
+
+1. **Rotation churn without pair fee viability check** — The rotation code bypasses the `pair_fee_exceeds_net` gate that expansion uses. This allowed EIGENUSDT (100% negative trades) and other thin-spread symbols to be rotated in. 5 of 7 rotations lost money.
+
+2. **No Bitfinex-available symbols traded** — The bot's entire fee advantage strategy (Bitfinex 0% taker) was unused. All DYDX, SNX, STRK, W, ORDI, EIGEN, and PENDLE are unavailable on Bitfinex. With 6 active exchanges (Gate.io/KuCoin/Pionex disabled), the only 0%-fee exchange couldn't contribute.
+
+3. **Single-symbol limitation** — With only 1 active symbol slot effectively used (due to expansion blocks), the bot cycles through symbols rapidly. Each rotation pays ~$0.14 in sell fees, requiring ~14 trades at $0.01/trade to break even.
+
+##### Session #15 Final Summary (All Phases)
+
+| Metric | Value |
+|--------|------:|
+| Duration | 24h 17m |
+| Total trades | 506 |
+| Gross PNL | $3.32 |
+| Total transfer fees | $5.48 (ext=$2.08, int=$3.40) |
+| Cashback (credited) | $1.20 |
+| Cashback (pending) | $0.49 |
+| **Net (total fees)** | **-$0.95** |
+| **Net (ext-only)** | **+$2.44** |
+| $/hr (total fees) | -$0.04 |
+| Rotation fees | ~$2.10 (estimated, 63% of gross) |
+| Demotion sell fees | ~$0.68 |
+| Anomaly blocks | 8 symbol blocks, 0 circuit breaker |
+
+##### Phase 5 / Session #16 Recommended Changes
+
+**Code fixes (applied in v0.25.6):**
+
+| Fix | Description |
+|-----|-------------|
+| Rotation pair fee gate | Add `pair_fee_exceeds_net` check to `_evaluate_rotation()` — same gate expansion uses. Prevents activating symbols whose dominant pair fees exceed their average net spread. |
+| Settings 0-value bug | Fixed JS falsy bug in SettingsPage.tsx `d()` helper — `Number(0) \|\| fallback` returns fallback. Now uses `Number.isNaN()`. |
+| Seller withdrawal fee penalty | Lowered threshold from $0.20 to $0.05 — catches OKX ($0.10). |
+| EVD penalty in discovery scoring | Applied in `optimizer._score_tick()` — prevents inflated scores for Bitfinex-seller pairs during discovery. |
+| EVD_DEMOTED log throttle | Throttled to 1 log per symbol per 5 minutes (was every tick). |
