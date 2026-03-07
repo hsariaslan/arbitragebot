@@ -231,6 +231,7 @@ class ArbitrageMonitor:
         self._event_driven_seller_penalty: float = 0.05
         self._event_driven_seller_penalties: int = 0
         self._event_driven_seller_demoted: int = 0
+        self._evd_demoted_last_log: dict[str, float] = {}  # symbol -> last log timestamp
         self._event_driven_exchanges: set[str] = {
             f.exchange_name for f in fetchers if f.IS_EVENT_DRIVEN
         }
@@ -1460,10 +1461,13 @@ class ArbitrageMonitor:
                 and best_row[3] != best_raw_sell_ex  # winner sell_ex differs from raw winner
             ):
                 self._event_driven_seller_demoted += 1
-                logger.info(
-                    f"[Monitor] EVD_DEMOTED {symbol}: {best_raw_sell_ex} demoted to "
-                    f"{best_row[3]} (penalty={self._event_driven_seller_penalty:.3f}%)"
-                )
+                _evd_last = self._evd_demoted_last_log.get(symbol, 0.0)
+                if now - _evd_last >= 300:
+                    self._evd_demoted_last_log[symbol] = now
+                    logger.info(
+                        f"[Monitor] EVD_DEMOTED {symbol}: {best_raw_sell_ex} demoted to "
+                        f"{best_row[3]} (penalty={self._event_driven_seller_penalty:.3f}%)"
+                    )
 
             if best_row is not None:
                 rows.append(best_row)

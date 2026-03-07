@@ -1820,6 +1820,8 @@ class DashboardServer:
             self._monitor._spread_persistence_ticks = int(settings["spread_persistence_ticks"])
         if "event_driven_seller_penalty_pct" in settings:
             self._monitor._event_driven_seller_penalty = float(settings["event_driven_seller_penalty_pct"])
+            if self._optimizer:
+                self._optimizer._event_driven_seller_penalty = float(settings["event_driven_seller_penalty_pct"])
         if "one_leg_failure_rate" in settings:
             self._monitor._one_leg_failure_rate = float(settings["one_leg_failure_rate"])
         if "one_leg_unwind_slippage_mult" in settings:
@@ -1959,6 +1961,8 @@ class DashboardServer:
             self._monitor._spread_persistence_ticks = int(settings["spread_persistence_ticks"])
         if "event_driven_seller_penalty_pct" in settings:
             self._monitor._event_driven_seller_penalty = float(settings["event_driven_seller_penalty_pct"])
+            if self._optimizer:
+                self._optimizer._event_driven_seller_penalty = float(settings["event_driven_seller_penalty_pct"])
         if "max_position_multiplier" in settings:
             self._monitor._max_position_multiplier = float(settings["max_position_multiplier"])
 

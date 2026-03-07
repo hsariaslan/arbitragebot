@@ -256,6 +256,12 @@ class SymbolOptimizer:
         self._very_strong_threshold: float = VERY_STRONG_SCORE_THRESHOLD
         self._fee_threshold_multiplier: float = FEE_THRESHOLD_MULTIPLIER
 
+        # Event-driven seller penalty for scoring (mirrors monitor's execution penalty)
+        self._event_driven_exchanges: set[str] = {
+            f.exchange_name for f in fetchers if getattr(f, "IS_EVENT_DRIVEN", False)
+        }
+        self._event_driven_seller_penalty: float = 0.05  # synced from settings via dashboard
+
         # Net profit awareness: block rotations when in deficit
         self._rotation_budget_ok: bool = True
         self._session_hourly_rate: float = 0.0
@@ -497,6 +503,10 @@ class SymbolOptimizer:
                     slippage_pct = buy_slip.slippage_pct + sell_slip.slippage_pct
 
                     net_pct = spread_pct - fee_pct - slippage_pct
+
+                    # Penalize event-driven sellers during scoring (stale bid risk)
+                    if self._event_driven_seller_penalty > 0 and ex_sell in self._event_driven_exchanges:
+                        net_pct -= self._event_driven_seller_penalty
 
                     if net_pct > best_net:
                         best_net = net_pct
@@ -968,7 +978,7 @@ class SymbolOptimizer:
         tradeable_symbols: list[str] = []
         rejected_declining: list[str] = []
         now = time.time()
-        evd_exchanges = getattr(self._monitor, "_event_driven_exchanges", set())
+        evd_exchanges = self._event_driven_exchanges
         for sym in tradeable_symbols_raw:
             # Check 1: Recent profitable frequency — are ticks STILL profitable?
             # Look at recent tick data. If frequency dropped to near-zero,
@@ -2226,6 +2236,30 @@ class SymbolOptimizer:
             threshold = switching_cost * self._safety_multiplier
 
             if hourly_improvement > threshold:
+                # Pair fee viability: block if dominant pair's combined fees exceed avg net%
+                # Same gate as expansion — prevents rotating into symbols that lose on every trade
+                pair_fee_blocked = False
+                if self._fee_manager:
+                    cand_pairs = self._compute_dominant_pairs(best_candidate.symbol, max_per_direction=2)
+                    buyers = cand_pairs.get("buyers", [])
+                    sellers = cand_pairs.get("sellers", [])
+                    if buyers and sellers:
+                        buy_fee = self._fee_manager.get_taker_fee(buyers[0][0])
+                        sell_fee = self._fee_manager.get_taker_fee(sellers[0][0])
+                        combined_fee_pct = (buy_fee + sell_fee) * 100
+                        avg_net = best_candidate.avg_profitable_net
+                        if combined_fee_pct > avg_net * 0.8 and avg_net > 0:
+                            logger.info(
+                                f"[Candidate] ROTATE_BLOCKED {best_candidate.symbol}: "
+                                f"pair_fee={combined_fee_pct:.3f}% > "
+                                f"avg_net={avg_net:.3f}%x0.8={avg_net*0.8:.3f}% "
+                                f"({buyers[0][0]}->{sellers[0][0]}) — pair_fee_exceeds_net"
+                            )
+                            pair_fee_blocked = True
+                if pair_fee_blocked:
+                    confirmed_candidates.pop(0)
+                    continue
+
                 self._execute_rotation(
                     old_symbol=worst.symbol,
                     new_symbol=best_candidate.symbol,
@@ -2548,11 +2582,14 @@ class SymbolOptimizer:
 
             # Seller penalty: USDT accumulates on sell exchanges, so penalize
             # those with high withdrawal fees (capital gets trapped there).
-            # Exchanges with fee > $0.20 get weight reduced by up to 50%.
+            # Exchanges with fee > $0.05 get weight reduced proportionally
+            # (up to 50% for $0.50+ fees). This prevents expensive-withdrawal
+            # exchanges like OKX ($0.10) from being selected as sellers
+            # when micro-profit trades can't recover the rebalance cost.
             if direction == "sell" and self._balance:
                 for i, (ex, w) in enumerate(weighted):
                     wfee = self._balance._get_withdrawal_fee(ex, 100.0)
-                    if wfee > 0.20:
+                    if wfee > 0.05:
                         penalty = min(0.5, wfee)  # up to 50% penalty
                         weighted[i] = (ex, w * (1 - penalty))
 

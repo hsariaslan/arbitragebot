@@ -230,7 +230,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   };
 
   const d = (fn: (v: number) => void, fallback: number) =>
-    (e: React.ChangeEvent<HTMLInputElement>) => { setDirty(true); fn(Number(e.target.value) || fallback); };
+    (e: React.ChangeEvent<HTMLInputElement>) => { const v = Number(e.target.value); setDirty(true); fn(Number.isNaN(v) ? fallback : v); };
 
   return (
     <div className="space-y-4 sm:space-y-6 max-w-3xl">
