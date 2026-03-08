@@ -1234,9 +1234,13 @@ class ArbitrageMonitor:
         self._rebalance_empty_backoff.clear()
         self._pending_opportunities.clear()
 
+        # Reset demo setup so new symbols get positions established
+        self._demo_setup_complete = False
+        self._demo_setup_running = False
+
         # Preserve: _trades, _tick_count, _start_time, _hourly_pnl, _daily_pnl,
         # _config_history, simulation realism counters, demo accuracy stats,
-        # _anomaly, _manual_stopped, _demo_skip_pairs, _demo_setup_complete
+        # _anomaly, _manual_stopped, _demo_skip_pairs
 
         logger.info(
             f"[Monitor] Reconfigured: {len(self._symbols)} symbols, "

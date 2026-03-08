@@ -1044,6 +1044,29 @@ class SymbolOptimizer:
                         f"reason={reason})"
                     )
                     continue
+
+            # Check 3: Pair fee viability — reject if dominant pair's combined fees
+            # exceed avg profitable net% (same gate used in expansion/rotation)
+            score_obj = self._scores.get(sym)
+            if score_obj and self._fee_manager:
+                sym_pairs = self._compute_dominant_pairs(sym, max_per_direction=2)
+                buyers = sym_pairs.get("buyers", [])
+                sellers = sym_pairs.get("sellers", [])
+                if buyers and sellers:
+                    buy_fee = self._fee_manager.get_taker_fee(buyers[0][0])
+                    sell_fee = self._fee_manager.get_taker_fee(sellers[0][0])
+                    combined_fee_pct = (buy_fee + sell_fee) * 100
+                    avg_net = score_obj.avg_profitable_net
+                    if avg_net > 0 and combined_fee_pct > avg_net * 0.8:
+                        rejected_declining.append(
+                            f"{sym.replace('USDT', '')}("
+                            f"pair_fee={combined_fee_pct:.3f}% > "
+                            f"avg_net={avg_net:.3f}%×0.8={avg_net*0.8:.3f}% "
+                            f"{buyers[0][0]}->{sellers[0][0]} "
+                            f"reason=pair_fee_exceeds_net)"
+                        )
+                        continue
+
             tradeable_symbols.append(sym)
 
         if rejected_declining:
