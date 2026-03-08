@@ -286,15 +286,69 @@ Arbitrage profitability varies significantly by hour. Analysis of Session #15 (2
 
 *Mar 6 hours. All other hours are Mar 7.
 
+### Session #16 Hourly Analysis (Mar 7-8, 2026)
+
+24h34m session, 821 trades, 10 symbols. Saturday (Mar 7 is a Friday evening → Saturday).
+
+| Rank | Hour (UTC) | Trades | PNL | Neg% | Avg Net% | Best Net% | Symbol(s) | Condition |
+|:----:|------------|:------:|----:|:----:|:--------:|:---------:|-----------|-----------|
+| 1 | Mar 8 10:00 | 146 | +$1.87 | 1% | +0.068% | +0.131% | STRK | Excellent — $0.013/trade avg |
+| 2 | Mar 8 09:00 | 152 | +$0.47 | 1% | +0.019% | +0.091% | STRK | Excellent — high frequency |
+| 3 | Mar 8 01:00 | 34 | +$0.34 | 35% | +0.053% | +0.144% | DYDX | Moderate — high neg rate |
+| 4 | Mar 7 19:00 | 55 | +$0.32 | 18% | +0.031% | +0.122% | AXS, SNX | Good |
+| 5 | Mar 8 11:00 | 60 | +$0.28 | 2% | +0.033% | +0.157% | STRK | Very good |
+| 6 | Mar 7 20:00 | 42 | +$0.25 | 5% | +0.041% | +0.092% | STRK | Very good |
+| 7 | Mar 8 15:00 | 74 | +$0.20 | 15% | +0.017% | +0.059% | STRK | Good |
+| 8 | Mar 8 16:00 | 59 | +$0.18 | 10% | +0.021% | +0.084% | STRK | Good |
+| 9 | Mar 8 03:00 | 20 | +$0.11 | 30% | +0.027% | +0.074% | COMP, DYDX | Moderate — COMP all negative |
+| 10 | Mar 8 14:00 | 11 | +$0.10 | 0% | +0.051% | +0.085% | STRK | Good — zero losers |
+| 11 | Mar 8 00:00 | 23 | +$0.10 | 9% | +0.024% | +0.097% | DYDX | Moderate |
+| 12 | Mar 7 16:00 | 14 | +$0.08 | 29% | +0.027% | +0.040% | DYDX | Moderate |
+| 13 | Mar 7 17:00 | 62 | +$0.07 | 3% | +0.011% | +0.068% | PEPE | Moderate — razor-thin margins |
+| 14 | Mar 8 02:00 | 5 | +$0.05 | 40% | +0.046% | +0.084% | DYDX | Thin — high neg rate |
+| 15 | Mar 7 18:00 | 6 | +$0.03 | 0% | +0.040% | +0.083% | PEPE | Thin |
+| 16 | Mar 7 23:00 | 24 | +$0.02 | 17% | +0.008% | +0.034% | DYDX | Thin — razor-thin margins |
+| 17 | Mar 8 13:00 | 12 | +$0.02 | 0% | +0.008% | +0.029% | STRK | Thin |
+| 18 | Mar 8 12:00 | 4 | +$0.01 | 0% | +0.016% | +0.056% | STRK | Near-zero — only 4 trades |
+| 19 | Mar 8 04:00 | 1 | +$0.00 | 0% | +0.021% | +0.021% | DYDX | Near-zero |
+| 20 | Mar 7 22:00 | 1 | +$0.00 | 0% | +0.009% | +0.009% | DYDX | Near-zero — just activated |
+| 21 | Mar 7 21:00 | 16 | -$0.01 | 100% | -0.008% | -0.007% | W | Negative — 100% losers |
+| — | 05-08:00 | 0 | — | — | — | — | — | Discovery / no tradeable symbols |
+
+### Cross-Session Comparison (S15 vs S16)
+
+Hours where both sessions had trading data, sorted by average PNL:
+
+| Hour | S15 PNL | S15 Sym | S16 PNL | S16 Sym | Avg PNL | Consistency |
+|:----:|--------:|---------|--------:|---------|--------:|:-----------:|
+| **10:00** | **$0.99** | SNX,DYDX | **$1.87** | STRK | **$1.43** | **High — different symbols, same result** |
+| 03:00 | $0.79 | ORDI | $0.11 | COMP,DYDX | $0.45 | Medium — S16 had COMP drag |
+| 14:00 | $0.32 | EIGEN,PENDLE | $0.10 | STRK | $0.21 | Medium — both positive |
+| 15:00 | $0.16 | PENDLE | $0.20 | STRK | $0.18 | Medium — both positive |
+| 01:00 | $0.01 | DYDX | $0.34 | DYDX | $0.18 | Low — large difference |
+| 00:00 | $0.18 | DYDX | $0.10 | DYDX | $0.14 | Medium — both positive |
+| 11:00 | $0.04 | SNX | $0.28 | STRK | $0.16 | Low — large difference |
+| 22:00 | $0.13 | DYDX | $0.00 | DYDX | $0.07 | Low — S16 just activated |
+| 23:00 | $0.49 | DYDX | $0.02 | DYDX | $0.26 | Low — large difference |
+| 12:00 | $0.04 | W | $0.01 | STRK | $0.03 | Medium — both weak |
+| **13:00** | **$0.01** | EIGEN,ORDI | **$0.02** | STRK | **$0.01** | **High — consistently weak** |
+| **21:00** | **$0.02** | SNX | **-$0.01** | W | **$0.01** | **High — consistently weak** |
+
 ### Observed Patterns
 
-1. **Asian afternoon/evening (22:00-03:00 UTC = 5AM-10AM BKK / 7AM-12PM JST)** produced the best results: $2.43 combined from 6 hours. Cross-exchange price discrepancies are widest when Asian markets are active but European markets haven't started competing.
+**Updated after 2 sessions (S15: Mar 6-7, S16: Mar 7-8):**
 
-2. **European midday (11:00-13:00 UTC)** was the worst active period: $0.09 from 3 hours combined, with 30-50% losing trades. HFT competition from co-located European firms tightens spreads.
+1. **10:00 UTC is the standout hour** — $0.99 and $1.87 across two sessions with *different symbols* (SNX/DYDX vs STRK). This strongly suggests a market-structure effect, not a symbol effect. Corresponds to 5PM BKK / 7PM JST — Asian evening, European morning overlap. Cross-exchange price discrepancies appear widest during this window.
 
-3. **Average net% is the best predictor**: Hours with avg net% > 0.04% were all solidly profitable with <5% losers. Below 0.02%, most hours had 30-60% losers.
+2. **09:00-11:00 UTC block is consistently strong** — Combined $1.07 (S15, limited data) and $2.62 (S16). The morning UTC hours benefit from Asian market activity before European HFT competition tightens spreads.
 
-4. **44% of the session had zero trades** — caused by discovery, rotation churn, gate closures, and restarts. Trading uptime is a major lever.
+3. **12:00-13:00 UTC is consistently weak** — Both sessions show near-zero PNL with high neg rates. European midday when co-located HFT firms dominate.
+
+4. **21:00 UTC is consistently weak** — $0.02 and -$0.01. Pre-Asian, post-European dead zone.
+
+5. **Overnight 23:00-03:00 is inconsistent** — S15 had $1.46 (best period), S16 only $0.62. Likely symbol-dependent: S15 had ORDI (best=+0.068%), S16 had DYDX (mixed) and COMP (all negative). More data needed to separate time vs symbol effect.
+
+6. **Trading uptime improved** — S15: 56% trading time, S16: 80%. The pair fee gate reduced some churn, and STRK's 7h47m run was the longest ever. Higher uptime correlates with better $/hr even though individual trade margins were thinner.
 
 ### Proposed Feature: Time-of-Day Adaptive Mode
 
@@ -372,10 +426,10 @@ class TimeOfDayProfile:
 4. If consistent patterns emerge (e.g., 22:00-03:00 UTC is always 3x better), implement the adaptive mode
 5. Start conservative: only adjust trade size multiplier (0.75x-1.5x range), no pausing
 
-## Plan Status Summary (as of Session #15)
+## Plan Status Summary (as of Session #16)
 
 | Plan | Priority | Status | Recommendation |
 |------|----------|--------|----------------|
 | Net%-Based Dynamic Trade Sizing | — | **Implemented** (v0.22.0) | Already live as `net_pct_sizing_enabled`. Working well — fat spreads get bigger trades. |
 | Incremental Symbol Activation | Low | Deferred | Root cause (rotation churn) better addressed by pair fee gate. Defer until live trading prep. |
-| Time-of-Day Adaptive Trading | Low | Data collection | Need 5+ sessions of clean data before implementing. Log hourly tables each session. |
+| Time-of-Day Adaptive Trading | Low | Data collection (2/5 sessions) | 10:00 UTC confirmed as best hour across 2 sessions. Need 3 more for implementation. |

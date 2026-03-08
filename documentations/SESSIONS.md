@@ -2183,3 +2183,286 @@ Phase 4 was net positive (+$0.74) — an improvement over Phase 3's trajectory. 
 | Seller withdrawal fee penalty | Lowered threshold from $0.20 to $0.05 — catches OKX ($0.10). |
 | EVD penalty in discovery scoring | Applied in `optimizer._score_tick()` — prevents inflated scores for Bitfinex-seller pairs during discovery. |
 | EVD_DEMOTED log throttle | Throttled to 1 log per symbol per 5 minutes (was every tick). |
+
+---
+
+## Session #16 — v0.25.6-beta (2026-03-07 → ongoing)
+
+### Phase 1 (16:15–20:55 UTC, 4h38m)
+
+**Log file:** `bot-logs-2026-03-07-20-56-05.log`
+
+#### Settings (All)
+
+| Setting | Value |
+|---------|-------|
+| **Version** | v0.25.6-beta |
+| **Execution mode** | demo (Binance/OKX/Bybit testnet + all 6 sim) |
+| **Enabled exchanges** | Binance, Bitfinex, Bitget, Bybit, MEXC, OKX (6) |
+| **Disabled exchanges** | Gate.io, KuCoin, Pionex |
+| **Trade amount** | $20 (2.0% of $1000) |
+| **Total capital** | $1000 |
+| **Adaptive mode** | On |
+| **Auto-rotate** | On |
+| **Max symbols** | 5 |
+| **Min symbols** | 2 |
+| **Scoring window** | 1800s |
+| **Eval interval** | 120s |
+| **Min net profit %** | 0.01% |
+| **Rebalance cooldown** | 10s |
+| **ROI horizon** | 1800s |
+| **ROI divisor** | 5 |
+| **Net P&L gate** | warmup=10 trades, grace=1800s |
+| **Net pct sizing** | On, cap=2.5 |
+| **Spread persistence** | 1 tick |
+| **EVD penalty** | 0.05 |
+| **One-leg failure rate** | 0.02 |
+| **Max position mult** | 0 (disabled) |
+| **Fee threshold mult** | 0 (disabled) |
+| **Anomaly protection** | On |
+| **Circuit breaker** | window=900s, threshold=$-5.00, cooldown=300s |
+| **Drawdown** | threshold=15.0%, emergency=2.0x |
+| **Loss streak** | threshold=4, cooldown=300s |
+| **Bitfinex reserve** | 15% ($150), hard floor=5% ($50) |
+| **Hourly transfer cap** | $5.00 |
+| **Fee real mode** | Off |
+| **Exchange fees** | BIN=0.075%, BFX=0.000%, BGT=0.080%, BYB=0.075%, MEX=0.040%, OKX=0.100% |
+
+#### Timeline
+
+| Time (UTC) | Event |
+|------------|-------|
+| 16:15 | Bot started, 9/9 exchanges connected (6 enabled for trading) |
+| 16:20 | Discovery: NO tradeable symbols at 300s. Extended to 600s |
+| 16:30 | Discovery: NO tradeable symbols at 900s. Extended to 1200s |
+| 16:45 | Discovery exits at 901s: DYDX (score=0.0067). Allocated: MEXC $552 buyer, Bitget $245 + Binance $52 sellers |
+| 16:50–16:53 | DYDX trading: 10 trades MEXC→Bitget (+$0.080), 4 trades MEXC→Binance (-$0.002) |
+| 16:53 | DYDX symbol-blocked: 4 consecutive losses on Binance leg |
+| 17:09 | Reallocated DYDX sellers: Binance+Bitget → OKX+Bitget |
+| 17:23 | DYDX demoted (below threshold 900s). Freed $289, fees $0.12 |
+| 17:25 | Discovery consolidation: $854 → Bitfinex (fees $0.01) |
+| 17:28 | Discovery exits: PEPE activated. Bybit $202 buyer, MEXC $552 seller |
+| 17:33–18:31 | PEPE trading: 68 trades, $0.10 PNL. Mostly Bybit→MEXC |
+| 18:31 | PEPE demoted. 3 sells via Bitfinex (saved $0.07 taker) |
+| 18:36 | Discovery: NO tradeable at 300s (WIF leading but not enough) |
+| 19:01 | Discovery exits at 901s: AXS. Bitget $433 buyer, OKX $410 seller |
+| 19:01–19:37 | AXS trading: 31 trades Bitget→OKX, $0.07 PNL, 10 negative |
+| 19:20 | AXS symbol-blocked (4 loss streak). Unblocked 19:25. Blocked again 19:25 |
+| 19:37 | AXS demoted. Freed $290, fees $0.24 |
+| 19:52 | Discovery exits: STRK + SNX (2 symbols). Capital split |
+| 19:54 | HYPE expanded (score=0.0146) |
+| 20:18 | ZEC expanded (score=0.0059) |
+| 20:24 | HYPE demoted (30 min, fees $0.00 via Bitfinex) |
+| 20:28 | ZEC demoted (10 min, fees $0.00, 1 via Bitfinex) |
+| 20:32 | SNX demoted (fees $0.24) |
+| 20:55 | Session end: only STRK active (weak, score=0.0026), no profitable trades |
+
+#### Per-Symbol Performance
+
+| Symbol | Trades | PNL | Neg% | Avg Net% | Dominant Pair | Duration | Notes |
+|--------|:------:|----:|:----:|:--------:|---------------|----------|-------|
+| STRK | 42 | +$0.25 | 5% | +0.030% | MEXC→Bitget | ~1h (still active) | Best performer, thin margins |
+| SNX | 24 | +$0.24 | 0% | +0.051% | BIN/OKX→Bitget | ~40min | Zero negatives, but demoted on score |
+| PEPE | 68 | +$0.10 | 3% | +0.007% | Bybit→MEXC | ~1h | High frequency, razor-thin margins |
+| DYDX | 14 | +$0.08 | 29% | +0.028% | MEXC→Bitget/BIN | ~38min | First symbol, quick demotion |
+| AXS | 31 | +$0.07 | 32% | +0.012% | Bitget→OKX | ~36min | Worst hit ratio, 2× symbol-blocked |
+| HYPE | 0 | $0.00 | — | — | — | ~30min | Demoted before trading |
+| ZEC | 0 | $0.00 | — | — | — | ~10min | Demoted before trading |
+| **Total** | **179** | **+$0.75** | **10%** | — | — | — | — |
+
+#### Session Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | 4h 38m |
+| Total trades | 179 |
+| Trading PNL | +$0.75 |
+| Transfer fees (total) | $1.14 |
+| Transfer fees (external only) | $0.38 |
+| Cashback | $0.72 (credited $0.42, pending $0.29) |
+| **Net** | **+$0.03** |
+| **$/hr** | **$0.01** |
+| Symbols activated | 7 (DYDX, PEPE, AXS, STRK, SNX, HYPE, ZEC) |
+| Symbols demoted | 6 |
+| Demotion fees | $0.70 |
+| Reallocations | 4 ($0.07 fees) |
+| Discovery cycles | 4 |
+| SIZE_ZERO skips | 850 |
+| Phantom spreads filtered | 269 |
+| EVD seller penalties | 2706 (60 demoted) |
+| Anomaly events | 3 symbol-blocks (DYDX ×1, AXS ×2) |
+| Demo fills / total | 19/90 (67 rejected, 4 partial) |
+| Demo skip pairs | OKX:SNXUSDT:buy |
+
+#### Observations
+
+1. **Near break-even at $0.03 net** — trading PNL ($0.75) almost entirely consumed by transfer fees ($1.14), partially offset by cashback ($0.72). The pair fee gate correctly blocked WIFUSDT, PENDLEUSDT, and WUSDT from activation (their avg_net% < combined pair fees).
+
+2. **High symbol churn** — 7 symbols activated, 6 demoted in 4.6h. Each activation→demotion cycle costs $0.10–$0.24 in demotion fees plus consolidation costs. 4 discovery cycles means ~90 min spent in discovery (not trading).
+
+3. **Bitfinex as dead capital** — $150–$206 sits on Bitfinex throughout the session. None of the traded symbols (DYDX, PEPE, AXS, STRK, SNX) are available on Bitfinex. Only HYPE and ZEC had Bitfinex availability but were demoted too quickly to benefit. Idle consolidation SKIPPED logged 15+ times.
+
+4. **Rotation pair fee gate working correctly** — PEPE was ROTATE_BLOCKED and EXPAND_BLOCKED repeatedly (pair_fee=0.115% > avg_net×0.8). WIFUSDT blocked at pair_fee=0.140%. The v0.25.6 fix is preventing unprofitable rotations.
+
+5. **Demo issues discovered:**
+   - **Bybit STRK fee 2.65%** — Bybit demo testnet charges 2.65% taker fee on STRK, vs 0.075% configured. This is a demo-specific tier issue (not production). Fee: $10.52 on a ~$397 trade.
+   - **PEPE qty rejection on Bybit** — All 67 demo rejections are PEPE on Bybit: "maximum allowed per order: 58000000000PEPE". The sim qty (3M) is fine but Bybit demo rejects it. Likely a demo-specific limit.
+   - **OKX STRK partial fills at 0.30%** — Only 2.39/794 qty filled. OKX demo has almost no STRK liquidity.
+   - **OKX SNXUSDT instrument not found** — Permanently skipped (OKX demo doesn't list SNX spot).
+   - **DemoSetup only ran once** — Only placed orders for DYDX on first activation. Subsequent activations (PEPE, AXS, STRK, SNX) did NOT trigger DemoSetup, suggesting `_demo_setup_complete=True` persisted across demotion cycles.
+
+#### Issues Found
+
+| Issue | Severity | Description |
+|-------|----------|-------------|
+| **DemoSetup not re-running after demotion** | Medium | `_demo_setup_complete=True` persists across demotion→discovery→activation cycles. After DYDX was set up, subsequent activations (PEPE, AXS, STRK, SNX) never got demo positions established. This causes growing `missing_position` discrepancies. The flag should reset when all symbols are demoted and discovery restarts. |
+| Bybit demo 2.65% fee on STRK | Low (demo-only) | Bybit testnet charges different fee tiers than production. Not actionable — demo fee validation already logs the mismatch. |
+| OKX STRK 0.30% partial fill | Low (demo-only) | OKX demo has near-zero STRK liquidity. Normal for testnets. |
+| Bitfinex capital idle | Observation | 15–20% of capital ($150–$206) idle on Bitfinex when no Bitfinex-available symbol is active. Already known from Session #15. |
+
+#### Settings Recommendations
+
+No settings changes recommended for Phase 2. The current config is producing data for multi-session comparison (Session #15 vs #16). Key observations:
+
+- **fee_threshold_multiplier=0** is correct for now — the pair fee gate at expansion/rotation level is working well, no need for per-symbol fee-aware activation thresholds yet.
+- **max_position_multiplier=0** is fine — the position cap bug from v0.25.5 is fixed.
+- **Consider extending session** — 4.6h is too short for meaningful data. Let Phase 2 run longer (ideally 24h) to see if market conditions improve during Asian hours (22:00–03:00 UTC was best in Session #15).
+
+### Phase 2 (16:15 Mar 7 – 16:51 Mar 8 UTC, 24h34m) — Full session
+
+**Log file:** `bot-logs-2026-03-08-16-51-33.log` (includes Phase 1 data, cumulative)
+
+Note: This log file covers the entire Session #16 (Phase 1 + Phase 2 combined). DemoSetup fix was not yet deployed — still on v0.25.6-beta original.
+
+#### Timeline
+
+| Time (UTC) | Event |
+|------------|-------|
+| 16:15 Mar 7 | Bot started v0.25.6-beta |
+| 16:45 | **Cycle 1**: DYDX activated (MEXC→Bitget/Binance) |
+| 17:23 | DYDX demoted (38min). Fees $0.12 |
+| 17:28 | **Cycle 2**: PEPE activated (Bybit→MEXC) |
+| 18:31 | PEPE demoted (63min). Fees $0.10 (3 via Bitfinex) |
+| 19:01 | **Cycle 3**: AXS activated (Bitget→OKX) |
+| 19:37 | AXS demoted (36min). Fees $0.24 |
+| 19:52 | **Cycle 4**: STRK+SNX activated, HYPE+ZEC expanded then demoted |
+| 20:56 | STRK demoted (64min). All symbols demoted. Fees $0.42 combined |
+| 21:01 | **Cycle 5**: W activated (Bitget→MEXC). 100% negative trades |
+| 21:55 | W demoted (54min). Fees $0.28 |
+| 22:00 | **Cycle 6**: DYDX activated |
+| 22:36 | DYDX demoted (36min). Fees $0.26 |
+| 23:26 | **Cycle 7**: DYDX activated — **longest run: 3h15m** |
+| 02:41 Mar 8 | DYDX demoted. Fees $0.07 |
+| 02:56 | **Cycle 8**: COMP activated (MEXC→Bitget). 100% negative trades |
+| 03:27 | COMP demoted (31min). Fees $0.32 |
+| 03:42 | **Cycle 9**: DYDX activated — 2h33m |
+| 06:15 | DYDX demoted. Fees $0.10 |
+| 06:30 | **Cycle 10**: HYPE activated (Bitfinex seller) |
+| 07:08 | HYPE demoted (38min). Fees $0.00 (via Bitfinex) |
+| 07:08–09:04 | Discovery gap: ~2h with no tradeable symbols |
+| 09:04 | **Cycle 11**: STRK activated — **best run: 7h47m (still active at session end)** |
+| 13:09 | APE expanded then demoted 13:43 (no trades) |
+| 16:51 | Session end. STRK still active (score=0.014, weak tier) |
+
+#### Per-Symbol Performance (Full Session)
+
+| Symbol | Trades | PNL | Neg% | Dominant Pair | Duration | Notes |
+|--------|:------:|----:|:----:|---------------|----------|-------|
+| STRK | 560 | +$3.39 | 4% | MEXC/OKX→Bitget | 8h51m total | **75% of all PNL**. 10:00 UTC was $1.87 alone |
+| DYDX | 116 | +$0.70 | 21% | MEXC→Binance/OKX | 9h total (4 cycles) | Recurring — activated 4 times |
+| SNX | 24 | +$0.24 | 0% | BIN/OKX→Bitget | 40min | Zero losers, quick demotion |
+| PEPE | 68 | +$0.10 | 3% | Bybit→MEXC | 63min | Razor-thin margins |
+| AXS | 31 | +$0.07 | 32% | Bitget→OKX | 36min | High neg rate |
+| W | 16 | -$0.01 | 100% | Bitget→MEXC | 54min | **All trades negative** — spread ≈ fees |
+| COMP | 6 | -$0.00 | 100% | MEXC→Bitget | 31min | **All trades negative** — spread < fees |
+| HYPE | 0 | $0.00 | — | — | 68min (2 cycles) | Demoted before trading both times |
+| APE | 0 | $0.00 | — | — | 34min | Demoted before trading |
+| ZEC | 0 | $0.00 | — | — | 10min | Demoted before trading |
+| **Total** | **821** | **+$4.49** | **8%** | — | — | — |
+
+#### Hourly P&L Table (for Time-of-Day analysis)
+
+| Hour (UTC) | Trades | PNL | Neg% | Symbol(s) | Notes |
+|------------|:------:|----:|:----:|-----------|-------|
+| Mar 7 16:00 | 14 | +$0.08 | 29% | DYDX | Discovery first 30min |
+| Mar 7 17:00 | 62 | +$0.07 | 3% | PEPE | Thin margins |
+| Mar 7 18:00 | 6 | +$0.03 | 0% | PEPE | Low frequency |
+| Mar 7 19:00 | 55 | +$0.32 | 18% | AXS, SNX | SNX zero neg |
+| Mar 7 20:00 | 42 | +$0.25 | 5% | STRK | Good |
+| Mar 7 21:00 | 16 | -$0.01 | 100% | W | **All negative** |
+| Mar 7 22:00 | 1 | +$0.00 | 0% | DYDX | Just activated |
+| Mar 7 23:00 | 24 | +$0.02 | 17% | DYDX | Thin |
+| Mar 8 00:00 | 23 | +$0.10 | 9% | DYDX | Moderate |
+| **Mar 8 01:00** | **34** | **+$0.34** | **35%** | **DYDX** | **Best overnight — high vol but many losers** |
+| Mar 8 02:00 | 5 | +$0.05 | 40% | DYDX | Demotion transition |
+| Mar 8 03:00 | 20 | +$0.11 | 30% | DYDX, COMP | COMP all negative |
+| Mar 8 04:00 | 1 | +$0.00 | 0% | DYDX | Near-zero |
+| 05:00–08:00 | 0 | — | — | — | Discovery gap (HYPE demoted quickly) |
+| **Mar 8 09:00** | **152** | **+$0.47** | **1%** | **STRK** | **Excellent — high freq, 1% losers** |
+| **Mar 8 10:00** | **146** | **+$1.87** | **1%** | **STRK** | **Best hour — $1.87 PNL, avg $0.013/trade** |
+| Mar 8 11:00 | 60 | +$0.28 | 2% | STRK | Good |
+| Mar 8 12:00 | 4 | +$0.01 | 0% | STRK | Low frequency |
+| Mar 8 13:00 | 12 | +$0.02 | 0% | STRK | Low frequency |
+| Mar 8 14:00 | 11 | +$0.10 | 0% | STRK | Good avg |
+| Mar 8 15:00 | 74 | +$0.20 | 15% | STRK | Higher neg rate |
+| Mar 8 16:00 | 59 | +$0.18 | 10% | STRK | Declining |
+
+#### Session Summary (Full 24h34m)
+
+| Metric | Value |
+|--------|-------|
+| Duration | 24h 34m |
+| Total trades | 821 |
+| Trading PNL | +$4.49 |
+| Transfer fees (total) | $7.18 |
+| Transfer fees (external only) | $0.86 |
+| Cashback | $3.55 (credited $2.55, pending $1.00) |
+| **Net (credited cashback only)** | **-$0.14** |
+| **Net (all cashback)** | **+$0.86** |
+| **$/hr** | **-$0.01** |
+| Symbols activated | 10 (DYDX×4, STRK×2, PEPE, AXS, SNX, W, COMP, HYPE×2, ZEC, APE) |
+| Demotions | 14 |
+| Demotion fees | $1.90 |
+| Discovery cycles | 11 |
+| Trading uptime | ~80% (19.6h / 24.6h) |
+| Discovery/idle time | ~20% (5.0h) |
+| SIZE_ZERO skips | 8336 |
+| Phantom spreads filtered | 2129 |
+| EVD seller penalties | 4780 (196 demoted) |
+| Anomaly events | 15 symbol-blocks, 0 pauses, 0 warnings |
+| Demo fills / total | 98/402 (295 rejected, 9 partial) |
+| Demo skip pairs | OKX:SNXUSDT:buy, OKX:DYDXUSDT:buy |
+| Unauthorized access attempt | 18.237.186.177 at 04:57 UTC (IP denied) |
+
+#### Observations
+
+1. **Near break-even: -$0.14 net (or +$0.86 with pending cashback)** — Trading PNL of $4.49 is solid (vs $3.33 in Session #15), but $7.18 in transfer fees wiped it out. Internal taker fees ($6.32) dominate — these are the sell+buy costs on demotion/reallocation/rebalance. External fees are only $0.86.
+
+2. **STRK was the star** — 560/821 trades (68%), $3.39/4.49 PNL (75%). Its 7h47m run from 09:04–16:51 was the longest stable trading period in any session. 10:00 UTC alone produced $1.87 (42% of total PNL in one hour). This validates the Time-of-Day pattern from Session #15 — morning UTC hours are the most profitable.
+
+3. **14 demotions = $1.90 in fees** — Each activate→demote cycle costs ~$0.14 average in demotion sell fees. The bot activated 11 times across 10 symbols, spending 5 hours in discovery. Short-lived cycles (W: 54min, COMP: 31min, HYPE: 38min) produced zero or negative PNL while still costing $0.28, $0.32, $0.00 respectively in demotion fees.
+
+4. **W and COMP were unprofitable from the start** — W had 16 trades at net=-0.008% (spread ≈ fees, Bitget 0.08% + MEXC 0.04% = 0.12%). COMP had 6 trades at net=-0.002% (MEXC 0.04% + Bitget 0.08% = 0.12%, spread 0.118%). Both passed the min_net_profit_pct=0.01% gate during discovery scoring but were net negative after execution. The scoring window aggregates profitable ticks, but the actual execution-time spread was at or below fee cost.
+
+5. **Session #15 vs #16 hourly comparison:**
+   - Session #15 best: 10:00 UTC ($0.99, SNX/DYDX) and 03:00 ($0.79, ORDI)
+   - Session #16 best: 10:00 UTC ($1.87, STRK) and 09:00 ($0.47, STRK)
+   - **10:00 UTC is consistently the best hour across both sessions** (Asian morning/European pre-market)
+   - Overnight 23:00–03:00 was moderate in both sessions ($0.52 in S16 vs $1.46 in S15)
+
+6. **DemoSetup still broken** — Only ran once for DYDX at session start. All other activations had no demo positions. Fix deployed in v0.25.7 (not yet live). Demo reject rate: 295/402 = 73%.
+
+#### Issues Found
+
+| Issue | Severity | Description |
+|-------|----------|-------------|
+| **W/COMP activated despite being unprofitable** | Medium | Both had 100% negative trades. Their discovery scores passed the threshold, but the execution-time spread was at or below combined pair fees. The pair fee gate only checks expansion/rotation candidates, not initial discovery activations. Consider adding pair fee check to `_complete_discovery()`. |
+| 14 demotions in 24h | Observation | High churn continues from Session #15. The pair fee gate prevented some bad rotations, but the core issue is that most symbols have spreads near or below the 0.12% fee floor for non-Bitfinex pairs. |
+| DemoSetup not re-running | Medium | Same as Phase 1. Fix ready but not deployed. |
+| 18.237.186.177 access attempt | Low | Unknown IP denied by whitelist at 04:57 UTC. AWS IP range (us-east-1). Likely automated scanner. Auth system working correctly. |
+
+#### Settings Recommendations
+
+1. **Consider adding pair fee check to discovery activation** — W and COMP would have been filtered out if `_complete_discovery()` applied the same `pair_fee_exceeds_net` check that expansion/rotation use. This is a code change, not a settings change.
+
+2. **No settings changes needed** — The current config produced the best data yet for time-of-day analysis. STRK's 7h47m run is the longest stable period observed. Keep configs stable for Session #17 comparison.
