@@ -2466,3 +2466,145 @@ Note: This log file covers the entire Session #16 (Phase 1 + Phase 2 combined). 
 1. **Consider adding pair fee check to discovery activation** — W and COMP would have been filtered out if `_complete_discovery()` applied the same `pair_fee_exceeds_net` check that expansion/rotation use. This is a code change, not a settings change.
 
 2. **No settings changes needed** — The current config produced the best data yet for time-of-day analysis. STRK's 7h47m run is the longest stable period observed. Keep configs stable for Session #17 comparison.
+
+---
+
+### Session #17 — 2026-03-08/09 (Discovery Trap)
+
+**Date**: 2026-03-08 17:21 – 2026-03-09 19:36 UTC (26h 15m)
+**Capital**: $1,000
+**Version**: v0.25.7-beta (pair fee gate added to discovery activation)
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+**Execution Mode**: Demo (Binance/OKX/Bybit testnet)
+
+#### Settings
+
+| Setting | Value |
+|---------|-------|
+| Trade amount | $20.0 (2.0% of $1000) |
+| Total capital | $1,000 |
+| Adaptive mode | True |
+| Auto rotate | True |
+| Max/min symbols | 5 / 2 |
+| Scoring window | 1800s |
+| Eval interval | 120s |
+| Min net pct | 0.01% |
+| Rebalance cooldown | 10s |
+| ROI horizon | 1800s, divisor=5 |
+| Net P&L gate | warmup=10, grace=1800s |
+| Net pct sizing | True, cap=2.5 |
+| Spread persistence | 1 tick |
+| EVD seller penalty | 0.05 (5%) |
+| One-leg failure rate | 0.02 (2%) |
+| Max position mult | 0 (disabled) |
+| Fee threshold mult | 0 (disabled) |
+| Demotion period | 900s |
+| Demotion cooldown mult | 10.0 (= 9000s/150 min cooldown) |
+| Anomaly protection | Enabled, CB=-$5.00/900s |
+| Drawdown | 15.0%, emergency=2.0× |
+| Streak threshold | 4, cooldown=300s |
+| Bitfinex reserve | 15% ($150), floor=5% ($50) |
+| Hourly transfer cap | $5.00 |
+| Execution mode | demo |
+| Active exchanges | Binance (0.075%), Bitfinex (0.00%), Bitget (0.08%), Bybit (0.075%), MEXC (0.04%), OKX (0.10%) |
+| Disabled exchanges | Gate.io, KuCoin, Pionex |
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | 26h 15m |
+| Trades | 14 |
+| Trading PnL | $0.56 |
+| Transfer Fees | $0.00 |
+| Cashback | $0.02 pending |
+| Net Profit | $0.56 |
+| $/hr | $0.03 |
+| Active Symbols | 2 (CHZ, ZEC) |
+| Time Trading | ~52 min (3.3%) |
+| Time in Discovery | ~25h 23m (96.7%) |
+| Anomaly Events | 0 |
+
+#### Timeline
+
+| Time (UTC) | Event |
+|------------|-------|
+| 03-08 17:21 | Session start, discovery begins (6 exchanges) |
+| 03-08 17:26 – 03-09 03:18 | **~10 hours of continuous discovery** — no symbol reaches strong tier. 60 symbols scored, dozens rejected by pair_fee_exceeds_net and fading gates. |
+| 03-09 03:19 | **Discovery #1 completes**: CHZ activated (score=0.005, tier=normal) |
+| 03-09 03:19 | Trade #1: CHZ MEXC→Bitfinex, $50, +$0.31 (+0.62%) |
+| 03-09 03:44 | Trades #2-6: CHZ Bitfinex→MEXC, $10 each, +$0.0007 each |
+| 03-09 03:51 | **CHZ DEMOTED** (score below threshold 900s). Re-enter discovery. |
+| 03-09 03:51 – 13:54 | **~10 hours of discovery** — STRK/DYDX/WIF/DOT/NEAR all repeatedly rejected |
+| 03-09 13:54 | **Discovery #2 completes**: ZEC activated (score=0.005, tier=normal) |
+| 03-09 14:01–14:11 | Trades #7-14: ZEC MEXC↔Bitfinex, $20-40, +$0.01-0.08 |
+| 03-09 14:14 | **ZEC DEMOTED** (score below threshold 900s). Re-enter discovery. |
+| 03-09 14:14 – 19:36 | **~5.5 hours of discovery** — session ends still in discovery |
+
+#### Per-Symbol Performance
+
+| Symbol | Trades | PnL | Active Duration | Dominant Pair | Notes |
+|--------|--------|-----|-----------------|---------------|-------|
+| CHZ | 6 | $0.31 | 32 min | MEXC↔Bitfinex | Score=0.005, only 1 profitable trade ($0.31), 5 micro-trades ($0.0007 each) |
+| ZEC | 8 | $0.25 | 20 min | MEXC↔Bitfinex | Score=0.005, consistent small profits $0.01-0.08 |
+
+#### Discovery Rejection Analysis (Key Finding)
+
+The v0.25.7-beta `pair_fee_exceeds_net` gate in `_complete_discovery()` was the primary bottleneck:
+
+| Rejection Type | Count | Impact |
+|----------------|-------|--------|
+| pair_fee_exceeds_net | 51 | **Primary killer** — blocked best candidates (DYDX, STRK, WIF, DOT, NEAR) |
+| fading (recent freq) | 56 | Secondary filter — 15s window too short for infrequent opportunities |
+| cliff_drop | 10 | Score instability |
+
+**Top rejected symbols and why:**
+
+| Symbol | Pair Fee | Avg Net% | Dominant Pair | Result |
+|--------|----------|----------|---------------|--------|
+| DYDX | 0.115-0.140% | 0.016-0.058% | MEXC→OKX/Binance | Always blocked |
+| STRK | 0.120% | 0.018-0.076% | MEXC→Bitget | Always blocked |
+| DOT | 0.080% | 0.041-0.061% | Bitfinex→Bitget | Blocked — even mid-cost pairs fail |
+| NEAR | 0.115-0.120% | 0.028-0.052% | MEXC→Binance/Bitget | Always blocked |
+| WIF | 0.120-0.140% | 0.019-0.099% | Various | Occasionally close, always blocked |
+| ETH | 0.040% | 0.031-0.036% | Bitfinex→MEXC | **Cheapest pair possible**, still blocked |
+| SOL | 0.040% | 0.035-0.044% | Bitfinex→MEXC | Same — barely fails |
+
+**Critical insight**: Even the cheapest possible pair (Bitfinex 0% + MEXC 0.04% = 0.04% combined) fails the gate for majors like ETH/SOL because their avg_net is only 0.03-0.04%. The 0.8× multiplier means net must be > 0.05% for even Bitfinex+MEXC pairs to pass.
+
+#### Observations
+
+1. **The pair_fee_exceeds_net gate is too aggressive for discovery.** In expansion/rotation, it makes sense — you're spending capital to move to a new symbol. In discovery, you're choosing the BEST available symbol with zero switching cost. Blocking everything leaves the bot idle for 25+ hours.
+
+2. **Market conditions were genuinely weak** — no symbol reached "strong" (0.1) across the entire 26h. Best scores: DYDX 0.04-0.08, STRK 0.05-0.07. This is significantly weaker than Session #16 which had STRK at 0.3+ for hours.
+
+3. **Only 6 active exchanges** limits pair diversity. Most dominant pairs involve non-Bitfinex exchanges with 0.075-0.10% fees, making the combined fee 0.08-0.14% which exceeds most discovery-time spreads.
+
+4. **DemoSetup fix worked** — correctly triggered after each discovery completion, but had no crypto to establish (all trades were MEXC↔Bitfinex, no demo exchanges received crypto).
+
+5. **Zero transfer fees** — the only upside. Both activated symbols traded exclusively on MEXC↔Bitfinex (cheapest pair: 0% + 0.04%).
+
+6. **Marginal activations die fast** — CHZ (32 min) and ZEC (20 min) both activated at score=0.005 and demoted quickly. They never had enough volume/frequency to sustain.
+
+7. **150-minute demotion cooldown** — `demotion_cooldown_multiplier=10` on VPS means 900s × 10 = 9000s (150 min) cooldown. After CHZ demoted at 03:51, it couldn't re-enter until 06:21. After ZEC demoted at 14:14, cooldown until 16:44. This massively amplifies idle time in weak markets.
+
+8. **Settings log gap** — `demotion_cooldown_multiplier`, `demotion_period`, score thresholds (`trading`/`strong`/`very_strong`), and `score_stability_factor`/`score_stability_seconds` were not logged in `[Settings]`. Fixed in v0.25.8.
+
+#### Issues Found
+
+| Issue | Severity | Description |
+|-------|----------|-------------|
+| **pair_fee_exceeds_net gate too aggressive in discovery** | High | Blocked 51 activation attempts including best candidates. The 0.8× threshold works for expansion (cost to switch) but is too strict for discovery (no switching cost). ETH/SOL with the cheapest possible pair (0.04%) were blocked because avg_net was 0.031-0.044%. Fixed in v0.25.8: gate removed from discovery entirely. |
+| **96.7% idle time** | High | Direct result of above + 150 min demotion cooldown. Bot spent 25h23m in discovery, only 52 min trading. Net effect: $0.03/hr vs $0.18/hr in Session #16. |
+| **Missing settings in log** | Medium | 8 settings not logged in `[Settings]`: demotion_period, demotion_cooldown_multiplier, reallocation_cost_horizon, trading/strong/very_strong thresholds, score_stability_factor/seconds. Makes log analysis unreliable. Fixed in v0.25.8. |
+| **Only 6/9 exchanges active** | Medium | Gate.io, KuCoin, Pionex disabled. Reduces pair diversity. Gate.io and KuCoin should be re-enabled (Pionex stays disabled due to 5.8s US latency). |
+
+#### Settings Recommendations
+
+1. **Remove `pair_fee_exceeds_net` from discovery** (code change, v0.25.8) — Discovery has zero switching cost. The demotion system handles bad symbols. The gate remains in expansion/rotation.
+
+2. **Lower `demotion_cooldown_multiplier`** from 10 to 3 — 150 min cooldown is excessive. 45 min (900s × 3) is enough punishment. In weak markets, the best symbol might be the one that was just demoted.
+
+3. **Re-enable Gate.io and KuCoin** — Adds Bitfinex+Gate.io (0.09%) and Bitfinex+KuCoin (0.08%) pairs. Pionex stays disabled (5.8s latency from Bangkok).
+
+4. **Log all settings** (code change, v0.25.8) — Added demotion, threshold, and stability settings to `[Settings]` output.
