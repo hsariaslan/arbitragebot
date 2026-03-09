@@ -2264,6 +2264,9 @@ class DashboardServer:
             f"net_pnl_gate: warmup={s.get('net_pnl_gate_warmup_trades', 10)} trades, grace={s.get('net_pnl_gate_grace_seconds', 1800)}s",
             f"net_pct_sizing={s.get('net_pct_sizing_enabled', True)}, cap={s.get('net_pct_multiplier_cap', 2.5)}",
             f"spread_persistence={s.get('spread_persistence_ticks', 1)} ticks, evd_penalty={s.get('event_driven_seller_penalty_pct', 0.05)}, one_leg_rate={s.get('one_leg_failure_rate', 0.02)}, max_pos_mult={s.get('max_position_multiplier', 5.0)}, fee_threshold_mult={s.get('fee_threshold_multiplier', 0.5)}",
+            f"demotion: period={s.get('demotion_period', 900)}s, cooldown_mult={s.get('demotion_cooldown_multiplier', 5.0)}, realloc_horizon={s.get('reallocation_cost_horizon', 2)}h",
+            f"thresholds: trading={s.get('trading_score_threshold', 0.01)}, strong={s.get('strong_score_threshold', 0.1)}, very_strong={s.get('very_strong_score_threshold', 0.3)}",
+            f"stability: factor={s.get('score_stability_factor', 0.5)}, min_seconds={s.get('score_stability_seconds', 120)}s",
             f"anomaly: enabled={ano_enabled}, cb_window={cb_w}s, cb_threshold=${cb_t:.2f}, cb_cooldown={cb_c}s",
             f"anomaly: dd_threshold={dd_t:.1f}%, dd_emergency={dd_e:.1f}x, streak_threshold={sls_t}, streak_cooldown={sls_c}s",
             f"bitfinex_reserve={bfx_pct * 100:.1f}% (${capital * bfx_pct:.0f}), hard_floor={bfx_floor * 100:.1f}% (${capital * bfx_floor:.0f})",
@@ -2293,6 +2296,11 @@ class DashboardServer:
                 "hourly_external_transfer_cap", "execution_mode",
                 "net_pct_sizing_enabled", "net_pct_multiplier_cap",
                 "fee_threshold_multiplier",
+                "demotion_period", "demotion_cooldown_multiplier",
+                "reallocation_cost_horizon",
+                "trading_score_threshold", "strong_score_threshold",
+                "very_strong_score_threshold",
+                "score_stability_factor", "score_stability_seconds",
             ]
             for k in keys_to_check:
                 old_v = old_settings.get(k)
