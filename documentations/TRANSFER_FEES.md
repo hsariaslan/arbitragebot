@@ -3,7 +3,7 @@
 **Last updated:** 2026-02-26
 **Researched by:** Claude Code (web research from official exchange pages, fee aggregators, and announcements)
 
-This document covers all fee-related findings for CoirnaBot's 6 active exchanges plus MEXC (future). Includes USDT withdrawal fees per network, internal trading fees (spot taker/maker), alternative transfer methods, and fee reduction strategies.
+This document covers all fee-related findings for ArbitrageBot's 6 active exchanges plus MEXC (future). Includes USDT withdrawal fees per network, internal trading fees (spot taker/maker), alternative transfer methods, and fee reduction strategies.
 
 ---
 

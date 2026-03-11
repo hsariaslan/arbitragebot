@@ -1,4 +1,4 @@
-# CoirnaBot
+# ArbitrageBot
 
 Cross-exchange crypto arbitrage bot with real-time dashboard, demo order execution, and comprehensive fee/transfer management.
 
@@ -31,8 +31,8 @@ Monitors real-time prices across 9 crypto exchanges via WebSocket, detects price
 ### 1. Clone and install Python dependencies
 
 ```bash
-git clone <repo-url> coirnabot
-cd coirnabot
+git clone <repo-url> arbitragebot
+cd arbitragebot
 pip install -r requirements.txt
 ```
 
@@ -90,7 +90,7 @@ Press `Ctrl+C` to stop gracefully.
 ## Project Structure
 
 ```
-coirnabot/
+arbitragebot/
   run.py                  # Entry point — starts all fetchers, monitor, optimizer, dashboard
   config.py               # All configuration constants (symbols, exchanges, fees, thresholds)
   fee_manager.py          # FeeManager — token discounts, referral cashbacks, zero-fee pairs

@@ -1,5 +1,5 @@
 """
-Execution engine for CoirnaBot Phase 2 demo/live order placement.
+Execution engine for ArbitrageBot Phase 2 demo/live order placement.
 
 Provides the core dataclasses (TradeResult, ArbitrageResult), a rate limiter,
 the abstract ExecutionEngine base, and the DemoExecutor coordinator that

@@ -1,5 +1,5 @@
 """
-Email notification utility for CoirnaBot dashboard.
+Email notification utility for ArbitrageBot dashboard.
 
 Sends alerts via Gmail SMTP for login events and IP blocks.
 Uses asyncio.to_thread() to avoid blocking the event loop.
@@ -23,7 +23,7 @@ def _send_email(subject: str, body: str) -> None:
         return
     msg = MIMEText(body, "html")
     msg["Subject"] = subject
-    msg["From"] = f"CoirnaBot <{SMTP_EMAIL}>"
+    msg["From"] = f"ArbitrageBot <{SMTP_EMAIL}>"
     msg["To"] = NOTIFICATION_EMAIL
     with smtplib.SMTP("smtp.gmail.com", 587) as server:
         server.starttls()
@@ -44,7 +44,7 @@ async def notify_login(ip: str, browser: str, os_info: str) -> None:
     """Email notification on successful login."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     await send_email_async(
-        "CoirnaBot: New Login",
+        "ArbitrageBot: New Login",
         f"<h3>New Login Detected</h3>"
         f"<p><b>IP:</b> {html.escape(ip)}<br>"
         f"<b>Browser:</b> {html.escape(browser)}<br>"
@@ -57,7 +57,7 @@ async def notify_blocked(ip: str, browser: str, os_info: str) -> None:
     """Email notification when IP is blocked after 10 failed attempts."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     await send_email_async(
-        "CoirnaBot: IP Blocked After 10 Failed Attempts",
+        "ArbitrageBot: IP Blocked After 10 Failed Attempts",
         f"<h3>IP Blocked</h3>"
         f"<p><b>IP:</b> {html.escape(ip)}<br>"
         f"<b>Browser:</b> {html.escape(browser)}<br>"
@@ -122,7 +122,7 @@ async def notify_emergency(
         )
 
     await send_email_async(
-        f"CoirnaBot: EMERGENCY — Portfolio -{drawdown_pct:.1f}%",
+        f"ArbitrageBot: EMERGENCY — Portfolio -{drawdown_pct:.1f}%",
         f"<h3 style='color:red'>Emergency Sell-All Triggered</h3>"
         f"<p><b>Time:</b> {now}<br>"
         f"<b>Reason:</b> {html.escape(reason)}<br>"

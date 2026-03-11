@@ -1,5 +1,5 @@
 [Unit]
-Description=CoirnaBot WebSocket Proxy
+Description=ArbitrageBot WebSocket Proxy
 After=network-online.target
 Wants=network-online.target
 

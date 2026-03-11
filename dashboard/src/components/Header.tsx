@@ -253,7 +253,7 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
       {/* Top row: title, tabs, connection */}
       <div className="flex items-center justify-between px-3 sm:px-6 py-2">
         <div className="flex items-center gap-3 sm:gap-6">
-          <h1 className="text-lg sm:text-xl font-bold text-white tracking-tight">CoirnaBot</h1>
+          <h1 className="text-lg sm:text-xl font-bold text-white tracking-tight">ArbitrageBot</h1>
           <nav className="hidden md:flex gap-1">
             <NavLink to="/" end className={navLinkClass}>Dashboard</NavLink>
             <NavLink to="/rankings" className={({ isActive }) => navLinkClass({ isActive: isActive || window.location.hash.startsWith('#/rankings') })}>Rankings</NavLink>

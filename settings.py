@@ -1,5 +1,5 @@
 """
-Settings manager for CoirnaBot.
+Settings manager for ArbitrageBot.
 
 Loads/saves runtime configuration from settings.json.
 Falls back to config.py defaults when settings.json is missing or incomplete.

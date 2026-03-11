@@ -5,7 +5,7 @@
 
 ## Goal
 
-Screen non-core exchanges for possible CoirnaBot integration using:
+Screen non-core exchanges for possible ArbitrageBot integration using:
 
 - Spot taker fees (bot uses taker orders)
 - Fee discounts (token deduction / VIP / referral)
@@ -473,7 +473,7 @@ The main table line using `0.00%` as current is outdated.
 
 - Pionex has VIP levels and market-maker programs.
 - Official Pionex fee materials show spot taker remains `0.05%` across VIP levels.
-- Since CoirnaBot uses taker orders, VIP progression does not lower taker fee for this strategy.
+- Since ArbitrageBot uses taker orders, VIP progression does not lower taker fee for this strategy.
 
 ### 5. Pionex transfer fees are partially confirmed and partially estimated
 

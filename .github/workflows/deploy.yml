@@ -31,13 +31,13 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            cd /root/coirnabot
+            cd /root/arbitragebot
             cp settings.json settings.json.bak 2>/dev/null || true
             git checkout -- settings.json 2>/dev/null || true
             git pull origin master
             cp settings.json.bak settings.json 2>/dev/null || true
             rm -f settings.json.bak
-            cp scripts/coirnabot.service /etc/systemd/system/coirnabot.service
+            cp scripts/arbitragebot.service /etc/systemd/system/arbitragebot.service
             systemctl daemon-reload
             .venv/bin/pip install -r requirements.txt --quiet
 
@@ -48,7 +48,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           source: "dashboard/dist/"
-          target: "/root/coirnabot/"
+          target: "/root/arbitragebot/"
           overwrite: true
 
       - name: Restart bot
@@ -58,5 +58,5 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            systemctl restart coirnabot
+            systemctl restart arbitragebot
             echo "Deploy complete, bot restarted"

@@ -404,7 +404,7 @@ The GitHub runner handles the heavy dashboard build (~1.5 GB RAM). VPSes only re
 2. `git pull origin master`
 3. `pip install -r requirements.txt` (if changed)
 4. Copy pre-built `dashboard/dist/` from GitHub artifact
-5. `systemctl restart coirnabot` (or equivalent)
+5. `systemctl restart arbitragebot` (or equivalent)
 
 ## Latency Impact on Arbitrage
 

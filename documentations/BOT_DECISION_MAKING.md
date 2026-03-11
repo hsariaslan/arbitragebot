@@ -1,6 +1,6 @@
 # Bot Decision Making
 
-Complete reference for how CoirnaBot makes every trading, scoring, allocation, and rebalancing decision.
+Complete reference for how ArbitrageBot makes every trading, scoring, allocation, and rebalancing decision.
 
 ---
 

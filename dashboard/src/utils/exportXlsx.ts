@@ -36,7 +36,7 @@ export function exportXlsx(
 
   // 1. Summary sheet
   const summaryData = [
-    ['CoirnaBot Rankings Export'],
+    ['ArbitrageBot Rankings Export'],
     ['Generated', now.toISOString()],
     ['Session Duration (s)', Math.round(sessionDuration)],
     ['Active Symbols', optimizer.active_symbols?.join(', ') ?? ''],
@@ -509,6 +509,6 @@ export function exportXlsx(
 
   // Generate and download
   const ts = now.toISOString().replace(/[:T]/g, '_').slice(0, 15);
-  const filename = `coirnabot_rankings_${ts}.xlsx`;
+  const filename = `arbitragebot_rankings_${ts}.xlsx`;
   XLSX.writeFile(wb, filename);
 }

@@ -6,7 +6,7 @@ const WS_URL =
     ? 'ws://localhost:8765'
     : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 const RECONNECT_DELAY = 2000;
-const TOKEN_KEY = 'coirnabot_token';
+const TOKEN_KEY = 'arbitragebot_token';
 
 function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY);

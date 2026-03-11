@@ -1,5 +1,5 @@
 """
-Session state persistence for CoirnaBot.
+Session state persistence for ArbitrageBot.
 
 Saves/restores balance, monitor, and optimizer state across restarts
 so that trades, rankings, and capital positions survive deployments.

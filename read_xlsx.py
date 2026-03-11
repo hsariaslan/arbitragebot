@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read and display CoirnaBot XLSX export files.
+"""Read and display ArbitrageBot XLSX export files.
 
 Usage:
     python read_xlsx.py                          # reads most recent file in xlsx/
@@ -90,7 +90,7 @@ def print_summary_sheet(ws) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Read CoirnaBot XLSX exports")
+    parser = argparse.ArgumentParser(description="Read ArbitrageBot XLSX exports")
     parser.add_argument("file", nargs="?", help="Path to XLSX file (default: latest in xlsx/)")
     parser.add_argument("--sheet", "-s", help="Show only this sheet")
     parser.add_argument("--list", "-l", action="store_true", help="List sheet names only")

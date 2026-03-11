@@ -1,4 +1,4 @@
-# CoirnaBot — Sim vs Demo/Real Discrepancy Reference
+# ArbitrageBot — Sim vs Demo/Real Discrepancy Reference
 
 This document catalogs every known way the simulation can diverge from real exchange behavior. Each discrepancy is tracked with its fix status so we can methodically validate the sim before going live.
 

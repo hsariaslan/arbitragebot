@@ -154,5 +154,5 @@ export function exportRankingsMarkdown(data: {
     sections.push(mdTable(headers, rows));
   }
 
-  return `# CoirnaBot Rankings Export\n_Generated: ${new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '')} UTC_\n\n` + sections.join('\n');
+  return `# ArbitrageBot Rankings Export\n_Generated: ${new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, '')} UTC_\n\n` + sections.join('\n');
 }

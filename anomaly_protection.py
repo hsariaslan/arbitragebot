@@ -1,5 +1,5 @@
 """
-Anomaly Protection for CoirnaBot.
+Anomaly Protection for ArbitrageBot.
 
 3-layer trading safety system:
   Layer 1: Circuit Breaker — global pause on rolling P&L decline

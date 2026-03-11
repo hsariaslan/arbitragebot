@@ -124,7 +124,7 @@ export default function App() {
           <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
           {showConnectingText && (
             <>
-              <p className="text-slate-400 text-lg">Connecting to CoirnaBot...</p>
+              <p className="text-slate-400 text-lg">Connecting to ArbitrageBot...</p>
               <p className="text-slate-500 text-sm mt-2">Make sure <code className="text-slate-400">python run.py</code> is running</p>
             </>
           )}

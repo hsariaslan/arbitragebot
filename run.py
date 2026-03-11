@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CoirnaBot Real-Time Price Fetcher
+ArbitrageBot Real-Time Price Fetcher
 
 Connects to exchange WebSocket feeds, stores price snapshots to CSV
 every second, and prints cross-exchange arbitrage comparison to console.
@@ -60,7 +60,7 @@ def setup_logging() -> tuple[Path, DashboardLogHandler]:
     """Configure logging to console, daily-rotating file (UTC), and dashboard handler."""
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
-    log_file = logs_dir / "coirnabot.log"
+    log_file = logs_dir / "arbitragebot.log"
 
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     fmt.converter = time.gmtime  # UTC timestamps
@@ -157,7 +157,7 @@ async def main() -> None:
         for ex in active_exchanges
     }
 
-    logger.info(f"CoirnaBot starting — log: {log_file}")
+    logger.info(f"ArbitrageBot starting — log: {log_file}")
     logger.info(
         f"{len(active_exchanges)} exchanges, ${total_capital:.0f} capital, "
         f"${trade_amount}/trade"
@@ -398,7 +398,7 @@ async def main() -> None:
         raise
     finally:
         monitor.print_summary()
-        logger.info("CoirnaBot Price Fetcher stopped")
+        logger.info("ArbitrageBot Price Fetcher stopped")
 
 
 if __name__ == "__main__":
