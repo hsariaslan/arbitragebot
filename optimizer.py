@@ -2800,10 +2800,10 @@ class SymbolOptimizer:
                 )
 
         self._balance.total_transfer_fees += total_fee
-        old_str = ",".join(old_sellers)
-        new_str = ",".join(new_sellers)
+        old_str = ",".join(old_exchanges)
+        new_str = ",".join(new_exchanges)
         logger.info(
-            f"[Optimizer] Reallocated {symbol}: sellers [{old_str}]→[{new_str}], "
+            f"[Optimizer] Reallocated {symbol}: exchanges [{old_str}]→[{new_str}], "
             f"fees: ${total_fee:.4f}"
         )
         return True
