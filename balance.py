@@ -921,11 +921,19 @@ class BalanceTracker:
         )
         return [transfer]
 
-    def replenish_reserve(self, prices: dict[str, float] | None = None) -> list[Transfer]:
+    def replenish_reserve(
+        self,
+        prices: dict[str, float] | None = None,
+        max_fee_per_source: float | None = None,
+    ) -> list[Transfer]:
         """Top up Bitfinex USDT reserve from all exchanges, sorted by withdrawal fee.
 
         Not gated by net profit — reserve replenishment is always beneficial.
         Respects hourly cap and per-source cooldown.
+
+        Args:
+            max_fee_per_source: If set, skip sources with fee above this amount.
+                Used when net-negative to avoid expensive replenishment.
         """
         if self._bitfinex_reserve_pct <= 0:
             return []
@@ -967,6 +975,10 @@ class BalanceTracker:
         for sender, avail, fee in candidates:
             if remaining_deficit < min_replenish:
                 break
+
+            # Skip expensive sources when net-negative
+            if max_fee_per_source is not None and fee > max_fee_per_source:
+                continue
 
             # Check cooldown (10 min per source to avoid fee churn)
             cooldown_key = f"reserve_replenish:{sender}"
@@ -1022,7 +1034,8 @@ class BalanceTracker:
         Active buyer/seller exchanges that have been idle (no trades) for longer
         than idle_threshold are treated as non-essential and consolidated too.
 
-        Not gated by net PnL — consolidation is always beneficial.
+        When net-negative, callers pass max_fee_per_source=0.02 to limit
+        consolidation to free/near-free sources and avoid deepening deficit.
         Respects hourly budget cap and per-source cooldown.
 
         Args:

@@ -1,5 +1,5 @@
 """
-WebSocket server for the CoirnaBot live dashboard.
+WebSocket server for the ArbitrageBot live dashboard.
 
 Pushes a full state snapshot (balances, trades, transfers, prices, system status)
 to all connected browser clients every second via WebSocket on port 8765.
@@ -198,7 +198,7 @@ class DashboardServer:
         """Create a dedicated logger for authentication events."""
         auth_dir = Path("logs/auth")
         auth_dir.mkdir(parents=True, exist_ok=True)
-        auth_log = logging.getLogger("coirnabot.auth")
+        auth_log = logging.getLogger("arbitragebot.auth")
         auth_log.setLevel(logging.INFO)
         if not auth_log.handlers:
             fh = logging.FileHandler(auth_dir / "auth.log")
@@ -1624,8 +1624,8 @@ class DashboardServer:
         log_dir = Path("logs")
 
         # Collect rotated files (oldest first) + current log file
-        rotated = sorted(log_dir.glob("coirnabot.log.*"))
-        main = log_dir / "coirnabot.log"
+        rotated = sorted(log_dir.glob("arbitragebot.log.*"))
+        main = log_dir / "arbitragebot.log"
         log_files = rotated + ([main] if main.exists() else [])
 
         for log_file in log_files:
@@ -2154,13 +2154,14 @@ class DashboardServer:
             for sym in opt._active_symbols:
                 score = opt._latest_scores.get(sym, 0.01)
                 dom = opt._dominant_pairs.get(sym, {})
-                buyers = dom.get("buyers", [])
-                for buyer_info in buyers:
-                    bex = buyer_info[0] if isinstance(buyer_info, (list, tuple)) else buyer_info
-                    if bex in targets:
-                        w = score * (buyer_info[1] if isinstance(buyer_info, (list, tuple)) and len(buyer_info) > 1 else 1.0)
-                        ex_weights[bex] = ex_weights.get(bex, 0) + w
-                        total_weight += w
+                # Symmetric: all dominant exchanges (buyers + sellers) need USDT
+                for role in ("buyers", "sellers"):
+                    for ex_info in dom.get(role, []):
+                        bex = ex_info[0] if isinstance(ex_info, (list, tuple)) else ex_info
+                        if bex in targets:
+                            w = score * (ex_info[1] if isinstance(ex_info, (list, tuple)) and len(ex_info) > 1 else 1.0)
+                            ex_weights[bex] = ex_weights.get(bex, 0) + w
+                            total_weight += w
 
             if total_weight > 0 and ex_weights:
                 strategy = "score_weighted"
