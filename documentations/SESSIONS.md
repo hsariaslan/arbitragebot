@@ -2608,3 +2608,173 @@ The v0.25.7-beta `pair_fee_exceeds_net` gate in `_complete_discovery()` was the 
 3. **Re-enable Gate.io and KuCoin** — Adds Bitfinex+Gate.io (0.09%) and Bitfinex+KuCoin (0.08%) pairs. Pionex stays disabled (5.8s latency from Bangkok).
 
 4. **Log all settings** (code change, v0.25.8) — Added demotion, threshold, and stability settings to `[Settings]` output.
+
+---
+
+### Session #18 — 2026-03-09/10 (Consolidation Death Spiral)
+
+**Date**: 2026-03-09 20:03 – 2026-03-10 21:33 UTC (25h 30m)
+**Capital**: $1,000
+**Version**: v0.25.8-beta (pair fee gate removed from discovery, all settings logged)
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+**Execution Mode**: Demo (Binance/OKX/Bybit testnet)
+
+#### Settings (from `[Settings]` log at 20:03:27 UTC)
+
+| Setting | Value |
+|---------|-------|
+| Trade amount | $20.0 (2.0% of $1000) |
+| Total capital | $1,000 |
+| Adaptive mode | True |
+| Auto rotate | True |
+| Max/min symbols | 5 / 2 |
+| Scoring window | 1800s |
+| Eval interval | 120s |
+| Min net pct | 0.01% |
+| Rebalance cooldown | 10s |
+| ROI horizon | 1800s, divisor=5 |
+| Net P&L gate | warmup=10, grace=1800s |
+| Net pct sizing | True, cap=2.5 |
+| Spread persistence | 1 tick |
+| EVD seller penalty | 0.05 (5%) |
+| One-leg failure rate | 0.02 (2%) |
+| Max position mult | 0 (disabled) |
+| Fee threshold mult | 0 (disabled) |
+| Demotion period | 900s |
+| Demotion cooldown mult | 3 (= 2700s/45 min cooldown) |
+| Realloc cost horizon | 4h |
+| Thresholds | trading=0.005, strong=0.1, very_strong=0.3 |
+| Stability | factor=0.5, min_seconds=180s |
+| Anomaly protection | Enabled, CB=-$5.00/900s, cooldown=300s |
+| Drawdown | 15.0%, emergency=2.0× |
+| Streak threshold | 4, cooldown=300s |
+| Bitfinex reserve | 15% ($150), floor=5% ($50) |
+| Hourly transfer cap | $5.00 |
+| Execution mode | demo |
+| Active exchanges | Binance (0.075%), Bitfinex (0.00%), Bitget (0.08%), Bybit (0.075%), Gate.io (0.09%), KuCoin (0.08%), MEXC (0.04%), OKX (0.10%) |
+| Disabled exchanges | Pionex |
+
+#### Summary
+
+| Metric | Value |
+|--------|-------|
+| Duration | 25h 30m |
+| Trades | 469 |
+| Trading PnL | $2.81 |
+| Transfer Fees | $19.62 |
+| Cashback | $1.34 (credited $0.75, pending $0.59) |
+| **Net Profit** | **-$16.06** |
+| $/hr | -$0.63 |
+| Active Symbols | 13 (WIF, LDO, AXS, DYDX, ORDI, COMP, HYPE, NEAR, AR, BTC, FIL, DOGE, PENDLE) |
+| Demotions | 21 |
+| Discovery Cycles | 13 |
+| Avg Profit/Trade | $0.006 (0.03% net) |
+
+#### Transfer Fee Breakdown (THE DEFICIT)
+
+| Category | Amount | Count | Description |
+|----------|--------|-------|-------------|
+| **Hub consolidation** | **$12.67** | 126 | USDT moved back to Bitfinex after demotion cycles |
+| Reserve replenish | $2.21 | 27 | Topping up Bitfinex reserve |
+| Demotion sell fees | $3.40 | 21 | Taker fees selling crypto on demotion |
+| External USDT rebalance | $0.90 | 6 | OKX/KuCoin to MEXC/Bitget |
+| External crypto + internal | $0.33 | 25 | Crypto rebalancing |
+| **TOTAL** | **$19.62** | | 7× trading profit |
+
+**The expensive exchanges:**
+
+| Exchange → Bitfinex | Transfers | Fee/Transfer | Total Cost |
+|---------------------|-----------|--------------|------------|
+| KuCoin | 17 | $0.40 | **$6.80** |
+| Gate.io | 8 | $0.50 | **$4.00** |
+| OKX | 18 | $0.10 | $1.80 |
+| MEXC | 49 | $0.00 | $0.00 |
+| Bitget | 24 | $0.001 | $0.02 |
+| Binance/Bybit | 10 | ~$0.01 | $0.05 |
+
+**KuCoin + Gate.io = $10.80 (55% of ALL transfer fees, 85% of consolidation fees)**
+
+#### Timeline (13 Discovery Cycles, 21 Demotions)
+
+| Time (UTC) | Event |
+|------------|-------|
+| 03-09 20:03 | Session start, discovery begins (8 exchanges) |
+| 20:18 | Discovery #1: WIF activated |
+| 03-10 00:29 | WIF demoted (4h11m active, 79 trades, $0.83) |
+| 00:34 | Discovery #2: LDO, AXS |
+| 01:04–01:30 | AXS demoted, LDO demoted |
+| 01:35 | Discovery #3: DYDX, WIF |
+| 02:09–02:26 | WIF demoted, DYDX demoted |
+| 02:31 | Discovery #4: ORDI, COMP |
+| 03:05–03:29 | COMP demoted, ORDI demoted |
+| 03:44 | Discovery #5: AXS |
+| 04:38 | AXS demoted |
+| 04:53 | Discovery #6: HYPE |
+| 05:29 | HYPE demoted |
+| 05:34 | Discovery #7: NEAR |
+| 05:54 | NEAR demoted (20 min, 4 trades, -$0.002) |
+| 05:59 | Discovery #8: AR |
+| 07:02 | AR demoted |
+| 07:07 | Discovery #9: ORDI |
+| 08:19 | ORDI demoted |
+| 08:24 | Discovery #10: COMP, AXS, FIL |
+| 09:10–09:55 | AXS demoted, COMP demoted. **FIL sole survivor** |
+| 10:00–14:00 | **4-HOUR DEAD ZONE** — FIL active but ran out of crypto on KuCoin. Net P&L gate blocked rebalancing. Zero trades. Consolidation fees continued. |
+| 14:01 | FIL demoted |
+| 14:06 | Discovery #11: AXS, AR, BTC |
+| 14:40–17:38 | AR demoted, BTC demoted, AXS demoted |
+| 18:13 | Discovery #12: AXS, PENDLE (+FIL, DOGE expanded) |
+| 18:47–18:57 | PENDLE, AXS, DOGE all demoted. Restart triggered. |
+| 18:58 | Restart (deploy). Discovery #13: FIL only |
+| 19:00–21:33 | FIL active, **zero trades**, OKX→Bitfinex consolidation continues ($0.10/ea). Session ends. |
+
+#### Per-Symbol Performance
+
+| Symbol | Trades | PnL | Duration | Dominant Pair |
+|--------|--------|-----|----------|---------------|
+| BTC | 141 | $1.00 | ~3h | Bitfinex↔MEXC/Binance |
+| WIF | 79 | $0.83 | ~5h | MEXC↔Bitget (not on Bitfinex) |
+| AXS | 77 | $0.43 | ~5h (5 activations) | Various |
+| ORDI | 37 | $0.12 | ~2h | Various |
+| AR | 40 | $0.14 | ~2h | Various |
+| COMP | 31 | $0.17 | ~2h | Various |
+| DYDX | 16 | $0.01 | ~50m | Tiny margins |
+| LDO | 13 | $0.06 | ~1h | |
+| HYPE | 14 | $0.02 | 37m | |
+| FIL | 14 | $0.01 | ~9h (mostly idle) | Bitfinex→KuCoin |
+| DOGE | 5 | $0.03 | ~10m | |
+| PENDLE | 6 | $0.01 | ~34m | |
+| NEAR | 4 | -$0.00 | 20m | Net negative |
+
+#### Observations
+
+1. **Consolidation death spiral** — Each demotion triggers: sell crypto (taker fee) → consolidate USDT to Bitfinex (withdrawal fee from every exchange) → discovery → redistribute from Bitfinex (free) → trade briefly → demote → repeat. With 21 demotions, this cycle ran 13 times, burning $12.67 in consolidation alone.
+
+2. **KuCoin ($0.40) and Gate.io ($0.50) are profit killers** — These two exchanges account for $10.80 in consolidation fees. A single KuCoin transfer wipes out **67 trades** of profit ($0.006/trade). Re-enabling them was a mistake at this capital level.
+
+3. **$0.006/trade average is too thin** — At $20 trade size with ~0.03% net spreads, per-trade profit is half a cent. This cannot sustain ANY meaningful transfer activity. The math is fundamentally broken: $1000 capital with $20 trades generates too little per-trade to cover even cheap transfers.
+
+4. **4-hour dead zone (10:00-14:00)** — FIL was sole active symbol but exhausted its KuCoin crypto. Net P&L gate correctly blocked rebalancing (net negative), creating a deadlock: can't trade → can't earn → can't rebalance → can't trade.
+
+5. **Consolidation runs even when bot can't trade** — From 19:00-21:33, zero trades but OKX→Bitfinex consolidation continued at $0.10/ea every ~10 min. Fees accumulated with no revenue.
+
+6. **Discovery pair_fee gate removal worked** — Bot activated symbols freely (469 trades vs 14 in S17). But the cost of supporting 8 exchanges with frequent demotions far exceeded trading profit.
+
+#### Issues Found
+
+| Issue | Severity | Description |
+|-------|----------|-------------|
+| **KuCoin/Gate.io consolidation fees** | Critical | $10.80 from just these two exchanges. Each KuCoin transfer ($0.40) = 67 trades of profit. Must disable or never allocate capital to them. |
+| **Demotion-consolidation spiral** | Critical | 21 demotions × ~$0.95/cycle = $19.95 in fees. Bot spends more time/money moving capital than trading. Need longer demotion tolerance or consolidation cost awareness. |
+| **Consolidation not gated by net P&L** | High | Consolidation transfers continue even when bot is net negative and can't trade. Should be paused when net_pnl_gate is active. |
+| **Trading margins too thin for 8 exchanges** | High | $0.006/trade cannot support withdrawal fees from expensive exchanges. Need fewer, cheaper exchanges or larger trade sizes. |
+
+#### Settings Recommendations
+
+1. **Disable Gate.io and KuCoin again** — Their withdrawal fees ($0.40, $0.50) are catastrophic at this capital level. Keep only cheap exchanges: Bitfinex ($0), MEXC ($0), Binance ($0.01), Bitget ($0.001), Bybit ($0).
+
+2. **Consider gating consolidation by net P&L** — When the bot is in deficit, consolidation makes it worse. Pause consolidation transfers from expensive sources when net_pnl_gate is active.
+
+3. **Increase demotion_cooldown_multiplier** back to higher value — 45 min cooldown (mult=3) allowed too-fast cycling. More cooldown = fewer consolidation cycles.
+
+4. **Larger trade_amount or capital** — At $20 trades, margins are too thin. $50+ trades would make per-trade profit more meaningful relative to transfer costs.
