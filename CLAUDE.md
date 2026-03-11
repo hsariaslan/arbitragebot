@@ -1,4 +1,4 @@
-# CoirnaBot - Cross-Exchange Crypto Arbitrage Bot
+# ArbitrageBot - Cross-Exchange Crypto Arbitrage Bot
 
 ## Project Start Date
 2026-02-22
@@ -339,14 +339,14 @@ Instead of spreading capital uniformly across all exchanges, the bot concentrate
 - `max_per_direction` is tier-based: 2 for default/strong, 3 for very_strong
 - Falls back to historical `buy_exchange_counts` / `sell_exchange_counts` if insufficient rolling data
 
-### Capital Allocation
+### Capital Allocation (Bidirectional/Symmetric)
 
-After discovery, capital is allocated per-symbol to dominant exchanges:
+After discovery, capital is allocated per-symbol **symmetrically** to ALL dominant exchanges:
 - **Bitfinex reserve carved out first**: `total_capital × bitfinex_reserve_pct` (default 15%) kept as USDT on Bitfinex before symbol allocation
-- Remaining capital: USDT → buyer exchanges (proportional to buyer weight)
-- Crypto → seller exchanges (proportional to seller weight)
-- **Dynamic buy/sell ratio** per symbol based on exchange concentration: the side with fewer exchanges gets proportionally more capital to delay per-exchange depletion (e.g., 2 buyers + 1 seller → 35%/65% buy/sell). Clamped to [35%, 65%]. Equal exchange counts stay at 50/50.
+- Remaining capital: **50% USDT + 50% crypto on EVERY dominant exchange** (proportional to combined buyer+seller weight). This enables bidirectional trading — any exchange can be buyer OR seller on any tick.
 - Score-weighted across symbols: higher-scoring symbols get more capital
+- **Natural rebalancing**: Buying accumulates crypto on the buyer, selling accumulates USDT on the seller. When the direction reverses, the accumulated imbalance is consumed — no external transfers needed.
+- **Eliminates sz0 blocks**: Previously, capital locked directionally caused 2,835+ missed trades/day. With symmetric allocation, both directions are always tradeable.
 
 ### Dynamic Re-evaluation
 
@@ -372,9 +372,9 @@ Bitfinex has $0 withdrawal fees on 14/15 networks and 0% taker fees, making it t
 2. **Protection during rebalancing**: Normal rebalance source selection uses `_available_usdt_for_rebalance()` which excludes the reserve from Bitfinex's available balance
 3. **Protection during trading**: `available_usdt_for_trading()` prevents trades from spending Bitfinex USDT below the reserve target. Used in both `_compute_trade_size()` and `can_execute()`. Without this, Bitfinex as a buyer exchange drains the reserve through normal trading, triggering expensive replenishment cycles.
 4. **Emergency draw**: When net P&L gate blocks rebalancing AND miss streak ≥ 2× threshold, `emergency_reserve_draw()` transfers USDT from Bitfinex to the starved exchange — **bypasses all gates** (net P&L, hourly cap, transfer worthiness). Fee = $0. Hard floor enforced: draw cannot reduce Bitfinex below `total_capital × hard_floor`.
-5. **Periodic replenishment**: Every evaluation cycle, `replenish_reserve()` tops up from ALL exchanges sorted by withdrawal fee (cheapest first). Not gated by net profit — reserve replenishment is always beneficial. Minimum transfer `max($20, trade_amount × 2)`. 10-minute cooldown per source. Respects hourly budget.
-6. **USDT consolidation**: `consolidate_to_bitfinex()` moves idle capital to Bitfinex hub. Active buyer exchanges keep a buffer unless idle for 30+ minutes (based on `last_trade_time`, updated by both trades and rebalance operations). Non-active exchanges are fully consolidated. Runs during eval cycles and discovery. **Bitfinex availability gate**: Post-discovery consolidation is skipped when no active symbol is tradeable on Bitfinex (`_any_active_on_bitfinex()` check) — prevents circular waste of paying withdrawal fees to park USDT on Bitfinex when it can't be used. Discovery consolidation is ungated (no symbols active yet). Logged as `[Optimizer] ... consolidation SKIPPED` (throttled to every 5 min on regular eval cycle).
-7. **Idle seller crypto consolidation**: `_consolidate_idle_seller_crypto()` transfers crypto from seller exchanges idle 30+ minutes directly to Bitfinex, selling at 0% taker. Only for symbols available on Bitfinex (~40-50 of 60). Uses USDT withdrawal fees as proxy for crypto transfer fees.
+5. **Periodic replenishment**: Every evaluation cycle, `replenish_reserve()` tops up from ALL exchanges sorted by withdrawal fee (cheapest first). **Net-negative fee cap**: when rotation gate is closed (net deficit), `max_fee_per_source=0.02` limits replenishment to free/near-free sources only — prevents expensive KuCoin ($0.40) or Gate.io ($0.50) transfers from deepening deficit. Minimum transfer `max($20, trade_amount × 2)`. 10-minute cooldown per source. Respects hourly budget.
+6. **USDT consolidation**: `consolidate_to_bitfinex()` moves idle capital to Bitfinex hub. Active buyer exchanges keep a buffer unless idle for 30+ minutes (based on `last_trade_time`, updated by both trades and rebalance operations). Non-active exchanges are fully consolidated. **Net-negative fee cap**: when rotation gate is closed, `max_fee_per_source=0.02` limits consolidation to free/near-free sources (MEXC $0, Bitget $0.001, Binance $0.01) — blocks expensive consolidation from KuCoin/Gate.io/OKX that deepens deficit. Runs during eval cycles and discovery. **Bitfinex availability gate**: Post-discovery consolidation is skipped when no active symbol is tradeable on Bitfinex (`_any_active_on_bitfinex()` check) — prevents circular waste of paying withdrawal fees to park USDT on Bitfinex when it can't be used. Discovery consolidation is ungated (no symbols active yet). Logged as `[Optimizer] ... consolidation SKIPPED` (throttled to every 5 min on regular eval cycle).
+7. **Idle exchange crypto consolidation**: `_consolidate_idle_exchange_crypto()` transfers crypto from any idle exchange (30+ minutes without a trade) directly to Bitfinex, selling at 0% taker. With symmetric allocation, all dominant exchanges hold crypto. Only for symbols available on Bitfinex (~40-50 of 60). Uses USDT withdrawal fees as proxy for crypto transfer fees.
 8. **Demotion sell via Bitfinex**: On demotion, crypto is transferred directly to Bitfinex and sold at 0% taker (saves source exchange taker fee). Falls back to local sell for symbols not available on Bitfinex. Post-demotion USDT consolidation runs automatically.
 9. **Withdrawal fee preference**: `_rebalance_usdt()` prefers cheap rebalance sources (fee ≤ $0.10) before falling back to expensive ones. Avoids KuCoin ($0.40) and Gate.io ($0.50) when cheaper alternatives exist.
 
@@ -388,9 +388,9 @@ Bitfinex has $0 withdrawal fees on 14/15 networks and 0% taker fees, making it t
 | `replenish_reserve()` | `balance.py` | Top up reserve from all exchanges (sorted by fee) |
 | `consolidate_to_bitfinex(active_buyers, idle_threshold)` | `balance.py` | Move idle USDT to Bitfinex hub |
 | `sell_crypto_via_bitfinex(source, symbol, qty, bid)` | `balance.py` | Transfer crypto to Bitfinex + sell at 0% |
-| `_consolidate_idle_seller_crypto(idle_threshold)` | `optimizer.py` | Consolidate crypto from idle seller exchanges |
+| `_consolidate_idle_exchange_crypto(idle_threshold)` | `optimizer.py` | Consolidate crypto from idle exchanges |
 | `_execute_demotion()` | `optimizer.py` | Demotion with Bitfinex-first crypto transfer |
-| `_redistribute_post_demotion()` | `optimizer.py` | Push freed Bitfinex USDT to starved buyer exchanges after demotion |
+| `_redistribute_post_demotion()` | `optimizer.py` | Push freed Bitfinex USDT to starved active exchanges after demotion |
 | `_is_symbol_on_bitfinex(symbol)` | `optimizer.py` | Check if symbol has live Bitfinex price (used for expansion preference) |
 | `_any_active_on_bitfinex()` | `optimizer.py` | Check if any active symbol is tradeable on Bitfinex (gates consolidation) |
 
@@ -432,7 +432,7 @@ Instead of a static rebalance amount, the bot targets **3× trade_amount** to co
 
 ### Smart Capital Allocation
 
-After discovery, capital is allocated via the Exchange & Symbol Concentration system (see above). Each symbol's capital goes only to its dominant buyer/seller exchanges, weighted by profitability scores.
+After discovery, capital is allocated symmetrically (50/50 USDT+crypto) to ALL dominant exchanges via the Exchange & Symbol Concentration system (see above). Enables bidirectional trading — any exchange can be buyer or seller.
 
 ### Rebalance Guards
 
@@ -699,7 +699,7 @@ Full authentication system for the WebSocket dashboard:
 ### Bot Logging
 
 - **Format**: UTC timestamps via `time.gmtime` converter: `YYYY-MM-DD HH:MM:SS [LEVEL] [Component] message`
-- **Daily rotation**: `TimedRotatingFileHandler` rotates at 00:00 UTC, keeps 30 days. Files: `logs/coirnabot.log` (current), `logs/coirnabot.log.YYYY-MM-DD` (rotated).
+- **Daily rotation**: `TimedRotatingFileHandler` rotates at 00:00 UTC, keeps 30 days. Files: `logs/arbitragebot.log` (current), `logs/arbitragebot.log.YYYY-MM-DD` (rotated).
 - **DashboardLogHandler**: Custom `logging.Handler` in `dashboard_server.py`. Captures entries in-memory (`deque(maxlen=2000)` for live broadcast, `list` for full session export). Parses `[Component]` prefix from log messages using `[\w.]+` regex (supports `Gate.io`). Exposes `get_all()` for filtered views and `total_count()` for UI display. Dashboard fetches full session logs via `request_all_bot_logs` WebSocket message when filters are active.
 - **Latency logging**: `[Latency]` component prefix. Every 60s logs per-exchange: processing time (avg/min/max ms), message rate (msgs/s), data freshness (avg/max age ms) with active/dormant symbol separation (>2min = dormant). Also logs first-data-after-connect timing. Filterable in Bot Logs tab.
 - **Diagnostic logging** (added v0.13.5): Six production-level log lines for self-sufficient diagnostics:

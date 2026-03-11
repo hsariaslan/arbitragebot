@@ -1,12 +1,12 @@
 """
-Configuration for the CoirnaBot real-time crypto price fetcher.
+Configuration for the ArbitrageBot real-time crypto price fetcher.
 
 All symbols, exchange settings, and operational parameters.
 """
 
 import os
 
-__version__ = "0.25.8-beta"
+__version__ = "0.26.0-beta"
 
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
