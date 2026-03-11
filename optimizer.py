@@ -1,5 +1,5 @@
 """
-Automatic symbol rotation optimizer for CoirnaBot.
+Automatic symbol rotation optimizer for ArbitrageBot.
 
 Scores all 60 symbols continuously across exchanges by computing
 cross-exchange spreads every second. Maintains a rolling window of scores
@@ -430,7 +430,7 @@ class SymbolOptimizer:
                                 f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
                                 f"(fees: ${hub_fee:.4f}, max_fee=$0.02)"
                             )
-                        self._balance.replenish_reserve()
+                        self._balance.replenish_reserve(max_fee_per_source=0.02)
                         self._last_evaluation = now
 
             elif (
@@ -1151,7 +1151,8 @@ class SymbolOptimizer:
         total_score = sum(best_scores.values())
         min_weight = 0.1 / len(best_symbols)  # minimum 10% / num_symbols
 
-        # Build allocations: USDT to buyer exchanges, crypto to seller exchanges
+        # Build allocations: symmetric 50/50 USDT+crypto on ALL dominant exchanges
+        # (bidirectional trading — any exchange can be buyer or seller)
         allocations: dict[str, dict] = {}
         for ex in all_exchanges:
             allocations[ex] = {"usdt": 0.0, "crypto": {}}
@@ -1170,44 +1171,34 @@ class SymbolOptimizer:
 
             pairs = self._dominant_pairs[sym]
 
-            # Dynamic buy/sell ratio based on exchange concentration per side.
-            # The side with fewer exchanges is more concentrated — each exchange
-            # there handles a larger share of trades and depletes faster.
-            # Over-allocating to the concentrated side delays depletion and
-            # reduces expensive rebalancing cycles.
-            # Equal exchanges → 50/50. 2 buyers + 1 seller → 40/60 (sell gets more).
-            num_buyers = len(pairs["buyers"])
-            num_sellers = len(pairs["sellers"])
-            if num_buyers > 0 and num_sellers > 0:
-                sell_pct = num_buyers / (num_buyers + num_sellers)
-                sell_pct = max(0.35, min(0.65, sell_pct))
-            else:
-                sell_pct = 0.5
-            buy_pct = 1.0 - sell_pct
-
-            # USDT → buyer exchanges (proportional to buyer weight)
-            total_buy_w = sum(w for _, w in pairs["buyers"])
+            # Symmetric allocation: combine buyer+seller weights into unified
+            # per-exchange weights. Each exchange gets both USDT and crypto,
+            # enabling bidirectional trading (natural rebalancing through trades).
+            exchange_weights: dict[str, float] = {}
             for ex, w in pairs["buyers"]:
-                usdt_share = sym_capital * buy_pct * (w / total_buy_w) if total_buy_w > 0 else 0
-                allocations[ex]["usdt"] += usdt_share
-
-            # Crypto → seller exchanges (proportional to seller weight)
-            total_sell_w = sum(w for _, w in pairs["sellers"])
+                exchange_weights[ex] = exchange_weights.get(ex, 0.0) + w
             for ex, w in pairs["sellers"]:
-                crypto_share = sym_capital * sell_pct * (w / total_sell_w) if total_sell_w > 0 else 0
+                exchange_weights[ex] = exchange_weights.get(ex, 0.0) + w
+            total_w = sum(exchange_weights.values())
+
+            for ex, w in exchange_weights.items():
+                share = sym_capital * (w / total_w) if total_w > 0 else sym_capital / max(1, len(exchange_weights))
+                usdt_share = share * 0.5
+                crypto_share = share * 0.5
+                allocations[ex]["usdt"] += usdt_share
                 if sym not in allocations[ex]["crypto"]:
                     allocations[ex]["crypto"][sym] = 0.0
                 allocations[ex]["crypto"][sym] += crypto_share
 
-            if buy_pct != 0.5:
-                buyers_str = "+".join(ex for ex, _ in pairs["buyers"])
-                sellers_str = "+".join(ex for ex, _ in pairs["sellers"])
-                logger.info(
-                    f"[Optimizer]   {sym.replace('USDT', '')}: "
-                    f"buy/sell={buy_pct:.0%}/{sell_pct:.0%} "
-                    f"({buyers_str} → {sellers_str}), "
-                    f"capital=${sym_capital:.0f}"
-                )
+            exchanges_str = "+".join(
+                f"{ex}({w / total_w:.0%})" if total_w > 0 else ex
+                for ex, w in exchange_weights.items()
+            )
+            logger.info(
+                f"[Optimizer]   {sym.replace('USDT', '')}: "
+                f"symmetric 50/50 on [{exchanges_str}], "
+                f"capital=${sym_capital:.0f}"
+            )
 
         # Round allocations
         for ex in all_exchanges:
@@ -1229,7 +1220,7 @@ class SymbolOptimizer:
         logger.info(
             f"[Optimizer] Discovery complete! "
             f"Best symbols: {', '.join(s.replace('USDT', '') for s in best_symbols)} | "
-            f"Concentrated allocation, ${total_capital:.0f} total"
+            f"Symmetric 50/50 allocation, ${total_capital:.0f} total"
         )
 
         # Update optimizer state (only symbols change, exchanges stay the same)
@@ -1589,17 +1580,21 @@ class SymbolOptimizer:
             and "Bitfinex" in self._balance._exchanges
             and self._any_active_on_bitfinex()
         ):
-            active_buyers = set()
-            active_sellers = set()
+            # Symmetric: all dominant exchanges are active for both buy and sell
+            active_exchanges = set()
             for sym in self._active_symbols:
                 pairs = self._dominant_pairs.get(sym, {})
                 for ex_name, _ in pairs.get("buyers", []):
-                    active_buyers.add(ex_name)
+                    active_exchanges.add(ex_name)
                 for ex_name, _ in pairs.get("sellers", []):
-                    active_sellers.add(ex_name)
+                    active_exchanges.add(ex_name)
+            # When net-negative, only consolidate from free/near-free sources
+            # to avoid deepening the deficit (KuCoin $0.40, Gate.io $0.50 kill profit)
+            fee_cap = 0.02 if not self._rotation_budget_ok else None
             transfers = self._balance.consolidate_to_bitfinex(
-                active_buyers, idle_threshold=1800.0,
-                active_seller_exchanges=active_sellers,
+                active_exchanges, idle_threshold=1800.0,
+                active_seller_exchanges=active_exchanges,
+                max_fee_per_source=fee_cap,
             )
             if transfers:
                 hub_fee = sum(t.fee_usd for t in transfers)
@@ -1657,12 +1652,12 @@ class SymbolOptimizer:
     # ── Post-demotion redistribution ────────────────────────────────────
 
     def _redistribute_post_demotion(self) -> None:
-        """Push freed capital from Bitfinex to starved buyer exchanges.
+        """Push freed capital from Bitfinex to starved active exchanges.
 
         After a demotion, capital consolidates on Bitfinex via demotion sells.
         Instead of waiting for miss-streaks, proactively redistribute to
-        buyer exchanges that need USDT. Bitfinex $0-fee transfers pass the
-        hourly cap (Fix 1).
+        all active exchanges that need USDT. Bitfinex $0-fee transfers pass the
+        hourly cap (Fix 1). Symmetric: all dominant exchanges need USDT.
         """
         from balance import Transfer
 
@@ -1672,25 +1667,26 @@ class SymbolOptimizer:
         if available < self._trade_amount * 2:
             return  # Nothing meaningful to redistribute
 
-        # Collect buyer exchanges from remaining active symbols' dominant pairs
-        buyer_needs: dict[str, float] = {}
+        # Collect ALL active exchanges from remaining symbols' dominant pairs
+        exchange_needs: dict[str, float] = {}
         for sym in self._active_symbols:
             pairs = self._dominant_pairs.get(sym)
             if not pairs:
                 continue
-            for ex, _w in pairs.get("buyers", []):
+            all_sym_exchanges = {ex for ex, _ in pairs.get("buyers", [])} | {ex for ex, _ in pairs.get("sellers", [])}
+            for ex in all_sym_exchanges:
                 if ex == "Bitfinex":
                     continue
                 bal = self._balance.usdt.get(ex, 0.0)
                 if bal < self._trade_amount * 2:
                     shortfall = self._trade_amount * 3 - bal
-                    buyer_needs[ex] = max(buyer_needs.get(ex, 0), shortfall)
+                    exchange_needs[ex] = max(exchange_needs.get(ex, 0), shortfall)
 
-        if not buyer_needs:
+        if not exchange_needs:
             return
 
         # Sort by largest shortfall first
-        sorted_needs = sorted(buyer_needs.items(), key=lambda x: x[1], reverse=True)
+        sorted_needs = sorted(exchange_needs.items(), key=lambda x: x[1], reverse=True)
         total_sent = 0.0
         now = time.time()
         for ex, need in sorted_needs:
@@ -1839,12 +1835,13 @@ class SymbolOptimizer:
                 return True
         return False
 
-    def _consolidate_idle_seller_crypto(self, idle_threshold: float = 900.0) -> None:
-        """Transfer crypto from idle seller exchanges to Bitfinex and sell at 0%.
+    def _consolidate_idle_exchange_crypto(self, idle_threshold: float = 900.0) -> None:
+        """Transfer crypto from idle exchanges to Bitfinex and sell at 0%.
 
-        Seller exchanges hold crypto for active symbols. If a seller hasn't
-        had a trade in idle_threshold seconds, its crypto is unproductive.
-        Transfer to Bitfinex (0% taker) frees it as USDT for redistribution.
+        With symmetric allocation, all dominant exchanges hold crypto.
+        If an exchange hasn't had a trade in idle_threshold seconds, its
+        crypto is unproductive. Transfer to Bitfinex (0% taker) frees it
+        as USDT for redistribution.
 
         Uses a longer threshold than USDT consolidation (15 min vs 10 min)
         since restoring crypto costs a taker fee on the destination exchange.
@@ -1869,13 +1866,14 @@ class SymbolOptimizer:
         if not bitfinex_bids:
             return
 
-        # Collect active seller exchanges per symbol
+        # Collect all active exchanges per symbol (symmetric — any exchange holds crypto)
         for symbol in list(self._active_symbols):
             if symbol not in bitfinex_bids:
                 continue  # Bitfinex doesn't have this symbol
 
             pairs = self._dominant_pairs.get(symbol, {})
-            for ex, _ in pairs.get("sellers", []):
+            all_sym_exchanges = {ex for ex, _ in pairs.get("buyers", [])} | {ex for ex, _ in pairs.get("sellers", [])}
+            for ex in all_sym_exchanges:
                 if ex == "Bitfinex":
                     continue
 
@@ -2011,11 +2009,17 @@ class SymbolOptimizer:
         self._dominant_pairs[symbol] = pairs
 
         total_fee = 0.0
-        # Only buy crypto on dominant seller exchanges
-        total_sell_w = sum(w for _, w in pairs["sellers"])
-        total_alloc = self._trade_amount * len(self._balance._exchanges)
+        # Symmetric: buy crypto (50% of allocation) on ALL dominant exchanges
+        exchange_weights: dict[str, float] = {}
+        for ex, w in pairs["buyers"]:
+            exchange_weights[ex] = exchange_weights.get(ex, 0.0) + w
         for ex, w in pairs["sellers"]:
-            alloc = total_alloc * (w / total_sell_w) if total_sell_w > 0 else self._trade_amount
+            exchange_weights[ex] = exchange_weights.get(ex, 0.0) + w
+        total_w = sum(exchange_weights.values())
+        total_alloc = self._trade_amount * len(self._balance._exchanges)
+        for ex, w in exchange_weights.items():
+            # Only 50% of allocation as crypto (symmetric — keep 50% as USDT)
+            alloc = total_alloc * (w / total_w) * 0.5 if total_w > 0 else self._trade_amount * 0.5
             if ex not in self._balance.usdt or self._balance.usdt[ex] < alloc:
                 continue
             fee_rate = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
@@ -2038,9 +2042,9 @@ class SymbolOptimizer:
                 )
             )
 
-        sellers_str = ",".join(ex for ex, _ in pairs["sellers"])
+        exchanges_str = ",".join(exchange_weights.keys())
         logger.info(
-            f"[Optimizer] Expansion concentrated on sellers: [{sellers_str}]"
+            f"[Optimizer] Expansion symmetric on: [{exchanges_str}]"
         )
 
         self._balance.total_transfer_fees += total_fee
@@ -2086,22 +2090,24 @@ class SymbolOptimizer:
                 and "Bitfinex" in self._balance._exchanges
                 and self._any_active_on_bitfinex()
             ):
-                active_buyers = set()
-                active_sellers = set()
+                # Symmetric: all dominant exchanges are both buyers and sellers
+                active_exchanges = set()
                 for sym in self._active_symbols:
                     pairs = self._dominant_pairs.get(sym, {})
                     for ex_name, _ in pairs.get("buyers", []):
-                        active_buyers.add(ex_name)
+                        active_exchanges.add(ex_name)
                     for ex_name, _ in pairs.get("sellers", []):
-                        active_sellers.add(ex_name)
-                buyer_set = active_buyers if self._active_symbols else None
-                seller_set = active_sellers if self._active_symbols else None
+                        active_exchanges.add(ex_name)
+                exchange_set = active_exchanges if self._active_symbols else None
+                fee_cap = 0.02 if not self._rotation_budget_ok else None
                 self._balance.consolidate_to_bitfinex(
-                    buyer_set, idle_threshold=1800.0,
-                    active_seller_exchanges=seller_set,
+                    exchange_set, idle_threshold=1800.0,
+                    active_seller_exchanges=exchange_set,
+                    max_fee_per_source=fee_cap,
                 )
-                self._consolidate_idle_seller_crypto(idle_threshold=1800.0)
-                self._balance.replenish_reserve()
+                self._consolidate_idle_exchange_crypto(idle_threshold=1800.0)
+                fee_cap_r = 0.02 if not self._rotation_budget_ok else None
+                self._balance.replenish_reserve(max_fee_per_source=fee_cap_r)
             elif self._balance and "Bitfinex" in self._balance._exchanges:
                 logger.info(
                     "[Optimizer] Consolidation SKIPPED (deficit path): "
@@ -2124,9 +2130,11 @@ class SymbolOptimizer:
         # Phase 3.5: Re-evaluate dominant exchange pairs for active symbols
         self._reevaluate_dominant_pairs()
 
-        # Phase 3.6: Replenish Bitfinex reserve (always beneficial, not gated by profit)
+        # Phase 3.6: Replenish Bitfinex reserve
+        # When net-negative, only replenish from free/near-free sources
         if self._balance:
-            self._balance.replenish_reserve()
+            fee_cap = 0.02 if not self._rotation_budget_ok else None
+            self._balance.replenish_reserve(max_fee_per_source=fee_cap)
 
         # Phase 4: Evaluate demotions first
         self._evaluate_demotions()
@@ -2138,20 +2146,22 @@ class SymbolOptimizer:
             and "Bitfinex" in self._balance._exchanges
             and self._any_active_on_bitfinex()
         ):
-            active_buyers = set()
-            active_sellers = set()
+            # Symmetric: all dominant exchanges are both buyers and sellers
+            active_exchanges = set()
             for sym in self._active_symbols:
                 pairs = self._dominant_pairs.get(sym, {})
                 for ex_name, _ in pairs.get("buyers", []):
-                    active_buyers.add(ex_name)
+                    active_exchanges.add(ex_name)
                 for ex_name, _ in pairs.get("sellers", []):
-                    active_sellers.add(ex_name)
+                    active_exchanges.add(ex_name)
             # Full consolidation if no active symbols, partial otherwise
-            buyer_set = active_buyers if self._active_symbols else None
-            seller_set = active_sellers if self._active_symbols else None
+            # When net-negative, only consolidate from free/near-free sources
+            exchange_set = active_exchanges if self._active_symbols else None
+            fee_cap = 0.02 if not self._rotation_budget_ok else None
             transfers = self._balance.consolidate_to_bitfinex(
-                buyer_set, idle_threshold=1800.0,
-                active_seller_exchanges=seller_set,
+                exchange_set, idle_threshold=1800.0,
+                active_seller_exchanges=exchange_set,
+                max_fee_per_source=fee_cap,
             )
             if transfers:
                 hub_fee = sum(t.fee_usd for t in transfers)
@@ -2161,8 +2171,8 @@ class SymbolOptimizer:
                     f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
                     f"(fees: ${hub_fee:.4f})"
                 )
-            # Also consolidate crypto from idle seller exchanges (30 min threshold)
-            self._consolidate_idle_seller_crypto(idle_threshold=1800.0)
+            # Also consolidate crypto from idle exchanges (30 min threshold)
+            self._consolidate_idle_exchange_crypto(idle_threshold=1800.0)
         elif (
             self._balance
             and "Bitfinex" in self._balance._exchanges
@@ -2439,7 +2449,7 @@ class SymbolOptimizer:
                     )
                 )
 
-        # 2. Buy new symbol crypto only on dominant seller exchanges
+        # 2. Buy new symbol crypto on ALL dominant exchanges (symmetric 50%)
         if new_score.score >= self._very_strong_threshold:
             max_dir = 3
         elif new_score.score >= self._strong_threshold:
@@ -2451,10 +2461,15 @@ class SymbolOptimizer:
         # Clean up old symbol's dominant pair data
         self._dominant_pairs.pop(old_symbol, None)
 
-        total_sell_w = sum(w for _, w in pairs["sellers"])
-        total_alloc = self._trade_amount * len(self._balance._exchanges)
+        exchange_weights: dict[str, float] = {}
+        for ex, w in pairs["buyers"]:
+            exchange_weights[ex] = exchange_weights.get(ex, 0.0) + w
         for ex, w in pairs["sellers"]:
-            alloc = total_alloc * (w / total_sell_w) if total_sell_w > 0 else self._trade_amount
+            exchange_weights[ex] = exchange_weights.get(ex, 0.0) + w
+        total_w = sum(exchange_weights.values())
+        total_alloc = self._trade_amount * len(self._balance._exchanges)
+        for ex, w in exchange_weights.items():
+            alloc = total_alloc * (w / total_w) * 0.5 if total_w > 0 else self._trade_amount * 0.5
             if ex not in self._balance.usdt or self._balance.usdt[ex] < alloc:
                 continue
             fee_rate = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
@@ -2690,10 +2705,11 @@ class SymbolOptimizer:
             return False
 
         now = time.time()
-        old_sellers = {ex for ex, _ in old_pairs["sellers"]}
-        new_sellers = {ex for ex, _ in new_pairs["sellers"]}
-        removed_sellers = old_sellers - new_sellers
-        added_sellers = new_sellers - old_sellers
+        # Symmetric: track ALL exchanges (buyers + sellers combined)
+        old_exchanges = {ex for ex, _ in old_pairs.get("buyers", [])} | {ex for ex, _ in old_pairs.get("sellers", [])}
+        new_exchanges = {ex for ex, _ in new_pairs.get("buyers", [])} | {ex for ex, _ in new_pairs.get("sellers", [])}
+        removed_sellers = old_exchanges - new_exchanges
+        added_sellers = new_exchanges - old_exchanges
 
         if not removed_sellers and not added_sellers:
             return False
