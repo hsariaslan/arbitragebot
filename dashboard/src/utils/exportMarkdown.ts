@@ -120,6 +120,83 @@ export function exportRankingsMarkdown(data: {
     sections.push(mdTable(headers, rows));
   }
 
+  // --- Top Symbols (Rolling) ---
+  if (optimizer.rankings?.length > 0) {
+    const top = [...optimizer.rankings]
+      .filter((r: any) => r.est_hourly_profit > 0)
+      .sort((a: any, b: any) => b.est_hourly_profit - a.est_hourly_profit)
+      .slice(0, 10);
+    if (top.length > 0) {
+      sections.push('\n## Top Symbols (Rolling — current scoring window)\n');
+      const headers = ['#', 'Symbol', 'Active', '$/hr', 'Avg Net%', 'Freq%', 'Tier'];
+      const rows = top.map((r: any, i: number) => [
+        String(i + 1),
+        r.symbol,
+        r.is_active ? '✓' : '·',
+        '$' + r.est_hourly_profit.toFixed(4),
+        r.avg_profitable_net.toFixed(4) + '%',
+        (r.frequency * 100).toFixed(1) + '%',
+        r.focus_tier,
+      ]);
+      sections.push(mdTable(headers, rows));
+    }
+  }
+
+  // --- Top Symbols (Historical) ---
+  if (optimizer.historical_rankings?.length > 0) {
+    const topHist = [...optimizer.historical_rankings]
+      .filter((s: any) => s.est_total_profit > 0)
+      .sort((a: any, b: any) => b.est_total_profit - a.est_total_profit)
+      .slice(0, 10);
+    if (topHist.length > 0) {
+      sections.push('\n## Top Symbols (Historical — cumulative session)\n');
+      const headers = ['#', 'Symbol', 'Active', 'Total $', '$/hr', 'Avg Net%', 'Ticks', 'Activations', 'Demotions'];
+      const rows = topHist.map((s: any, i: number) => [
+        String(i + 1),
+        s.symbol,
+        s.is_active ? '✓' : '·',
+        '$' + s.est_total_profit.toFixed(2),
+        '$' + s.est_hourly_rate.toFixed(4),
+        s.avg_net_pct.toFixed(4) + '%',
+        String(s.total_ticks),
+        String(s.times_activated),
+        String(s.times_demoted),
+      ]);
+      sections.push(mdTable(headers, rows));
+    }
+  }
+
+  // --- Top Symbol × Exchange-Pair (from executed trades) ---
+  if (allTrades && allTrades.length > 0) {
+    const buckets = new Map<string, { symbol: string; buy: string; sell: string; trades: number; profit: number; volumeUsd: number }>();
+    for (const t of allTrades) {
+      const key = `${t.symbol}|${t.buy_exchange}|${t.sell_exchange}`;
+      const cur = buckets.get(key);
+      if (cur) {
+        cur.trades += 1;
+        cur.profit += t.profit_usd;
+        cur.volumeUsd += t.trade_amount;
+      } else {
+        buckets.set(key, { symbol: t.symbol, buy: t.buy_exchange, sell: t.sell_exchange, trades: 1, profit: t.profit_usd, volumeUsd: t.trade_amount });
+      }
+    }
+    const top = [...buckets.values()].sort((a, b) => b.profit - a.profit).slice(0, 15);
+    if (top.length > 0) {
+      sections.push('\n## Top Symbol × Exchange-Pair Combos by Profit\n');
+      const headers = ['#', 'Symbol', 'Route', 'Trades', 'Total $', 'Avg $/trade', 'Volume $'];
+      const rows = top.map((b, i) => [
+        String(i + 1),
+        b.symbol.replace('USDT', ''),
+        `${b.buy}→${b.sell}`,
+        String(b.trades),
+        '$' + b.profit.toFixed(4),
+        '$' + (b.profit / b.trades).toFixed(4),
+        '$' + b.volumeUsd.toFixed(2),
+      ]);
+      sections.push(mdTable(headers, rows));
+    }
+  }
+
   // --- Recent Trades ---
   if (allTrades && allTrades.length > 0) {
     sections.push('\n## Recent Trades (last 50)\n');

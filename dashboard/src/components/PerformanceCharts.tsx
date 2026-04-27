@@ -3,13 +3,15 @@ import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Cell, Legend,
 } from 'recharts';
-import type { DailyPnlEntry, HourlyPnlEntry, Trade, Transfer } from '../types';
+import type { DailyPnlEntry, HistoricalSymbolStats, HourlyPnlEntry, SymbolRanking, Trade, Transfer } from '../types';
 
 interface PerformanceChartsProps {
   trades: Trade[];
   transfers: Transfer[];
   hourlyPnl: HourlyPnlEntry[];
   dailyPnl: DailyPnlEntry[];
+  rankings?: SymbolRanking[];
+  historicalRankings?: HistoricalSymbolStats[];
 }
 
 const TOOLTIP_STYLE = {
@@ -18,9 +20,25 @@ const TOOLTIP_STYLE = {
   itemStyle: { color: '#e2e8f0' },
 };
 
-function formatHour(ts: number): string {
+function formatBucketTick(ts: number, spanSeconds: number): string {
   const d = new Date(ts * 1000);
-  return d.getUTCHours().toString().padStart(2, '0') + ':' + d.getUTCMinutes().toString().padStart(2, '0');
+  const HH = d.getUTCHours().toString().padStart(2, '0');
+  // Multi-day sessions: include MM-DD so duplicate hour-of-day labels are distinguishable.
+  if (spanSeconds > 36 * 3600) {
+    const mo = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+    const dd = d.getUTCDate().toString().padStart(2, '0');
+    return `${mo}-${dd} ${HH}:00`;
+  }
+  return `${HH}:00`;
+}
+
+function formatBucketTooltip(ts: number): string {
+  const d = new Date(ts * 1000);
+  const mo = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+  const dd = d.getUTCDate().toString().padStart(2, '0');
+  const HH = d.getUTCHours().toString().padStart(2, '0');
+  const MM = d.getUTCMinutes().toString().padStart(2, '0');
+  return `${d.getUTCFullYear()}-${mo}-${dd} ${HH}:${MM} UTC`;
 }
 
 const EXCHANGE_COLORS: Record<string, string> = {
@@ -35,7 +53,14 @@ const EXCHANGE_COLORS: Record<string, string> = {
   Bitfinex: '#16B157',
 };
 
-export default function PerformanceCharts({ trades, transfers, hourlyPnl, dailyPnl }: PerformanceChartsProps) {
+export default function PerformanceCharts({
+  trades,
+  transfers,
+  hourlyPnl,
+  dailyPnl,
+  rankings = [],
+  historicalRankings = [],
+}: PerformanceChartsProps) {
   // --- Cumulative P&L data ---
   const cumulativeData = useMemo(() => {
     if (trades.length === 0) return [];
@@ -52,7 +77,7 @@ export default function PerformanceCharts({ trades, transfers, hourlyPnl, dailyP
     const startBucket = Math.floor(firstTs / bucketSize) * bucketSize;
     const endBucket = Math.floor(Date.now() / 1000 / bucketSize) * bucketSize;
 
-    const points: { time: string; tradingPnl: number; fees: number; netPnl: number }[] = [];
+    const points: { bucket: number; tradingPnl: number; fees: number; netPnl: number }[] = [];
     let cumTrading = 0;
     let cumFees = 0;
     let tIdx = 0;
@@ -69,7 +94,7 @@ export default function PerformanceCharts({ trades, transfers, hourlyPnl, dailyP
         fIdx++;
       }
       points.push({
-        time: formatHour(bucket),
+        bucket,
         tradingPnl: Number(cumTrading.toFixed(4)),
         fees: Number((-cumFees).toFixed(4)),
         netPnl: Number((cumTrading - cumFees).toFixed(4)),
@@ -77,6 +102,12 @@ export default function PerformanceCharts({ trades, transfers, hourlyPnl, dailyP
     }
     return points;
   }, [trades, transfers]);
+
+  // Span used by the X-axis tick formatter to decide whether to include date.
+  const cumulativeSpanSeconds = useMemo(() => {
+    if (cumulativeData.length < 2) return 0;
+    return cumulativeData[cumulativeData.length - 1].bucket - cumulativeData[0].bucket;
+  }, [cumulativeData]);
 
   // --- Hourly P&L data (from backend, persisted) ---
   const hourlyData = useMemo(() => {
@@ -116,6 +147,79 @@ export default function PerformanceCharts({ trades, transfers, hourlyPnl, dailyP
       .sort((a, b) => b.profit - a.profit);
   }, [trades]);
 
+  // --- Top Symbols (Rolling, $/hr from current scoring window) ---
+  const topRollingSymbols = useMemo(() => {
+    if (!rankings.length) return [];
+    return rankings
+      .filter(r => r.est_hourly_profit > 0)
+      .sort((a, b) => b.est_hourly_profit - a.est_hourly_profit)
+      .slice(0, 10)
+      .map(r => ({
+        symbol: r.symbol.replace(/USDT$/, ''),
+        profit: Number(r.est_hourly_profit.toFixed(4)),
+        active: r.is_active,
+        avgNetPct: Number(r.avg_profitable_net.toFixed(4)),
+        frequency: Number((r.frequency * 100).toFixed(1)),
+      }));
+  }, [rankings]);
+
+  // --- Top Symbols (Historical, cumulative session $) ---
+  const topHistoricalSymbols = useMemo(() => {
+    if (!historicalRankings.length) return [];
+    return historicalRankings
+      .filter(s => s.est_total_profit > 0)
+      .sort((a, b) => b.est_total_profit - a.est_total_profit)
+      .slice(0, 10)
+      .map(s => ({
+        symbol: s.symbol.replace(/USDT$/, ''),
+        profit: Number(s.est_total_profit.toFixed(2)),
+        hourlyRate: Number(s.est_hourly_rate.toFixed(4)),
+        ticks: s.total_ticks,
+        active: s.is_active,
+      }));
+  }, [historicalRankings]);
+
+  // --- Top Symbol × Exchange-Pair combos (from executed trades) ---
+  // Aggregates every executed trade by (symbol, buy_exchange, sell_exchange).
+  // Answers: "which specific symbol+route makes the most money?"
+  const topSymbolPairs = useMemo(() => {
+    if (trades.length === 0) return [];
+    const buckets = new Map<string, { symbol: string; buyExchange: string; sellExchange: string; trades: number; profit: number }>();
+    for (const t of trades) {
+      const key = `${t.symbol}|${t.buy_exchange}|${t.sell_exchange}`;
+      const cur = buckets.get(key);
+      if (cur) {
+        cur.trades += 1;
+        cur.profit += t.profit_usd;
+      } else {
+        buckets.set(key, {
+          symbol: t.symbol,
+          buyExchange: t.buy_exchange,
+          sellExchange: t.sell_exchange,
+          trades: 1,
+          profit: t.profit_usd,
+        });
+      }
+    }
+    const EX_SHORT: Record<string, string> = {
+      Binance: 'BIN', OKX: 'OKX', Bybit: 'BYB', MEXC: 'MEX',
+      Bitget: 'BGT', KuCoin: 'KUC', 'Gate.io': 'GAT',
+      Pionex: 'PIO', Bitfinex: 'BFX',
+    };
+    return [...buckets.values()]
+      .sort((a, b) => b.profit - a.profit)
+      .slice(0, 10)
+      .map(b => ({
+        label: `${b.symbol.replace(/USDT$/, '')}: ${EX_SHORT[b.buyExchange] ?? b.buyExchange}→${EX_SHORT[b.sellExchange] ?? b.sellExchange}`,
+        symbol: b.symbol,
+        buyExchange: b.buyExchange,
+        sellExchange: b.sellExchange,
+        trades: b.trades,
+        profit: Number(b.profit.toFixed(4)),
+        avgPerTrade: Number((b.profit / b.trades).toFixed(4)),
+      }));
+  }, [trades]);
+
   if (trades.length === 0 && hourlyPnl.length === 0) {
     return (
       <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
@@ -134,10 +238,19 @@ export default function PerformanceCharts({ trades, transfers, hourlyPnl, dailyP
           <ResponsiveContainer width="100%" height={250}>
             <LineChart data={cumulativeData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="time" tick={{ fill: '#94a3b8', fontSize: 11 }} />
+              <XAxis
+                dataKey="bucket"
+                type="number"
+                domain={['dataMin', 'dataMax']}
+                scale="time"
+                tick={{ fill: '#94a3b8', fontSize: 11 }}
+                tickFormatter={v => formatBucketTick(v, cumulativeSpanSeconds)}
+                minTickGap={40}
+              />
               <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={v => `$${v}`} />
               <Tooltip
                 {...TOOLTIP_STYLE}
+                labelFormatter={(label: number) => formatBucketTooltip(label)}
                 formatter={(value: number | undefined, name: string | undefined) => [`$${(value ?? 0).toFixed(4)}`, name ?? '']}
               />
               <Legend wrapperStyle={{ fontSize: 11, color: '#94a3b8' }} />
@@ -224,6 +337,110 @@ export default function PerformanceCharts({ trades, transfers, hourlyPnl, dailyP
               <Bar dataKey="profit" name="Profit">
                 {exchangeData.map((entry, i) => (
                   <Cell key={i} fill={EXCHANGE_COLORS[entry.exchange] ?? '#8b5cf6'} fillOpacity={0.7} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Top Symbols by profit — Rolling vs Historical, side by side */}
+      {(topRollingSymbols.length > 0 || topHistoricalSymbols.length > 0) && (
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 sm:gap-5">
+          {/* Top Symbols — Rolling */}
+          {topRollingSymbols.length > 0 && (
+            <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+              <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
+                Top Symbols (Rolling $/hr)
+              </h3>
+              <ResponsiveContainer width="100%" height={Math.max(220, topRollingSymbols.length * 28)}>
+                <BarChart data={topRollingSymbols} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={v => `$${v}`} />
+                  <YAxis type="category" dataKey="symbol" tick={{ fill: '#94a3b8', fontSize: 11 }} width={68} />
+                  <Tooltip
+                    {...TOOLTIP_STYLE}
+                    formatter={(_v: number | undefined, _n: string | undefined, ctx: { payload?: typeof topRollingSymbols[number] }) => {
+                      const p = ctx?.payload;
+                      if (!p) return ['', ''];
+                      return [
+                        `$${p.profit.toFixed(4)}/hr · avg ${p.avgNetPct.toFixed(3)}% · freq ${p.frequency}%`,
+                        p.active ? 'Active' : 'Watching',
+                      ];
+                    }}
+                  />
+                  <Bar dataKey="profit" name="$/hr">
+                    {topRollingSymbols.map((entry, i) => (
+                      <Cell key={i} fill={entry.active ? '#34d399' : '#94a3b8'} fillOpacity={0.7} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* Top Symbols — Historical */}
+          {topHistoricalSymbols.length > 0 && (
+            <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+              <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
+                Top Symbols (Historical Cumulative $)
+              </h3>
+              <ResponsiveContainer width="100%" height={Math.max(220, topHistoricalSymbols.length * 28)}>
+                <BarChart data={topHistoricalSymbols} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={v => `$${v}`} />
+                  <YAxis type="category" dataKey="symbol" tick={{ fill: '#94a3b8', fontSize: 11 }} width={68} />
+                  <Tooltip
+                    {...TOOLTIP_STYLE}
+                    formatter={(_v: number | undefined, _n: string | undefined, ctx: { payload?: typeof topHistoricalSymbols[number] }) => {
+                      const p = ctx?.payload;
+                      if (!p) return ['', ''];
+                      return [
+                        `$${p.profit.toFixed(2)} cum · ${p.hourlyRate.toFixed(4)}/hr · ${p.ticks} ticks`,
+                        p.active ? 'Active' : 'Inactive',
+                      ];
+                    }}
+                  />
+                  <Bar dataKey="profit" name="Total $">
+                    {topHistoricalSymbols.map((entry, i) => (
+                      <Cell key={i} fill={entry.active ? '#60a5fa' : '#a78bfa'} fillOpacity={0.7} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Top Symbol × Exchange-Pair (from executed trades) */}
+      {topSymbolPairs.length > 0 && (
+        <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+          <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">
+            Top Symbol × Exchange-Pair Combos by Profit
+          </h3>
+          <p className="text-xs text-slate-500 mb-3">
+            Aggregated from executed trades. Answers: which specific symbol+route generated the most profit?
+          </p>
+          <ResponsiveContainer width="100%" height={Math.max(240, topSymbolPairs.length * 30)}>
+            <BarChart data={topSymbolPairs} layout="vertical">
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+              <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={v => `$${v}`} />
+              <YAxis type="category" dataKey="label" tick={{ fill: '#94a3b8', fontSize: 11 }} width={140} />
+              <Tooltip
+                {...TOOLTIP_STYLE}
+                formatter={(_v: number | undefined, _n: string | undefined, ctx: { payload?: typeof topSymbolPairs[number] }) => {
+                  const p = ctx?.payload;
+                  if (!p) return ['', ''];
+                  return [
+                    `$${p.profit.toFixed(4)} total · ${p.trades} trades · $${p.avgPerTrade.toFixed(4)}/trade`,
+                    `${p.symbol} ${p.buyExchange}→${p.sellExchange}`,
+                  ];
+                }}
+              />
+              <Bar dataKey="profit" name="Profit">
+                {topSymbolPairs.map((entry, i) => (
+                  <Cell key={i} fill={EXCHANGE_COLORS[entry.sellExchange] ?? '#8b5cf6'} fillOpacity={0.7} />
                 ))}
               </Bar>
             </BarChart>

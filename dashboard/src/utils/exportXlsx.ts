@@ -507,6 +507,102 @@ export function exportXlsx(
     XLSX.utils.book_append_sheet(wb, wsExProfit, 'Exchange Profit');
   }
 
+  // ── Symbol × Exchange-Pair Breakdown (from executed trades) ─────────────
+  // Aggregates every trade by (symbol, buy_exchange, sell_exchange) so the
+  // user can see which specific symbol+route is most profitable.
+  if (allTrades.length > 0) {
+    const buckets = new Map<string, { symbol: string; buy: string; sell: string; trades: number; profit: number; bestNet: number; worstNet: number; volumeUsd: number }>();
+    for (const t of allTrades) {
+      const key = `${t.symbol}|${t.buy_exchange}|${t.sell_exchange}`;
+      const cur = buckets.get(key);
+      if (cur) {
+        cur.trades += 1;
+        cur.profit += t.profit_usd;
+        cur.bestNet = Math.max(cur.bestNet, t.net_pct);
+        cur.worstNet = Math.min(cur.worstNet, t.net_pct);
+        cur.volumeUsd += t.trade_amount;
+      } else {
+        buckets.set(key, {
+          symbol: t.symbol,
+          buy: t.buy_exchange,
+          sell: t.sell_exchange,
+          trades: 1,
+          profit: t.profit_usd,
+          bestNet: t.net_pct,
+          worstNet: t.net_pct,
+          volumeUsd: t.trade_amount,
+        });
+      }
+    }
+    const symPairRows = [...buckets.values()]
+      .sort((a, b) => b.profit - a.profit)
+      .map(b => ({
+        Symbol: b.symbol,
+        'Buy Exchange': b.buy,
+        'Sell Exchange': b.sell,
+        Route: `${b.buy}→${b.sell}`,
+        Trades: b.trades,
+        'Total Profit $': Number(b.profit.toFixed(4)),
+        'Avg $/trade': Number((b.profit / b.trades).toFixed(4)),
+        'Best Net %': Number(b.bestNet.toFixed(4)),
+        'Worst Net %': Number(b.worstNet.toFixed(4)),
+        'Volume $': Number(b.volumeUsd.toFixed(2)),
+      }));
+    const wsSymPair = XLSX.utils.json_to_sheet(symPairRows);
+    XLSX.utils.book_append_sheet(wb, wsSymPair, 'Symbol×Pair Breakdown');
+  }
+
+  // ── Top Symbols (Rolling) — current scoring window ─────────────────────
+  if ((optimizer.rankings?.length ?? 0) > 0) {
+    const topRollingRows = [...(optimizer.rankings ?? [])]
+      .filter(r => r.est_hourly_profit > 0)
+      .sort((a, b) => b.est_hourly_profit - a.est_hourly_profit)
+      .map((r, i) => ({
+        Rank: i + 1,
+        Symbol: r.symbol,
+        Active: r.is_active ? 'Yes' : 'No',
+        'Focus Tier': r.focus_tier,
+        Score: Number(r.score.toFixed(4)),
+        '$/hr Estimate': Number(r.est_hourly_profit.toFixed(4)),
+        'Avg Profitable Net %': Number(r.avg_profitable_net.toFixed(4)),
+        'Frequency %': Number((r.frequency * 100).toFixed(2)),
+        'Best Net %': Number(r.best_net_pct.toFixed(4)),
+        'Profitable Ticks': r.profitable_ticks,
+        'Total Ticks': r.total_ticks,
+        'Dominant Buyers': r.dominant_buyers.join(', '),
+        'Dominant Sellers': r.dominant_sellers.join(', '),
+      }));
+    const wsTopRolling = XLSX.utils.json_to_sheet(topRollingRows);
+    XLSX.utils.book_append_sheet(wb, wsTopRolling, 'Top Symbols (Rolling)');
+  }
+
+  // ── Top Symbols (Historical) — cumulative session ─────────────────────
+  if (hist.length > 0) {
+    const topHistRows = [...hist]
+      .filter(s => s.est_total_profit > 0 || s.times_activated > 0)
+      .sort((a, b) => b.est_total_profit - a.est_total_profit)
+      .map((s, i) => ({
+        Rank: i + 1,
+        Symbol: s.symbol,
+        Active: s.is_active ? 'Yes' : 'No',
+        'Total Profit $': Number(s.est_total_profit.toFixed(2)),
+        '$/hr Rate': Number(s.est_hourly_rate.toFixed(4)),
+        'Avg Net %': Number(s.avg_net_pct.toFixed(4)),
+        'Best Net %': Number(s.best_net_pct.toFixed(4)),
+        'Worst Net %': Number(s.worst_net_pct.toFixed(4)),
+        'Total Ticks': s.total_ticks,
+        'Profitable Ticks': s.total_profitable_ticks,
+        'Frequency %': Number((s.overall_frequency * 100).toFixed(2)),
+        'Times Activated': s.times_activated,
+        'Times Demoted': s.times_demoted,
+        'Active Duration (h)': Number((s.total_active_duration / 3600).toFixed(2)),
+        'Top Buy Exchange': Object.entries(s.buy_exchange_counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? '',
+        'Top Sell Exchange': Object.entries(s.sell_exchange_counts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? '',
+      }));
+    const wsTopHist = XLSX.utils.json_to_sheet(topHistRows);
+    XLSX.utils.book_append_sheet(wb, wsTopHist, 'Top Symbols (Historical)');
+  }
+
   // Generate and download
   const ts = now.toISOString().replace(/[:T]/g, '_').slice(0, 15);
   const filename = `arbitragebot_rankings_${ts}.xlsx`;

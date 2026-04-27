@@ -895,7 +895,14 @@ export default function RankingPage({ optimizer, tickCount, portfolio, simulatio
 
       {/* Performance Charts */}
       {((allTrades?.length ?? 0) > 0 || (hourlyPnl?.length ?? 0) > 0) && (
-        <PerformanceCharts trades={allTrades ?? []} transfers={allTransfers ?? []} hourlyPnl={hourlyPnl ?? []} dailyPnl={dailyPnl ?? []} />
+        <PerformanceCharts
+          trades={allTrades ?? []}
+          transfers={allTransfers ?? []}
+          hourlyPnl={hourlyPnl ?? []}
+          dailyPnl={dailyPnl ?? []}
+          rankings={optimizer?.rankings ?? []}
+          historicalRankings={optimizer?.historical_rankings ?? []}
+        />
       )}
 
       {view === 'rolling' ? (
