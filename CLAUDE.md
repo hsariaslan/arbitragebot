@@ -578,6 +578,16 @@ Bypasses the `evaluation_interval` cooldown when active symbol count drops below
 - **Method**: `SymbolOptimizer._auto_expand_on_understaff_tick(now)`. Reuses standard rotation/expansion path (cost gates and stability checks still apply).
 - **Logging**: `[Optimizer] AUTO_EXPAND triggered: active=X/Y (deficit=N)`. On error: `[Optimizer] AUTO_EXPAND _evaluate_rotation failed: <error>`.
 
+### Post-Discovery Race Protection (Bug Fix v0.27.1)
+
+Post-discovery periodic operations (Features 4–6 + idle consolidation) used to fire in the brief window between `balance.reconfigure(allocations)` and `balance.initialize_crypto()`. They saw `crypto[ex][sym] == 0` against the just-set non-zero target and triggered phantom DRIFT_BUYs that deducted USDT — uncompensated when `initialize_crypto()` later overwrote the qty. Session #21 lost $350 of $1000 capital this way (35% drawdown → emergency).
+
+Three layers of defense in `optimizer.py`:
+
+- **`balance.initialized` gate** added to both `_run_inventory_rebalance` and `_redistribute_bitfinex_over_target` checks — neither runs until `initialize_crypto()` has settled actual quantities.
+- **Reset `_last_inventory_rebalance = time.time()` at end of `_complete_discovery()`** — first periodic rebalance now fires a full interval (default 6h) after activation, not immediately on the next tick when the timer is `0`.
+- **Seed `last_trade_time[ex] = now`** for every newly-allocated exchange at the end of `_complete_discovery()` — `_consolidate_idle_exchange_crypto` would otherwise see `idle_seconds = float("inf")` and instantly consolidate the freshly-allocated crypto away.
+
 ## Pending Improvements (Not Yet Implemented)
 
 These were identified as Session #20 mitigations but deferred until proven necessary in production. Implement only if the corresponding metric stays bad after Features 5 and 6 deploy.
@@ -711,7 +721,21 @@ When anomaly `_paused` is restored from state after a restart, `_pause_timestamp
 
 ### Emergency Email Notification
 
-On emergency sell-all, an email is sent via `notify_emergency()` in `email_notifier.py` with: trigger reason, drawdown % and $ amount, current portfolio value, full liquidated positions table (exchange/symbol/qty/price/gross/fee/net sorted by value), and per-exchange USDT breakdown. Sent as fire-and-forget async task.
+On emergency sell-all, an email is sent via `notify_emergency()` in `email_notifier.py` with: trigger reason, drawdown % and $ amount, current portfolio value, full liquidated positions table (exchange/symbol/qty/price/gross/fee/net sorted by value), per-exchange USDT breakdown after consolidation, **emergency consolidation summary** (transfers to Bitfinex with fees), and **step-by-step manual-resume instructions** (open dashboard → Settings → Danger Zone → Resume Trading button). Sent as fire-and-forget async task.
+
+#### Emergency Consolidation to Bitfinex Hub (v0.27.1)
+
+After the sell-all completes, `BalanceTracker.emergency_consolidate_to_bitfinex()` walks every non-Bitfinex exchange sorted by withdrawal fee (cheapest first) and moves all USDT to the Bitfinex hub. Bypasses cooldowns and the hourly transfer cap — emergency safety overrides budget gates. Bitfinex is chosen because its USDT withdrawal fees are $0 on 14 networks, making it the safest staging point for any subsequent operator action (manual withdrawal, manual swap, manual redistribute). Logged as `[Anomaly] EMERGENCY_CONSOLIDATE EX→Bitfinex: $X (fee=$Y, net=$Z)` per transfer + `[Anomaly] EMERGENCY_CONSOLIDATE_COMPLETE: N transfers, $X moved, $Y fees`.
+
+#### Hourly Email Reminder Until Manual Resume (v0.27.1)
+
+The bot re-sends the emergency email every 1 hour while it remains paused, until the operator clicks Resume Trading on the dashboard. Implementation:
+
+- `AnomalyProtection._emergency_email_last_sent` tracks the timestamp of the last email (initial or reminder), persisted via `to_state_dict`/`from_state_dict` so a restart-during-pause doesn't double-fire.
+- `AnomalyProtection.should_resend_emergency_email(now)` returns `True` only when `_emergency_triggered AND _paused AND (now − _emergency_email_last_sent) >= _emergency_email_resend_interval` (default 3600s).
+- Monitor's main loop checks each tick; on `True` it sends `notify_emergency_reminder()` (REMINDER subject, includes paused-for-X.Xh + same instructions) and updates the timestamp.
+- `manual_resume()` clears `_emergency_triggered=False` AND zeroes `_emergency_email_last_sent` — `should_resend_emergency_email` returns False permanently until the next emergency.
+- Logged on each reminder: `[Anomaly] EMERGENCY_EMAIL_REMINDER sent (paused X.Xh, drawdown Y.Y%)`.
 
 ### Integration Points
 
