@@ -483,23 +483,31 @@ class SymbolOptimizer:
                 self._last_evaluation = now
 
             # Periodic inventory drift rebalance (Feature 4)
+            # `balance.initialized` gate prevents firing between reconfigure()
+            # and initialize_crypto() — running there would see crypto=0
+            # against the just-set target and DRIFT_BUY phantom crypto,
+            # uncompensated when initialize_crypto() later overwrites the qty.
             if (
                 self._inventory_rebalance_enabled
                 and not self._discovery_mode
                 and self._active_symbols
                 and self._balance
+                and self._balance.initialized
                 and now - self._last_inventory_rebalance >= self._inventory_rebalance_interval
             ):
                 self._run_inventory_rebalance(now)
                 self._last_inventory_rebalance = now
 
             # Bitfinex over-target redistribution (Feature 5)
-            # Runs every eval cycle (gated by _last_evaluation update above)
+            # Same initialized-gate as above: pre-init Bitfinex USDT
+            # transiently includes the about-to-be-crypto allocation, so a
+            # premature redistribute would drain the planned crypto pool.
             if (
                 self._bitfinex_over_target_enabled
                 and not self._discovery_mode
                 and self._active_symbols
                 and self._balance
+                and self._balance.initialized
                 and "Bitfinex" in self._balance._exchanges
             ):
                 self._redistribute_bitfinex_over_target()
@@ -1377,6 +1385,23 @@ class SymbolOptimizer:
             balance=self._balance,
         )
         self._monitor._paused = False
+
+        # Reset periodic-rebalance timer so the first inventory rebalance
+        # fires a full interval after activation (not immediately on next
+        # tick when _last_inventory_rebalance==0). Belt-and-suspenders with
+        # the balance.initialized gate.
+        now_init = time.time()
+        self._last_inventory_rebalance = now_init
+
+        # Mark every newly-allocated exchange as "just started trading" so
+        # _consolidate_idle_exchange_crypto doesn't see them as infinitely
+        # idle (last_trade_time==0 → idle_seconds==inf → instant consolidation
+        # of the freshly-allocated crypto, observed in S21 30s post-activation).
+        for ex in all_exchanges:
+            if allocations.get(ex, {}).get("usdt", 0) > 0 or any(
+                v > 0 for v in allocations.get(ex, {}).get("crypto", {}).values()
+            ):
+                self._balance.last_trade_time[ex] = now_init
 
         # Update dashboard references and in-memory settings
         if self._dashboard:
