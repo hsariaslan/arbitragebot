@@ -250,7 +250,7 @@ export default function PerformanceCharts({
               <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={v => `$${v}`} />
               <Tooltip
                 {...TOOLTIP_STYLE}
-                labelFormatter={(label: number) => formatBucketTooltip(label)}
+                labelFormatter={(label) => formatBucketTooltip(Number(label))}
                 formatter={(value: number | undefined, name: string | undefined) => [`$${(value ?? 0).toFixed(4)}`, name ?? '']}
               />
               <Legend wrapperStyle={{ fontSize: 11, color: '#94a3b8' }} />
