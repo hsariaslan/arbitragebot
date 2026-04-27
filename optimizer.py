@@ -23,7 +23,18 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from config import (
+    AUTO_EXPAND_ON_UNDERSTAFF,
+    BITFINEX_OVER_TARGET_ENABLED,
+    BITFINEX_OVER_TARGET_MULTIPLIER,
+    INVENTORY_DRIFT_THRESHOLD,
+    INVENTORY_REBALANCE_ENABLED,
+    INVENTORY_REBALANCE_INTERVAL_HOURS,
     MAX_DATA_AGE_SECONDS,
+    MOMENTUM_FILTER_ENABLED,
+    MOMENTUM_LOOKBACK_HOURS,
+    MOMENTUM_MAX_FACTOR,
+    MOMENTUM_MIN_FACTOR,
+    MOMENTUM_SAMPLE_INTERVAL_MINUTES,
     SYMBOLS,
 )
 from slippage import compute_buy_slippage, compute_sell_slippage
@@ -315,6 +326,29 @@ class SymbolOptimizer:
         self._exchange_buy_ticks: dict[str, int] = defaultdict(int)
         self._exchange_sell_ticks: dict[str, int] = defaultdict(int)
 
+        # Price momentum filter (Feature 3)
+        self._momentum_filter_enabled: bool = MOMENTUM_FILTER_ENABLED
+        self._momentum_lookback_seconds: float = MOMENTUM_LOOKBACK_HOURS * 3600
+        self._momentum_sample_interval: float = MOMENTUM_SAMPLE_INTERVAL_MINUTES * 60
+        self._momentum_min_factor: float = MOMENTUM_MIN_FACTOR
+        self._momentum_max_factor: float = MOMENTUM_MAX_FACTOR
+        self._price_history: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
+        self._last_momentum_log: dict[str, float] = {}
+
+        # Periodic inventory rebalance (Feature 4)
+        self._inventory_rebalance_enabled: bool = INVENTORY_REBALANCE_ENABLED
+        self._inventory_rebalance_interval: float = INVENTORY_REBALANCE_INTERVAL_HOURS * 3600
+        self._inventory_drift_threshold: float = INVENTORY_DRIFT_THRESHOLD
+        self._last_inventory_rebalance: float = 0.0
+
+        # Bitfinex over-target redistribution (Feature 5)
+        self._bitfinex_over_target_enabled: bool = BITFINEX_OVER_TARGET_ENABLED
+        self._bitfinex_over_target_multiplier: float = BITFINEX_OVER_TARGET_MULTIPLIER
+
+        # Auto-expand on understaff (Feature 6)
+        self._auto_expand_on_understaff: bool = AUTO_EXPAND_ON_UNDERSTAFF
+        self._last_auto_expand_attempt: float = 0.0
+
     def stop(self) -> None:
         self._running = False
 
@@ -448,6 +482,41 @@ class SymbolOptimizer:
                     self._evaluate_demotions()
                 self._last_evaluation = now
 
+            # Periodic inventory drift rebalance (Feature 4)
+            if (
+                self._inventory_rebalance_enabled
+                and not self._discovery_mode
+                and self._active_symbols
+                and self._balance
+                and now - self._last_inventory_rebalance >= self._inventory_rebalance_interval
+            ):
+                self._run_inventory_rebalance(now)
+                self._last_inventory_rebalance = now
+
+            # Bitfinex over-target redistribution (Feature 5)
+            # Runs every eval cycle (gated by _last_evaluation update above)
+            if (
+                self._bitfinex_over_target_enabled
+                and not self._discovery_mode
+                and self._active_symbols
+                and self._balance
+                and "Bitfinex" in self._balance._exchanges
+            ):
+                self._redistribute_bitfinex_over_target()
+
+            # Auto-expand on understaff (Feature 6) — fire ASAP when active count < min
+            if (
+                self._auto_expand_on_understaff
+                and self._auto_rotate
+                and not self._discovery_mode
+                and self._discovery_complete
+                and self._tick_count >= self._min_warmup_ticks
+                and len(self._active_symbols) < self._min_active_symbols
+                and now - self._last_auto_expand_attempt >= 60.0  # max 1/minute
+            ):
+                self._auto_expand_on_understaff_tick(now)
+                self._last_auto_expand_attempt = now
+
             await asyncio.sleep(1.0)
 
     # ── Scoring ──────────────────────────────────────────────────────────
@@ -480,6 +549,11 @@ class SymbolOptimizer:
 
             if len(exchange_prices) < 2:
                 continue
+
+            # Track mid-price for momentum filter (Feature 3)
+            mid_prices = [(b + a) / 2.0 for _, b, a, _, _ in exchange_prices]
+            current_mid = sum(mid_prices) / len(mid_prices)
+            self._record_price_sample(symbol, current_mid, now)
 
             # Find best cross-exchange spread
             best_net = float("-inf")
@@ -514,6 +588,12 @@ class SymbolOptimizer:
                         best_sell = ex_sell
                         best_spread = spread_pct
                         best_fee = fee_pct
+
+            # Apply momentum factor: penalize symbols with declining 24h price
+            if self._momentum_filter_enabled and best_net > float("-inf"):
+                momentum_factor = self._compute_momentum_factor(symbol, current_mid, now)
+                if momentum_factor != 1.0:
+                    best_net = best_net * momentum_factor
 
             if best_net > float("-inf"):
                 tick = SymbolTick(
@@ -551,6 +631,56 @@ class SymbolOptimizer:
         # Per-tick candidate tracking during discovery (after scores are fresh)
         if self._discovery_mode and self._scores:
             self._track_discovery_candidates()
+
+    def _record_price_sample(self, symbol: str, mid_price: float, now: float) -> None:
+        """Append mid-price sample to history if sample interval elapsed (Feature 3)."""
+        if mid_price <= 0:
+            return
+        history = self._price_history[symbol]
+        if not history or (now - history[-1][0]) >= self._momentum_sample_interval:
+            history.append((now, mid_price))
+            # Prune samples older than lookback window (keep one buffer beyond)
+            cutoff = now - self._momentum_lookback_seconds - self._momentum_sample_interval
+            while history and history[0][0] < cutoff:
+                history.popleft()
+
+    def _compute_momentum_factor(self, symbol: str, current_mid: float, now: float) -> float:
+        """Compute score multiplier from 24h price change (Feature 3).
+
+        Returns clamp(1.0 + price_change_decimal, min, max).
+        Falling prices reduce score (down to min_factor); rising prices boost (up to max_factor).
+        Returns 1.0 if insufficient history or feature disabled.
+        """
+        history = self._price_history.get(symbol)
+        if not history or len(history) < 2 or current_mid <= 0:
+            return 1.0
+
+        # Find oldest sample within lookback window
+        target_time = now - self._momentum_lookback_seconds
+        oldest_in_window = None
+        for ts, price in history:
+            if ts >= target_time:
+                oldest_in_window = (ts, price)
+                break
+        if oldest_in_window is None or oldest_in_window[1] <= 0:
+            return 1.0
+
+        ref_price = oldest_in_window[1]
+        ref_age_hours = (now - oldest_in_window[0]) / 3600.0
+        change_decimal = (current_mid - ref_price) / ref_price
+        factor = max(self._momentum_min_factor, min(self._momentum_max_factor, 1.0 + change_decimal))
+
+        # Throttled logging: log significant adjustments every 10 min per symbol
+        if abs(factor - 1.0) > 0.1:
+            last = self._last_momentum_log.get(symbol, 0.0)
+            if now - last >= 600:
+                self._last_momentum_log[symbol] = now
+                logger.info(
+                    f"[Momentum] {symbol}: ref_age={ref_age_hours:.1f}h, "
+                    f"price {ref_price:.6f}→{current_mid:.6f} "
+                    f"({change_decimal*100:+.2f}%), factor={factor:.3f}"
+                )
+        return factor
 
     def _track_discovery_candidates(self) -> None:
         """Log candidate status every tick during discovery for trend visibility."""
@@ -1720,6 +1850,118 @@ class SymbolOptimizer:
             if total_sent >= available * 0.8:
                 break  # Keep 20% buffer on Bitfinex
 
+    def _redistribute_bitfinex_over_target(self) -> None:
+        """Push excess Bitfinex USDT to active buyer exchanges (Feature 5).
+
+        Triggers when Bitfinex USDT > reserve_target × bitfinex_over_target_multiplier
+        (default 1.5×). Sends excess to active exchanges that need USDT, using
+        $0-fee Bitfinex withdrawals. Prevents capital from getting trapped on
+        Bitfinex when only Bitfinex-dominant symbols are active (S20 issue).
+        """
+        from balance import Transfer
+
+        bfx_usdt = self._balance.usdt.get("Bitfinex", 0.0)
+        reserve_target = self._balance._bitfinex_reserve_target
+        if reserve_target <= 0:
+            return  # Reserve disabled
+
+        threshold = reserve_target * self._bitfinex_over_target_multiplier
+        if bfx_usdt <= threshold:
+            return  # Within target band
+
+        excess = bfx_usdt - reserve_target
+        if excess < self._trade_amount:
+            return  # Too small to bother
+
+        # Collect active non-Bitfinex exchanges
+        exchange_needs: dict[str, float] = {}
+        for sym in self._active_symbols:
+            pairs = self._dominant_pairs.get(sym)
+            if not pairs:
+                continue
+            all_sym_exchanges = {ex for ex, _ in pairs.get("buyers", [])} | {ex for ex, _ in pairs.get("sellers", [])}
+            for ex in all_sym_exchanges:
+                if ex == "Bitfinex":
+                    continue
+                bal = self._balance.usdt.get(ex, 0.0)
+                # Target each active exchange to receive trade_amount × 3
+                target_bal = self._trade_amount * 3
+                if bal < target_bal:
+                    shortfall = target_bal - bal
+                    exchange_needs[ex] = max(exchange_needs.get(ex, 0.0), shortfall)
+
+        if not exchange_needs:
+            logger.info(
+                f"[Optimizer] BFX over-target ${bfx_usdt:.2f} > "
+                f"${threshold:.2f}, but no non-Bitfinex active exchange needs USDT"
+            )
+            return
+
+        # Sort by largest shortfall first
+        sorted_needs = sorted(exchange_needs.items(), key=lambda x: x[1], reverse=True)
+        total_sent = 0.0
+        sent_to: list[str] = []
+        now = time.time()
+        for ex, need in sorted_needs:
+            amount = min(need, excess - total_sent)
+            if amount < self._trade_amount:
+                continue
+            fee = self._balance._get_withdrawal_fee("Bitfinex", amount)
+            if not self._balance._check_hourly_transfer_budget(fee):
+                logger.info(f"[Optimizer] BFX over-target redistribute SKIPPED {ex}: hourly budget exhausted")
+                continue
+            self._balance._record_external_fee(fee)
+            self._balance.usdt["Bitfinex"] -= amount
+            self._balance.usdt[ex] = self._balance.usdt.get(ex, 0.0) + amount
+            self._balance.total_transfer_fees += fee
+            self._balance.total_external_transfer_fees += fee
+            total_sent += amount
+            sent_to.append(f"{ex}=${amount:.2f}")
+            self._balance.transfers.append(
+                Transfer(
+                    timestamp=now,
+                    transfer_type="bfx_over_target_redistribute",
+                    from_exchange="Bitfinex",
+                    to_exchange=ex,
+                    symbol="USDT",
+                    amount_usd=amount,
+                    fee_usd=fee,
+                )
+            )
+            logger.info(
+                f"[Optimizer] BFX over-target redistribute: Bitfinex→{ex} "
+                f"${amount:.2f} (fee=${fee:.4f}, shortfall=${need:.2f})"
+            )
+            if total_sent >= excess:
+                break
+
+        if total_sent > 0:
+            logger.info(
+                f"[Optimizer] BFX over-target SUMMARY: ${bfx_usdt:.2f} BFX "
+                f"(target=${reserve_target:.2f}, threshold=${threshold:.2f}), "
+                f"sent ${total_sent:.2f} to {len(sent_to)} exchange(s) [{', '.join(sent_to)}], "
+                f"BFX now=${self._balance.usdt.get('Bitfinex', 0.0):.2f}"
+            )
+
+    def _auto_expand_on_understaff_tick(self, now: float) -> None:
+        """Fire expansion immediately when active symbol count is below minimum (Feature 6).
+
+        After demotions, the bot can sit idle for up to evaluation_interval (5 min)
+        before _evaluate_rotation() runs again. When active count < min_active_symbols
+        this delay creates dead capital. This method bypasses the eval cooldown.
+        """
+        active_count = len(self._active_symbols)
+        deficit = self._min_active_symbols - active_count
+        logger.info(
+            f"[Optimizer] AUTO_EXPAND triggered: active={active_count}/{self._min_active_symbols} "
+            f"(deficit={deficit})"
+        )
+        # Reuse the standard rotation path — it includes expansion if there's room
+        try:
+            self._evaluate_rotation()
+        except Exception as e:
+            logger.error(f"[Optimizer] AUTO_EXPAND _evaluate_rotation failed: {e}")
+
     # ── Activation threshold ─────────────────────────────────────────────
 
     def _get_activation_threshold(self, symbol: str) -> float:
@@ -1834,6 +2076,50 @@ class SymbolOptimizer:
             if self._is_symbol_on_bitfinex(sym):
                 return True
         return False
+
+    def _run_inventory_rebalance(self, now: float) -> None:
+        """Trigger periodic inventory drift correction (Feature 4).
+
+        Builds (exchange, symbol) pairs from current dominant pairs of all
+        active symbols, then calls balance.rebalance_inventory_drift().
+        """
+        pairs: list[tuple[str, str]] = []
+        for sym in self._active_symbols:
+            dom = self._dominant_pairs.get(sym, {})
+            seen: set[str] = set()
+            for ex, _ in dom.get("buyers", []):
+                if ex not in seen:
+                    pairs.append((ex, sym))
+                    seen.add(ex)
+            for ex, _ in dom.get("sellers", []):
+                if ex not in seen:
+                    pairs.append((ex, sym))
+                    seen.add(ex)
+
+        if not pairs:
+            logger.info("[Inventory] Periodic rebalance SKIPPED: no dominant pairs")
+            return
+
+        prices = self._get_all_prices()
+        logger.info(
+            f"[Inventory] Periodic rebalance START: {len(pairs)} (exchange, symbol) pairs, "
+            f"drift_threshold={self._inventory_drift_threshold*100:.0f}%, "
+            f"interval={self._inventory_rebalance_interval/3600:.1f}h"
+        )
+        transfers = self._balance.rebalance_inventory_drift(
+            pairs, prices, drift_threshold=self._inventory_drift_threshold,
+        )
+        if transfers:
+            total_value = sum(t.amount_usd for t in transfers)
+            total_fee = sum(t.fee_usd for t in transfers)
+            n_sells = sum(1 for t in transfers if t.transfer_type == "inventory_drift_sell")
+            n_buys = sum(1 for t in transfers if t.transfer_type == "inventory_drift_buy")
+            logger.info(
+                f"[Inventory] Periodic rebalance DONE: {n_sells} sells + {n_buys} buys, "
+                f"total=${total_value:.2f}, fees=${total_fee:.4f}"
+            )
+        else:
+            logger.info("[Inventory] Periodic rebalance DONE: no drift exceeded threshold")
 
     def _consolidate_idle_exchange_crypto(self, idle_threshold: float = 900.0) -> None:
         """Transfer crypto from idle exchanges to Bitfinex and sell at 0%.

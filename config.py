@@ -6,7 +6,7 @@ All symbols, exchange settings, and operational parameters.
 
 import os
 
-__version__ = "0.26.1-beta"
+__version__ = "0.27.0-beta"
 
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
@@ -340,7 +340,26 @@ SPREAD_PERSISTENCE_TICKS: int = 1           # Consecutive ticks spread must pers
 EVENT_DRIVEN_SELLER_PENALTY_PCT: float = 0.05  # Scoring penalty % when event-driven exchange is seller
 ONE_LEG_FAILURE_RATE: float = 0.02          # Probability of simulated one-legged failure per trade (0=disabled)
 ONE_LEG_UNWIND_SLIPPAGE_MULT: float = 1.5   # Slippage multiplier for emergency unwind trades
-MAX_POSITION_MULTIPLIER: float = 5.0        # Max accumulated crypto per symbol per buyer exchange (× trade_amount, 0=unlimited)
+MAX_POSITION_MULTIPLIER: float = 3.0        # Max accumulated crypto per symbol per buyer exchange (× trade_amount, 0=unlimited). Lowered from 5.0 in v0.27 (S20 showed 76% pos_cap skip rate at 2.0).
+
+# Price momentum filter (Feature 3 — penalize symbols trending down)
+MOMENTUM_FILTER_ENABLED: bool = True
+MOMENTUM_LOOKBACK_HOURS: float = 24.0       # Compare current price vs N hours ago
+MOMENTUM_SAMPLE_INTERVAL_MINUTES: float = 60.0  # Sample mid-price every N minutes
+MOMENTUM_MIN_FACTOR: float = 0.3            # Score multiplier floor (heavy declines)
+MOMENTUM_MAX_FACTOR: float = 1.5            # Score multiplier ceiling (heavy gains)
+
+# Periodic inventory rebalance (Feature 4 — drift correction back to 50/50)
+INVENTORY_REBALANCE_ENABLED: bool = True
+INVENTORY_REBALANCE_INTERVAL_HOURS: float = 6.0  # Rebalance every N hours
+INVENTORY_DRIFT_THRESHOLD: float = 0.3      # Trigger when actual deviates from target by >30%
+
+# Bitfinex over-target redistribution (Feature 5 — push excess BFX USDT back to active buyers)
+BITFINEX_OVER_TARGET_ENABLED: bool = True
+BITFINEX_OVER_TARGET_MULTIPLIER: float = 1.5  # Trigger when BFX USDT > reserve_target × this
+
+# Auto-expand on understaff (Feature 6 — bypass eval interval when active symbols < min)
+AUTO_EXPAND_ON_UNDERSTAFF: bool = True
 
 # Anomaly protection (configurable via settings page)
 ANOMALY_PROTECTION_ENABLED: bool = True

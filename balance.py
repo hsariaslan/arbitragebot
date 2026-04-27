@@ -1223,6 +1223,133 @@ class BalanceTracker:
             "net": gross,
         }
 
+    def rebalance_inventory_drift(
+        self,
+        symbol_exchange_pairs: list[tuple[str, str]],
+        prices: dict[str, float],
+        drift_threshold: float = 0.3,
+    ) -> list[Transfer]:
+        """Periodic inventory drift correction — Feature 4.
+
+        For each (exchange, symbol) pair:
+          - target_crypto_value = original allocated crypto USD (`_crypto_usd[ex][sym]`)
+          - actual_crypto_value = current `crypto[ex][sym] * price`
+          - If actual > target × (1 + threshold) → sell excess to USDT (internal sell)
+          - If actual < target × (1 - threshold) → buy back to target (internal buy, if USDT available)
+
+        Each correction uses the exchange's taker fee (internal trade — no withdrawal fee).
+        Returns list of Transfer records logged with type "inventory_drift_sell"/"_buy".
+        """
+        transfers: list[Transfer] = []
+        if not symbol_exchange_pairs or drift_threshold <= 0:
+            return transfers
+
+        now = time.time()
+        # Aggregate per-exchange stats for summary log
+        ex_actions: dict[str, dict] = {}
+
+        for exchange, symbol in symbol_exchange_pairs:
+            if exchange not in self._exchanges or exchange not in self.crypto:
+                continue
+            target = self._crypto_usd.get(exchange, {}).get(symbol, 0.0)
+            if target <= 0:
+                continue
+            price = prices.get(symbol, 0.0)
+            if price <= 0:
+                continue
+
+            qty = self.crypto[exchange].get(symbol, 0.0)
+            actual = qty * price
+            high_band = target * (1.0 + drift_threshold)
+            low_band = target * (1.0 - drift_threshold)
+            taker_fee = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
+
+            stats = ex_actions.setdefault(exchange, {"sell_count": 0, "buy_count": 0, "skip_count": 0, "fee_total": 0.0, "value_total": 0.0})
+
+            if actual > high_band:
+                # Sell excess crypto to bring inventory back to target
+                excess_usd = actual - target
+                sell_qty = excess_usd / price
+                if sell_qty > 0 and qty >= sell_qty:
+                    fee_usd = excess_usd * taker_fee
+                    self.crypto[exchange][symbol] -= sell_qty
+                    self.usdt[exchange] += excess_usd - fee_usd
+                    self.total_transfer_fees += fee_usd
+                    transfer = Transfer(
+                        timestamp=now,
+                        transfer_type="inventory_drift_sell",
+                        from_exchange=exchange,
+                        to_exchange=exchange,
+                        symbol=symbol,
+                        amount_usd=excess_usd,
+                        fee_usd=fee_usd,
+                    )
+                    self.transfers.append(transfer)
+                    transfers.append(transfer)
+                    stats["sell_count"] += 1
+                    stats["fee_total"] += fee_usd
+                    stats["value_total"] += excess_usd
+                    drift_pct = (actual - target) / target * 100
+                    logger.info(
+                        f"[Inventory] DRIFT_SELL {symbol} on {exchange}: "
+                        f"actual=${actual:.2f}/target=${target:.2f} (+{drift_pct:.1f}%), "
+                        f"sold ${excess_usd:.2f} (fee ${fee_usd:.4f} @ {taker_fee*100:.3f}%)"
+                    )
+                else:
+                    stats["skip_count"] += 1
+                    logger.info(
+                        f"[Inventory] DRIFT_SELL SKIPPED {symbol} on {exchange}: "
+                        f"sell_qty={sell_qty:.6f} > qty={qty:.6f}"
+                    )
+            elif actual < low_band:
+                # Buy back crypto using available USDT
+                shortage_usd = target - actual
+                available_usdt = self.available_usdt_for_trading(exchange)
+                buy_usd = min(shortage_usd, available_usdt)
+                if buy_usd > 0:
+                    fee_usd = buy_usd * taker_fee
+                    crypto_received = (buy_usd - fee_usd) / price
+                    self.usdt[exchange] -= buy_usd
+                    self.crypto[exchange][symbol] += crypto_received
+                    self.total_transfer_fees += fee_usd
+                    transfer = Transfer(
+                        timestamp=now,
+                        transfer_type="inventory_drift_buy",
+                        from_exchange=exchange,
+                        to_exchange=exchange,
+                        symbol=symbol,
+                        amount_usd=buy_usd,
+                        fee_usd=fee_usd,
+                    )
+                    self.transfers.append(transfer)
+                    transfers.append(transfer)
+                    stats["buy_count"] += 1
+                    stats["fee_total"] += fee_usd
+                    stats["value_total"] += buy_usd
+                    drift_pct = (actual - target) / target * 100
+                    logger.info(
+                        f"[Inventory] DRIFT_BUY {symbol} on {exchange}: "
+                        f"actual=${actual:.2f}/target=${target:.2f} ({drift_pct:.1f}%), "
+                        f"bought ${buy_usd:.2f} (fee ${fee_usd:.4f} @ {taker_fee*100:.3f}%) "
+                        f"[shortage=${shortage_usd:.2f}, usdt_avail=${available_usdt:.2f}]"
+                    )
+                else:
+                    stats["skip_count"] += 1
+                    logger.info(
+                        f"[Inventory] DRIFT_BUY SKIPPED {symbol} on {exchange}: "
+                        f"shortage=${shortage_usd:.2f}, usdt_avail=${available_usdt:.2f}"
+                    )
+
+        # Per-exchange summary
+        for ex, stats in ex_actions.items():
+            if stats["sell_count"] + stats["buy_count"] + stats["skip_count"] > 0:
+                logger.info(
+                    f"[Inventory] {ex} summary: sells={stats['sell_count']}, "
+                    f"buys={stats['buy_count']}, skipped={stats['skip_count']}, "
+                    f"value=${stats['value_total']:.2f}, fees=${stats['fee_total']:.4f}"
+                )
+        return transfers
+
     def execute_trade(
         self,
         buy_exchange: str,
