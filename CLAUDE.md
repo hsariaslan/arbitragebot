@@ -532,6 +532,80 @@ Limits accumulated crypto value per symbol on buyer exchanges, preventing excess
 
 All counters (`_phantom_spread_count`, `_event_driven_seller_penalties`, `_event_driven_seller_demoted`, `_one_leg_sim_count`, `_one_leg_sim_cost`, `_position_cap_skips`) are persisted via `to_state_dict()` / `from_state_dict()`. `_pending_opportunities` resets on restart (stateless — fresh detection).
 
+## Inventory Risk Controls
+
+Two features that protect the portfolio from mark-to-market losses on held crypto inventory.
+
+### Price Momentum Filter (Feature 3)
+
+Penalizes symbols whose price has trended down over the lookback window — the bot avoids accumulating crypto that's bleeding value. Applied as a multiplier on `best_net_pct` after the spread/fee/slippage computation in `optimizer._score_tick()`.
+
+- **Settings**: `momentum_filter_enabled` (bool, default true), `momentum_lookback_hours` (default 24), `momentum_sample_interval_minutes` (default 60), `momentum_min_factor` (default 0.3), `momentum_max_factor` (default 1.5)
+- **Formula**: `factor = clamp(1.0 + price_change_decimal, min_factor, max_factor)`. -10% price = 0.9× score, +20% = 1.2× score, -80% = clamped to 0.3.
+- **Storage**: per-symbol `deque[tuple[float, float]]` of (timestamp, mid_price) sampled every `sample_interval`. Pruned beyond lookback window.
+- **Mid-price**: average of `(bid + ask) / 2` across all currently-quoted exchanges per tick.
+- **Logging**: `[Momentum] SYMBOL: ref_age=Xh, price A→B (±X%), factor=X.XXX` — throttled to once per 10 min per symbol when factor deviates from 1.0 by more than 10%.
+
+### Periodic Inventory Rebalance (Feature 4)
+
+Periodically corrects inventory drift back toward the original 50/50 USDT/crypto target per (exchange, symbol). When a buyer one-sidedly accumulates crypto, this sells the excess back to USDT, locking in the value before further market moves.
+
+- **Settings**: `inventory_rebalance_enabled` (bool, default true), `inventory_rebalance_interval_hours` (default 6), `inventory_drift_threshold` (default 0.3 = 30% drift triggers correction)
+- **Trigger**: every interval, for each (exchange, symbol) in current dominant pairs, if `actual_crypto_value > target × (1+threshold)` → internal sell; if `< target × (1-threshold)` → internal buy.
+- **Target**: `_crypto_usd[exchange][symbol]` (the originally allocated crypto USD value at discovery/expansion).
+- **Cost**: internal sell/buy uses the exchange's taker fee (no withdrawal fee).
+- **Method**: `BalanceTracker.rebalance_inventory_drift(pairs, prices, drift_threshold)` returns `list[Transfer]` with type `"inventory_drift_sell"` / `"inventory_drift_buy"`.
+- **Optimizer hook**: `_run_inventory_rebalance()` invoked from main loop every interval (post-discovery only).
+- **Logging**: per-action `[Inventory] DRIFT_SELL`/`DRIFT_BUY SYMBOL on EX: actual=$X/target=$Y (±X%), sold/bought $X (fee $X @ X%)`. Per-exchange summary `[Inventory] EX summary: sells=N, buys=N, skipped=N, value=$X, fees=$X`. Cycle bookends `[Inventory] Periodic rebalance START/DONE`.
+
+### Bitfinex Over-Target Redistribution (Feature 5)
+
+Prevents capital from getting trapped on Bitfinex when only Bitfinex-dominant symbols are active. Session #20 ended with 88% of capital ($896 of $1016) sitting idle on Bitfinex with HYPE as sole active symbol, while other exchanges drained to ~$0.
+
+- **Settings**: `bitfinex_over_target_enabled` (bool, default true), `bitfinex_over_target_multiplier` (default 1.5)
+- **Trigger**: every main-loop tick (post-discovery), if `bitfinex_usdt > reserve_target × multiplier`, push the excess to active non-Bitfinex exchanges that are below `trade_amount × 3`.
+- **Target**: each receiver gets enough to reach `trade_amount × 3`. Sorted largest shortfall first.
+- **Cost**: $0 — uses Bitfinex's free withdrawals. Subject to hourly transfer budget check.
+- **Method**: `SymbolOptimizer._redistribute_bitfinex_over_target()`.
+- **Logging**: per-transfer `[Optimizer] BFX over-target redistribute: Bitfinex→EX $X (fee=$X, shortfall=$Y)`. Cycle summary `[Optimizer] BFX over-target SUMMARY: $X BFX (target=$Y, threshold=$Z), sent $W to N exchange(s)`. Skip-when-no-need log: `... but no non-Bitfinex active exchange needs USDT`.
+
+### Auto-Expand on Understaff (Feature 6)
+
+Bypasses the `evaluation_interval` cooldown when active symbol count drops below `min_active_symbols`. Prevents 5+ minute idle gaps after demotions (Session #20 had a 26-min terminal idle period after WIF demotion left HYPE alone).
+
+- **Settings**: `auto_expand_on_understaff` (bool, default true)
+- **Trigger**: every main-loop tick, if `len(active_symbols) < min_active_symbols`, call `_evaluate_rotation()` — but throttled to max 1× per minute via `_last_auto_expand_attempt`.
+- **Method**: `SymbolOptimizer._auto_expand_on_understaff_tick(now)`. Reuses standard rotation/expansion path (cost gates and stability checks still apply).
+- **Logging**: `[Optimizer] AUTO_EXPAND triggered: active=X/Y (deficit=N)`. On error: `[Optimizer] AUTO_EXPAND _evaluate_rotation failed: <error>`.
+
+## Pending Improvements (Not Yet Implemented)
+
+These were identified as Session #20 mitigations but deferred until proven necessary in production. Implement only if the corresponding metric stays bad after Features 5 and 6 deploy.
+
+### Drawdown-Aware Symbol Block Tightening
+
+**Problem (S20)**: WIFUSDT triggered 14 symbol-blocks (4-loss-streak each) over 3h, accumulating ~70 min of cumulative downtime before being demoted at 11:55. Drawdown also reached 20.57% — above the 15% threshold but below 30% emergency. Per-symbol blocking handled it, but the symbol kept re-trading for 70 minutes of repeated 4-loss bursts.
+
+**Proposed fix**: When `current_drawdown_pct > drawdown_threshold_pct`, lower the loss-streak block threshold from `symbol_loss_streak_threshold` (default 4) to **2 consecutive losses** for symbols showing exposure. Implementation in `anomaly_protection.py::record_trade()`: pass current drawdown to `AnomalyProtection`, branch on `if drawdown > threshold: required_streak = 2 else: required_streak = self._sls_threshold`.
+
+**Settings**: add `symbol_loss_streak_threshold_drawdown_active` (int, default 2).
+
+**Expected impact**: ~30-50% fewer loss-streak symbol blocks during drawdown periods. Reduces unrealized loss exposure during volatile windows by faster sidelining of misbehaving symbols. Tradeoff: may sideline temporarily-bad-but-recovering symbols.
+
+**When to implement**: only if a session shows >10 SYMBOL_BLOCK events on the same symbol while drawdown stays >15% for >30 min.
+
+### Diversification-Biased Activation
+
+**Problem (S20)**: Discovery activated only WIFUSDT (1 symbol of 60 candidates). HYPE expansion was blocked by `pair_fee_exceeds_net` for 24 minutes (10:22 → 10:46) before clearing. Combined with the auto-expand fix (Feature 6), there's still risk that no candidate passes the fee-aware activation threshold when only one cheap symbol is profitable.
+
+**Proposed fix**: Add a "diversification floor" to `_get_activation_threshold()`. When `len(active_symbols) < num_active_symbols`, multiply the activation threshold by `diversification_floor_multiplier` (default 0.7) — making it 30% easier to activate a 2nd or 3rd symbol. Encourages diversification when the bot is concentrated, even at the cost of marginal symbol quality. Pair with momentum filter (Feature 3) to avoid activating bleeders.
+
+**Settings**: add `diversification_floor_enabled` (bool, default true), `diversification_floor_multiplier` (float, default 0.7).
+
+**Expected impact**: Faster restoration of 2-3 symbol portfolios after demotions. Higher symbol diversity. Tradeoff: increased risk of marginal-quality activations that may demote within 1-2 cycles, increasing churn.
+
+**When to implement**: only if Feature 6 (Auto-Expand) doesn't restore active count within 5 min after >50% of demotions across multiple sessions.
+
 ## Anomaly Protection
 
 3-layer trading safety system that detects performance decline and takes targeted action. Per-symbol blocking for isolated issues, global pause only for systemic problems. All settings configurable via dashboard Settings, hot-applied without restart. Separate `AnomalyProtection` class in `anomaly_protection.py`.
@@ -764,11 +838,32 @@ Session state survives restarts (including deploys via `systemctl restart`). `St
 
 ### XLSX Export
 
-Click "Export XLSX" on the Rankings page. 21 sheets: Summary (with lifecycle funnel), Rolling Rankings (with Focus Tier/Dominant Buyers/Sellers/Cur Net%), Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange Rolling (with Buy%/Sell%), Exchange Historical (with Buy%/Sell%), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History (with Sim Slippage %), Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations, Fee Configuration, Transfer Configuration, Discrepancies, Hourly P&L, Daily P&L, Exchange Profit.
+Click "Export XLSX" on the Rankings page. 24 sheets: Summary (with lifecycle funnel), Rolling Rankings (with Focus Tier/Dominant Buyers/Sellers/Cur Net%), Historical Rankings (includes Times Strong/Very Strong, Strong/Very Strong Duration columns), Exchange Rolling (with Buy%/Sell%), Exchange Historical (with Buy%/Sell%), Exchange Pairs, Watchlist, Rotation History, Tier Analysis, Trade History (with Sim Slippage %), Transfer History, Transfer Summary, Trend Analysis, Buy-Sell Distribution, Configurations, Fee Configuration, Transfer Configuration, Discrepancies, Hourly P&L, Daily P&L, Exchange Profit, **Symbol×Pair Breakdown** (every (symbol, buy→sell) combo with trades/profit/avg/best/worst-net%/volume), **Top Symbols (Rolling)** (sorted by $/hr from current scoring window), **Top Symbols (Historical)** (sorted by cumulative session profit, includes activations/demotions/active-duration).
 
 ### Markdown Export
 
-Click "Copy MD" on the Rankings page to copy markdown tables to clipboard (for sharing with Claude). Sections: Session Summary, Rolling Rankings, Historical Rankings, Exchange Rankings, Recent Trades (last 50), Recent Transfers (last 20). Generated by `exportMarkdown.ts`.
+Click "Copy MD" on the Rankings page to copy markdown tables to clipboard (for sharing with Claude). Sections: Session Summary, Rolling Rankings, Historical Rankings, Exchange Rankings, **Top Symbols (Rolling — by $/hr)**, **Top Symbols (Historical — cumulative)**, **Top Symbol × Exchange-Pair Combos by Profit**, Recent Trades (last 50), Recent Transfers (last 20). Generated by `exportMarkdown.ts`.
+
+### Performance Charts (Rankings page)
+
+`PerformanceCharts.tsx` renders the per-session visualization stack on the Rankings page:
+
+- **Cumulative P&L** — running trading P&L, fees, and net P&L bucketed hourly. Uses a numeric (`type="number"` / `scale="time"`) X-axis on the raw bucket timestamp so hovering across multi-day sessions resolves to the correct point. Tick formatter shows `MM-DD HH:00` for sessions >36h, plain `HH:00` otherwise. Tooltip header shows full UTC datetime via `labelFormatter`. (Pre-v0.27 used a string `"HH:MM"` X-axis, which collapsed multi-day data onto duplicate labels and made the tooltip stick to day 1 — fixed in v0.27.0-beta.)
+- **Hourly P&L** (last 48h) and **Daily P&L** (last 7d) — bar charts from persisted `hourlyPnl` / `dailyPnl` backend buckets.
+- **Exchange Profit Contribution** — horizontal bar chart, splits each trade's profit 50/50 between buyer and seller.
+- **Top Symbols (Rolling $/hr)** — horizontal bar from `state.optimizer.rankings`, sorted by `est_hourly_profit`. Active green, inactive grey. Tooltip: avg net% + frequency.
+- **Top Symbols (Historical Cumulative $)** — horizontal bar from `state.optimizer.historical_rankings`, sorted by `est_total_profit`. Active blue, inactive purple. Tooltip: $/hr + tick count. (Side-by-side with Rolling on wide screens, stacked on mobile.)
+- **Top Symbol × Exchange-Pair Combos by Profit** — horizontal bar aggregated from every executed `Trade` by `(symbol, buy_exchange, sell_exchange)`. Labels like `WIF: BGT→MEX`. Bar colored by sell-exchange. Tooltip: trades, total profit, avg $/trade. Top 10.
+
+### Bot Logs Export (Chunked + Gzipped)
+
+Long-session log exports (multi-day ranges) deliver via streamed compressed chunks instead of a single WebSocket frame. Pre-v0.27 a 9-day export tried to ship ~250 MB JSON in one `ws.send()` call, blocking the event loop and dropping the WebSocket connection.
+
+- **A. File pre-filter**: `_filter_log_files_by_date()` parses `YYYY-MM-DD` from rotated `arbitragebot.log.YYYY-MM-DD` filenames and skips any file whose date is entirely outside the requested range. The currently-active `arbitragebot.log` is always included. Reduces I/O 80–95% for narrow ranges.
+- **B. Chunked WebSocket delivery**: `_send_chunked_export(ws, kind, entries)` splits results into `EXPORT_CHUNK_SIZE` (500) entry batches and sends N `{kind}_chunk` messages followed by a `{kind}_done` sentinel. `await asyncio.sleep(0)` between chunks keeps the event loop responsive (state broadcasts and ping-pong continue). No single frame exceeds ~50 KB compressed.
+- **C. Gzip + base64**: each chunk's batch is `gzip.compress(level=6)` then base64-encoded. Logs compress ~10× — 200 MB raw becomes ~20 MB on the wire.
+- **Frontend assembly**: `useWebSocket.ts` collects chunks in an indexed buffer (`{[chunk_index]: entries[]}`) plus a `pending: Promise<void>[]` list of in-flight `DecompressionStream('gzip')` decode promises. On `_done`, awaits all decodes, sorts by `chunk_index`, concatenates, then invokes the existing export callback unchanged — `BotLogsTab.tsx` and `AuthLogPage.tsx` need zero changes. Decompression uses the browser-native `DecompressionStream` (no new npm dep).
+- **Server log line**: `[Export] export_bot_logs: sent N entries in M chunks (~K KB compressed)`.
 
 ### Key Dashboard Files
 

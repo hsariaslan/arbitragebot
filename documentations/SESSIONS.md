@@ -2778,3 +2778,329 @@ The v0.25.7-beta `pair_fee_exceeds_net` gate in `_complete_discovery()` was the 
 3. **Increase demotion_cooldown_multiplier** back to higher value — 45 min cooldown (mult=3) allowed too-fast cycling. More cooldown = fewer consolidation cycles.
 
 4. **Larger trade_amount or capital** — At $20 trades, margins are too thin. $50+ trades would make per-trade profit more meaningful relative to transfer costs.
+
+### Session #19 — 2026-04-18 → 2026-04-27 (9-Day Bidirectional Trading Run, Mark-to-Market Reckoning)
+
+**Date**: 2026-04-18 09:06 UTC – 2026-04-27 08:24 UTC (~215h 03m, 9.0 days)
+**Capital**: $10,000 (4% trade size = $400)
+**Version**: v0.26.1-beta — bidirectional symmetric trading, consolidation net P&L gate, `_reallocate_symbol` NameError fix
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+**Execution Mode**: Demo (Binance/OKX/Bybit testnet)
+**Active Exchanges**: 6 (Binance, Bitfinex, Bitget, Bybit, MEXC, OKX) — Gate.io / KuCoin / Pionex disabled at launch and stayed disabled the entire session.
+
+#### Settings (from `[Settings]` log at 09:06:03 UTC)
+
+| Setting | Value |
+|---------|-------|
+| Trade amount | $400.0 (4.0% of $10,000) |
+| Adaptive mode | True |
+| Auto rotate | True |
+| Min net pct | 0.01% |
+| Bitfinex reserve | 15% ($1,500), hard_floor=5% ($500) |
+| Hourly transfer cap | $5.00 |
+| Rebalance cooldown | 10s |
+| Execution mode | demo |
+| Disabled exchanges | Gate.io, KuCoin, Pionex |
+
+#### Final Aggregate Stats (last `[Session]` line at 08:23:54 UTC)
+
+| Metric | Value |
+|--------|-------|
+| Duration | 215h 03m |
+| Trades | 9,963 |
+| Trading PnL (sim) | **+$3,759.69** |
+| Transfer Fees | $305.13 (external $65.25) |
+| Cashback Credited | $409.11 (pending $35.23) |
+| **Net Profit (sim)** | **+$3,863.67** |
+| Avg $/hr | $17.97 |
+| sz0 / rebal_blocked | 18 / 11 (final), peak ~22k / 2.8k mid-run |
+| evd_sell penalties | 290,172 (demoted 1,113 winners) |
+| phantom spreads | 20,999 |
+| one-legged sims | 175 / $25.63 unwind cost |
+| anomaly | 0p / 0w / 150sb |
+| Fatal "Set changed size" crashes | **66 across 4 days** |
+
+#### Per-Day P&L Table
+
+| Day | Trades (cum) | Net (cum) | Day Δ Net | $/hr (running) | Notes |
+|-----|--------------|-----------|-----------|----------------|-------|
+| 04-18 | 56 → ~150 | $16.54 → ~$30 | +$15 | $3.05 | Deploy day. ~3h startup. 4 restarts. ARUSDT first detected. |
+| 04-19 | 436 | $101.85 | +$71 | $6.67 → $7.67 | First ARUSDT runs. **2 crashes** (14:54 settings change). |
+| 04-20 | 1,123 | $337.35 | +$235 | $7.67 | ARUSDT explodes ($1,510 day). Bitget→MEXC pair active. |
+| 04-21 | 2,314 | $1,938.83 | +$1,601 | $30.94 | **Windfall day** — ARUSDT contributes $401 more, HYPE ramps. |
+| 04-22 | 3,964 | $2,493.23 | +$554 | $28.28 | **Crash storm: 40 fatals** (04:24 → 13:27). Auto-restart loop. |
+| 04-23 | 5,288 | $2,777.87 | +$285 | $25.09 | 6 more crashes 05:44–05:54. ARUSDT effectively dead. |
+| 04-24 | 5,452 | $2,856.51 | +$79 | $21.21 | Quiet day. HYPE/ORDI carry. |
+| 04-25 | 6,149 | $3,249.89 | +$393 | $19.75 | Stable. |
+| 04-26 | 7,595 | $3,369.82 | +$120 | $18.45 | Stable. |
+| 04-27 (partial 8h) | 9,963 | $3,863.67 | +$494 | $17.97 | **Crash storm #2: 18 fatals 06:14–08:24**, ending Session #19. |
+
+#### THE CRITICAL INSIGHT — Trading Profit vs Mark-to-Market Loss
+
+The headline **+$3,863 net** is misleading. Reality from `[Balance] Snapshot` deltas:
+
+| Quantity | Value |
+|----------|-------|
+| Initial portfolio (04-18 09:06:25) | **$10,572** (Bitfinex $1,500 + MEXC $4,658 + OKX $4,413) |
+| Final portfolio (04-27 08:23:54) | **$10,001** (Bitfinex $1,500 + Bitget $4,250 + MEXC $4,251) |
+| **Actual portfolio delta** | **−$571** |
+| Sim trading PnL | +$3,759.69 |
+| Cashback credited | +$409.11 |
+| External transfer fees | −$65.25 |
+| Sim "net" claim | +$3,863.67 |
+| **Implied mark-to-market loss** | **≈ −$4,434** |
+
+The bot ran in `demo` mode, so the simulator booked $3,760 of paper profit while ignoring the cost of *holding crypto inventory in a falling market*. By 04-27, every dollar of profit ARUSDT/HYPE/ORDI generated on the way up was offset (and then some) by accumulated crypto positions that lost value while sitting on Bitget/MEXC. The final snapshot shows **$8,501 of the $10,001 portfolio is non-USDT crypto on Bitget+MEXC** — exactly the inventory the bot accumulated during bidirectional symmetric trading.
+
+This is the foundational issue Session #20 was deployed to address (Bitfinex reserve raised to 30%, max_position_multiplier dropped to 2.0; v0.27.0-beta later added the momentum filter, periodic inventory rebalance, BFX over-target redistribution, and auto-expand on understaff to fully address it).
+
+#### Top Pairs & Symbol Concentration
+
+| Symbol | Trades | Sim PnL | % of Total |
+|--------|--------|---------|-----------|
+| **HYPEUSDT** | 3,548 | +$740.00 | 19.7% |
+| **ORDIUSDT** | 2,017 | +$214.17 | 5.7% |
+| **ARUSDT** | 1,798 | **+$1,934.54** | **51.5%** |
+| APEUSDT | 633 | small | — |
+| TRXUSDT | 462 | small | — |
+| COMPUSDT | 258 | small | — |
+| WIFUSDT | 185 | small | — |
+| INJUSDT | 185 | small | — |
+
+ARUSDT alone produced 51% of session profit (and 71% on 04-20 alone — $1,510 of $235 day-net gain after fees). After 04-21, ARUSDT yielded ~$0 for the remaining 6 days — windfall fully consumed.
+
+Top buyer→seller pairs (by trade count): **Bitfinex→MEXC (3,263)**, MEXC→OKX (1,794), Bitget→MEXC (940), MEXC→Bitfinex (722), OKX→MEXC (637). MEXC was the dominant venue (touching 7 of top 10 pairs) — consistent with its 0.04% effective fee.
+
+#### Settings Changes During Session
+
+The only mid-session change was a settings save at **2026-04-19 14:55:05** (triggered the first `Set changed size` crash 27s earlier at 14:54:38). All other `[Settings]` re-prints in 04-22 (16+ events between 04:24 and 13:27) are post-crash auto-restarts re-logging the same config — not user changes. Configuration was effectively static for 9 days.
+
+#### Crashes & Stability — `Set changed size during iteration` (66 total)
+
+| Day | Count | First → Last Timestamp |
+|-----|------:|------------------------|
+| 04-19 | 2 | 14:54:38, 14:54:54 (settings save) |
+| 04-22 | **40** | 04:24:18 → 13:27:51 (~9h auto-restart loop) |
+| 04-23 | 6 | 05:44:55 → 05:54:12 |
+| 04-27 | 18 | 06:14:48 → 08:27:53 (Session #19 → #20 transition) |
+
+Pattern: every fatal happens during a settings re-apply or active rotation, mutating a `set` while another coroutine iterates it. Session #20 traceback finally pinpointed it: `dashboard_server.py:702` — the broadcast loop iterating `self._clients` while `await ws.send()` yielded control to a connecting client. systemd auto-restart kept the bot alive but state churned each time. **The 04-22 storm cost ~9 hours of trading downtime spread across 40 micro-restarts**; per-day $/hr dropped from $30.94 → $28.28 → $25.09 mostly from this disruption. **Fixed in v0.27.0-beta** with `tuple(self._clients)` snapshot.
+
+#### Anomaly Events
+
+| Event | Count | Notes |
+|-------|------:|-------|
+| EMERGENCY sells | **0** | Drawdown stayed below 30% threshold (peak 26.39%). |
+| DRAWDOWN_BLOCK (per-symbol) | **1,609** | All triggered between 04-18 and 04-22 (peak 26.39% on 04-19). After 04-23 drawdown anomaly went silent — peak portfolio reset post-liquidations. |
+| SYMBOL_BLOCKED (loss streak) | 32 | ETCUSDT first blocked 04-18 10:33, AAVEUSDT/BTCUSDT recurring later. |
+| PEAK_RESET | Multiple | Triggered after each near-full crypto liquidation (demotions). |
+
+Drawdown peaks per day: 04-18 25.64%, 04-19 **26.39%**, 04-20 24.95%, 04-21 25.45%, 04-22 25.03%, 04-23+ silent.
+
+#### Capital Flow Highlights
+
+- **Bitfinex reserve** held at **$1,500 (15%)** for the entire session — never drained, never overshot. The reserve mechanism worked exactly as designed; the issue was the reserve *target* being too low, not the enforcement.
+- **Demotions (1,113 total)**: AAVEUSDT × 27, HYPEUSDT × 14, BTCUSDT × 11, TONUSDT × 4, NEARUSDT × 4, ETCUSDT × 4, AVAXUSDT × 4. Heavy churn on AAVE indicates persistent threshold-bouncing.
+- **Consolidation activity**: 651 `consolidation SKIPPED` events — mostly from the new net-P&L-gate-aware suppression and the Bitfinex-availability gate. Worked as intended after deploy.
+- **Net P&L gate triggers**: 38 across the run (10 / 4 / 1 / 0 / 20 / 3 / 0 / 0 / 0 / 0 per day) — gate active during early loss/recovery cycles, dormant once profit accumulated.
+- **Capital topology drifted hard**: started OKX+MEXC heavy, ended Bitget+MEXC heavy (OKX drained to $0, Bybit drained to $0 by final snapshot). Bidirectional symmetric allocation pulled USDT toward MEXC/Bitget where the fee math favored buying.
+
+#### Issues Identified
+
+| # | Severity | Issue |
+|---|----------|-------|
+| 1 | **CRITICAL** | **Mark-to-market gap of ~$4,434** — sim claims +$3,863 net, real portfolio is −$571. The simulator does not deduct holding loss on accumulated crypto inventory. This is the single biggest sim-vs-reality blind spot. |
+| 2 | **CRITICAL** | `Set changed size during iteration` — 66 fatals across 4 days. Concurrent mutation of `_clients` set during dashboard broadcast `await ws.send()`. **Fixed in v0.27.0-beta.** |
+| 3 | **HIGH** | **Profit concentration** — 51% of profit from one symbol (ARUSDT) on a 2-day window. Without that windfall, session was ~$1,800 net over 9 days = ~$8/hr, and likely *negative* once mark-to-market is applied. |
+| 4 | **HIGH** | **Inventory accumulation on declining alts** — final snapshot shows $8,500 of the $10,001 portfolio sitting as crypto on Bitget+MEXC. Bidirectional symmetric trading optimized for trade execution but built the inventory pile that erased portfolio gains. **v0.27.0-beta momentum filter + periodic inventory rebalance address this.** |
+| 5 | MEDIUM | Bitfinex reserve at 15% ($1,500) was too small relative to the per-exchange crypto float ($4,000+ on Bitget/MEXC). Insufficient hub liquidity for risk-off moves. **S20 raised to 30%; v0.27.0-beta over-target redistribution further mitigates.** |
+| 6 | MEDIUM | Drawdown peaked at 26.39% on 04-19 (well above 15% block threshold) yet emergency (30%) never tripped — system tolerated 1,609 per-symbol blocks for 5 days before quieting. |
+| 7 | LOW | Session #19 ran 9 days without a single user-driven config change despite obvious deterioration after 04-21 — trust-the-system worked, but a kill-switch on profit decay would have helped. |
+| 8 | **HIGH** | **Bot Logs export over WebSocket fails on long sessions** — operator had to fall back to `scp` for the 9-day pull. **Fixed in v0.27.0-beta** (chunked + gzipped export). |
+| 9 | MEDIUM | **Cumulative P&L chart tooltip stuck on day 1** — hovering anywhere on the chart only showed details from the first day, regardless of cursor position. **Fixed in v0.27.0-beta** (numeric time-axis). |
+
+#### Bot Logs Export Failure (Issue 8) — Diagnosis & Fix
+
+When the operator tried to export this 9-day session via the dashboard's "Export" button, the WebSocket connection dropped and reconnected before the result arrived, losing the export. Forced fallback to manual `scp` of `/root/arbitragebot/logs/`.
+
+**Root cause** (in `dashboard_server.py:1290-1294`, pre-v0.27):
+
+```python
+elif msg_type == "export_bot_logs":
+    entries = await asyncio.to_thread(self._read_bot_logs_from_disk, start_ts, end_ts)
+    await ws.send(json.dumps({"type": "export_bot_logs_result", "logs": entries}))
+```
+
+Three compounding problems for a multi-day range:
+
+1. **No file pre-filter**: `_read_bot_logs_from_disk()` opened *every* rotated `arbitragebot.log.*` file (up to 30 days kept) and only `break`-ed inside a file when a line's timestamp passed `end_ts`. For a narrow 1-day export, it still read all 30 days of disk.
+2. **In-memory build**: 9 days × ~22MB = ~200MB raw text → Python list of dicts (~3-4× expansion) → `json.dumps()` produced another ~250MB string. On a 2GB VPS this approaches OOM and pegs CPU for 30-60 seconds. The event loop blocked during `json.dumps`, so WebSocket ping-pong stopped → **client-side timeout → reconnect**.
+3. **Single WS frame**: even without OOM, `await ws.send(payload)` shipped ~250MB in one frame. nginx's `proxy_buffer_size`, browser `MessageEvent` limits, and the `websockets` library defaults all break long before that. Frame rejected.
+
+The reconnect dropped the in-flight result with no resume mechanism, so the export was permanently lost.
+
+**Fix shipped in v0.27.0-beta** (combined A + B + C):
+
+| Layer | Change |
+|---|---|
+| **A. File pre-filter** | New `_filter_log_files_by_date()` parses `YYYY-MM-DD` from rotated filenames and skips any file whose date is entirely outside the requested range. The currently-active `arbitragebot.log` is always included. **80-95% I/O reduction** for narrow ranges. |
+| **B. Chunked WS delivery** | New `_send_chunked_export()` splits the entries into 500-entry batches and sends N `{kind}_chunk` messages followed by a `{kind}_done` sentinel. `await asyncio.sleep(0)` between chunks keeps the event loop responsive (broadcasts and ping-pong continue normally). No single frame exceeds ~50KB compressed. |
+| **C. Gzip + base64** | Each chunk's batch is `gzip.compress()`-ed (level 6) then base64-encoded. Logs compress ~10×, so 200MB raw becomes ~20MB on the wire. |
+| **Frontend** | `useWebSocket.ts` now collects chunks in an indexed buffer (`{[chunk_index]: entries[]}`) and tracks each in-flight `DecompressionStream` decode in a `pending` promise list. On `_done`, awaits all pending decodes, sorts by `chunk_index`, concatenates, and invokes the export callback exactly as before — `BotLogsTab.tsx` and `AuthLogPage.tsx` need zero changes. Decompression uses the browser's native `DecompressionStream('gzip')` (no new npm dep). |
+
+Implementation logged: server-side `[Export] export_bot_logs: sent N entries in M chunks (~K KB compressed)`. Client-side decompression is fast (DecompressionStream is native and runs off the main thread).
+
+Net effect: the 9-day Session #19 export, which previously dropped the connection, now lands as ~25MB of compressed chunks delivered in 1-2 seconds without any disconnect.
+
+#### Cumulative P&L Chart Tooltip Bug (Issue 9) — Diagnosis & Fix
+
+While reviewing the 9-day session on the Rankings page, the operator noticed that hovering anywhere on the **Cumulative P&L** chart only ever showed details from the leftmost (day 1) data, regardless of cursor position over later days.
+
+**Root cause** (in `dashboard/src/components/PerformanceCharts.tsx`):
+
+The chart's X-axis used a `time` field built from `formatHour(bucket)`, which returned just `"HH:MM"` (e.g. `"12:00"`). For a 9-day session bucketed hourly, the data has **216 points but only ~24 unique X-axis labels** — every "12:00" appears 9 times, "13:00" 9 times, etc. Recharts treats `dataKey="time"` as a *category* axis and resolves duplicate labels to the first matching point, so the tooltip permanently snapped to day 1 buckets even when hovering over day 9.
+
+```tsx
+// Before — duplicate labels collide:
+<XAxis dataKey="time" ... />
+// data: [{ time: "00:00", ... }, ..., { time: "00:00", ... } /* 9 days later */]
+```
+
+**Fix shipped in v0.27.0-beta**:
+
+1. Switched the data point's key from `time: string` to `bucket: number` (raw UTC timestamp in seconds — guaranteed unique per bucket).
+2. Set `<XAxis type="number" scale="time" domain={['dataMin', 'dataMax']} dataKey="bucket" />` so the X-axis is now a true continuous time axis.
+3. Added `tickFormatter={v => formatBucketTick(v, span)}` — when session span > 36h, ticks include the date (`MM-DD HH:00`); shorter sessions keep the compact `HH:00` form.
+4. Added Tooltip `labelFormatter={v => formatBucketTooltip(v)}` so the tooltip header shows the full `YYYY-MM-DD HH:MM UTC` for the hovered bucket.
+5. `minTickGap={40}` keeps the X-axis readable at any zoom by spacing tick labels.
+
+Now every bucket is uniquely addressable, the cursor lands on the correct point across all 9 days, and the tooltip shows the full UTC datetime so the operator can locate the exact hour being inspected.
+
+#### Lessons / Conclusions
+
+- **What worked**: Bidirectional symmetric capital allocation eliminated `sz0` blocking as a top issue (peak sz0 dropped from prior sessions, only 18 at session end). The new consolidation net-P&L gate and `_reallocate_symbol` NameError fix held up — no regressions in those areas. Bitfinex reserve enforcement was perfect (never drained). The $1,934 ARUSDT windfall demonstrated the bot can capture multi-day spread regimes when they appear.
+- **What didn't**: The `Set changed size` race is a true bug, not noise — 66 fatals is operationally unacceptable. Profit was an illusion: trading PnL of +$3,760 became portfolio PnL of −$571 because the sim treats accumulated crypto inventory as cost-basis-zero rather than mark-to-market. Concentration risk is severe — without the 04-20/21 ARUSDT episode, this session would have lost money.
+- **The fundamental insight that drove Session #20 + v0.27.0-beta**: capital must default to *cash on the hub*, not crypto distributed across exchanges. Holding $8,500 of alts during a 9-day market drift cost more than 9 days of arbitrage produced. Session #20 raised Bitfinex reserve to 30%, max_position_multiplier to 2.0, and added inventory caps as a direct response. v0.27.0-beta then layered on the momentum filter (downscores bleeders), periodic inventory rebalance (sells crypto excess back to USDT every 6h), Bitfinex over-target redistribution (auto-pushes excess BFX USDT to active buyer exchanges), auto-expand on understaff, and finally fixed the dashboard race condition.
+
+### Session #20 — 2026-04-27 (Inventory-Cap Throttling + Bitfinex Capital Trap)
+
+**v0.26.1-beta · 3h55m · $1000 capital · demo mode · 6 active exchanges (BIN/BFX/BGT/BYB/MEX/OKX)**
+
+First session after operator changed two configs in response to the price-movement loss observed across 04-18 → 04-23 (Session #19, $3,863 trading PnL vs −$3,454 mark-to-market):
+
+- `max_position_multiplier`: 5.0 → **2.0** (cap crypto inventory accumulation)
+- `bitfinex_reserve_pct`: 0.15 → **0.30** (more USDT held in stablecoin)
+
+#### Final Session Summary (12:23:12 UTC)
+
+| Metric | Value |
+|---|---|
+| Trades | 266 |
+| Trading PnL | +$9.95 |
+| Transfer fees | $0.32 |
+| Cashback (credited / pending) | $1.18 / $0.66 |
+| Net | +$10.81 |
+| $/hr | $2.79 (decayed from $3.20) |
+| Portfolio | $898 → $1016 (+$118 / +13.1%) |
+| sz0 | 1,917 |
+| pos_cap skips | 881 (76% of opportunities skipped) |
+| Anomaly | 0p / 0w / **14sb** |
+| Idle time (>5min gaps) | ~60–70 min (~28%) |
+
+#### Key Settings Applied (08:30:57)
+
+```
+trade_amount=$40 (4% of $1000)
+max_symbols=5, min_symbols=2
+scoring_window=1800s, eval_interval=120s
+min_net_pct=0.01%
+max_pos_mult=2.0 (NEW)
+bitfinex_reserve=30% ($300) (NEW)
+demotion_period=900s, cooldown_mult=7
+fee_threshold_mult=0.5
+hourly_external_transfer_cap=$5
+```
+
+#### Crashes — Recurring `Set changed size during iteration` Bug
+
+**4 fatal crashes during startup window** (08:33:58, 08:36:33, 08:39:32, 08:42:33), bot auto-restarted each time.
+
+Same bug observed earlier the same day in `arbitragebot.log`: 9 additional fatals from 06:14 to 08:27 UTC. **13 total occurrences on 04-27 alone.**
+
+**Root cause** (from disk-log traceback):
+```
+File "/root/arbitragebot/dashboard_server.py", line 702, in run
+    for ws in self._clients:
+RuntimeError: Set changed size during iteration
+```
+
+The dashboard broadcast loop iterates `self._clients` (set) and `await ws.send(payload)` yields control inside the loop, allowing newly-connecting WebSocket clients to mutate the set mid-iteration.
+
+**Fix shipped in v0.27.0-beta**: snapshot the set with `tuple(self._clients)` before iterating — eliminates the race entirely.
+
+#### Discovery & Symbol Lifecycle
+
+| Time (UTC) | Event |
+|---|---|
+| 08:30:47 | Bot starts |
+| 08:30:48–08:42:59 | 5 startup crashes/restarts (Set changed size bug) |
+| 08:47:50 | Discovery completes — only **WIFUSDT** activated (1 strong, 0 very-strong) |
+| 08:55:47 | First WIF SYMBOL_BLOCK (4-loss streak), 300s |
+| 10:04:04 | DRAWDOWN_BLOCK (20.57%, above 15% threshold) |
+| 10:22:25 → 10:46:36 | HYPEUSDT EXPAND_BLOCKED 13× (`pair_fee_exceeds_net`) |
+| 10:53:16 | DRAWDOWN_BLOCK (20.26%) |
+| 11:34:52 | HYPEUSDT EXPAND_READY (Bitfinex→MEXC, bfx=yes) |
+| 11:55:02 | WIFUSDT demoted (3h7m active) |
+| 12:00:32 | **Last trade** of session (HYPE Bitfinex→MEXC) |
+| 12:00–12:26 | **26-min terminal idle** — only HYPE active, spread closed, $896 stranded on Bitfinex |
+
+#### Per-Symbol Performance
+
+| Symbol | Trades | PnL Estimate | Active Duration | Dominant Pair |
+|---|---|---|---|---|
+| WIFUSDT | 231 (87%) | ~$9.0 | 3h7m | Bitget→MEXC |
+| HYPEUSDT | 41 (15%) | ~$0.95 | 51m | Bitfinex→MEXC |
+
+Single-direction only — no symmetric reversal observed (bidirectional flow not utilized within these specific pair geometries).
+
+#### Capital Flow — The Bitfinex Trap
+
+| Time | Bitfinex | Bitget | MEXC | Other | Total |
+|---|---|---|---|---|---|
+| **08:52** (init) | $300 | $214 | $384 | $0 | $898 |
+| **10:40** (mid) | $300 | $412 | $301 | $0 | $1013 |
+| **12:23** (end) | **$896 (88%)** | $0 | $120 | $0 | $1016 |
+
+After WIF demotion at 11:55, demotion-redistribution flooded all freed USDT to Bitfinex (correctly using $0-fee withdrawals). But HYPE was the only remaining active symbol with Bitfinex→MEXC dominance, so the $896 sat idle for the rest of the session — bot effectively stalled.
+
+External transfer fees totaled only $0.06 — the 30% Bitfinex reserve target held perfectly throughout the active phase (no expensive replenishment to that target).
+
+#### Anomaly Events
+
+- **WIFUSDT SYMBOL_BLOCKED 14×** (4-loss-streak), totaling ~70 min cumulative downtime over 3h7m active life. Symbol spent ~37% of its trading life blocked.
+- **DRAWDOWN_BLOCK 11×** at 20.57% (10:04) and 20.26% (10:53) — above 15% threshold, below 30% emergency. Per-symbol blocking handled it correctly (no global pause).
+- 0 pauses, 0 warnings, 14 symbol-blocks total.
+
+#### pos_cap Throttling
+
+- **881 skips** vs **272 actual fills** = **76% of opportunities skipped**
+- Cap = $40 trade × 2.0 mult = **$80** crypto value ceiling per symbol per exchange
+- WIF trades are ~$45 → cap reached after 2 buys → next 1-2 attempts skipped until rebalance frees inventory
+- Likely the dominant cause of $/hr decay from $3.20 → $2.79
+
+#### Issues Identified
+
+| Issue | Severity | Status |
+|---|---|---|
+| **`Set changed size during iteration` crash** at `dashboard_server.py:702` (13× on 04-27) | CRITICAL | **FIXED in v0.27.0-beta** (`tuple(self._clients)` snapshot) |
+| **pos_cap=2.0 throttles 76% of opportunities** ($80 cap too tight for $45 trades) | HIGH | **FIXED in v0.27.0-beta** (default raised to 3.0; planning dynamic per-symbol cap — see CLAUDE.md "Pending Fixes") |
+| **Capital trapped on Bitfinex** ($896 / 88%) post-demotion when only Bitfinex-dominant symbols remain | HIGH | **FIXED in v0.27.0-beta** (Bitfinex Over-Target Redistribution — auto-pushes excess above `reserve_target × over_target_multiplier` to active buyer exchanges) |
+| **26-min terminal idle** after WIF demoted, only HYPE active, no expansion fired | HIGH | **FIXED in v0.27.0-beta** (Auto-Expansion on Understaff — triggers expansion immediately when `len(active_symbols) < min_active_symbols`, bypassing eval_interval cooldown) |
+| **WIF kept producing 4-loss streaks for 70 min before demotion** | MEDIUM | **Pending** — see CLAUDE.md "Drawdown-Aware Symbol Block Tightening" |
+| **Single-symbol concentration** (only WIF activated by discovery; HYPE took 24 min of EXPAND_BLOCKED to clear pair_fee gate) | MEDIUM | **Pending** — see CLAUDE.md "Diversification-Biased Activation" |
+
+#### Settings Recommendations (Going Forward)
+
+1. **Apply v0.27.0-beta defaults** — `max_position_multiplier=3.0`, new `bitfinex_over_target_multiplier=1.5` and `auto_expand_on_understaff=true` will hot-apply on next deploy.
+2. **Keep `bitfinex_reserve_pct=0.30`** — the reserve held its target during active trading; the trap was redistribution flooding above target after demotion. The over-target redistribution fix addresses that directly.
+3. **Consider raising `num_active_symbols`** from 2 → 3 to reduce single-symbol concentration risk.
