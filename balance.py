@@ -1193,6 +1193,59 @@ class BalanceTracker:
         )
         return transfer
 
+    def emergency_consolidate_to_bitfinex(self) -> list[Transfer]:
+        """Emergency consolidation — moves all non-Bitfinex USDT to Bitfinex.
+
+        Walks every exchange except Bitfinex sorted by withdrawal fee
+        (cheapest first), transferring the full USDT balance regardless of
+        cooldowns or hourly budget caps. Used after `_emergency_sell_all`
+        when anomaly protection has paused trading and operator needs the
+        capital safe on the Bitfinex hub.
+
+        Returns the list of Transfer records executed (also appended to
+        self.transfers and counted in total_external_transfer_fees).
+        """
+        if "Bitfinex" not in self._exchanges:
+            return []
+
+        transfers: list[Transfer] = []
+        now = time.time()
+        # Sort non-Bitfinex exchanges by withdrawal fee (cheapest first)
+        sources = sorted(
+            (ex for ex in self._exchanges if ex != "Bitfinex"),
+            key=lambda ex: self._get_withdrawal_fee(ex),
+        )
+        for ex in sources:
+            usdt = self.usdt.get(ex, 0.0)
+            # Skip dust (smaller than withdrawal fee or $1, whichever is larger)
+            fee = self._get_withdrawal_fee(ex, usdt)
+            min_amount = max(1.0, fee * 1.5)
+            if usdt < min_amount:
+                continue
+            # Move everything (fee paid from source side — net arrives on Bitfinex)
+            self.usdt[ex] -= usdt
+            net = max(0.0, usdt - fee)
+            self.usdt["Bitfinex"] += net
+            self.total_transfer_fees += fee
+            self.total_external_transfer_fees += fee
+            self._record_external_fee(fee)
+            transfer = Transfer(
+                timestamp=now,
+                transfer_type="emergency_consolidate",
+                from_exchange=ex,
+                to_exchange="Bitfinex",
+                symbol="USDT",
+                amount_usd=usdt,
+                fee_usd=fee,
+            )
+            self.transfers.append(transfer)
+            transfers.append(transfer)
+            logger.warning(
+                f"[Anomaly] EMERGENCY_CONSOLIDATE {ex}→Bitfinex: "
+                f"${usdt:.2f} (fee=${fee:.4f}, net=${net:.2f})"
+            )
+        return transfers
+
     def force_sell_crypto_via_bitfinex(
         self,
         source_exchange: str,

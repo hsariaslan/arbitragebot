@@ -89,6 +89,9 @@ class AnomalyProtection:
         self._trade_size_multiplier: float = 1.0
         self._emergency_triggered: bool = False
         self._emergency_sell_pending: bool = False
+        # Hourly emergency-email reminder (re-sent until operator manually resumes)
+        self._emergency_email_last_sent: float = 0.0
+        self._emergency_email_resend_interval: float = 3600.0  # 1h
 
         # Recent trades buffer for diagnostic snapshots
         self._recent_trades: deque[dict] = deque(maxlen=50)
@@ -125,6 +128,26 @@ class AnomalyProtection:
     def clear_emergency_sell(self) -> None:
         """Called by monitor after executing the emergency sell."""
         self._emergency_sell_pending = False
+
+    def should_resend_emergency_email(self, now: float) -> bool:
+        """True when the hourly reminder is due.
+
+        Conditions: emergency state is active, bot is still paused (operator
+        has not manually resumed), and at least the resend interval has
+        elapsed since the last email. Manual resume clears `_emergency_triggered`
+        which permanently stops the reminder until the next emergency.
+        """
+        if not self._enabled:
+            return False
+        if not self._emergency_triggered or not self._paused:
+            return False
+        if self._emergency_email_last_sent <= 0:
+            return False  # initial email hasn't been recorded yet
+        return (now - self._emergency_email_last_sent) >= self._emergency_email_resend_interval
+
+    def mark_emergency_email_sent(self, now: float) -> None:
+        """Record timestamp of an emergency email (initial or reminder)."""
+        self._emergency_email_last_sent = now
 
     def reset_peak_if_no_crypto(self, portfolio_value: float) -> None:
         """Reset peak portfolio value when portfolio is 100% USDT.
@@ -263,6 +286,8 @@ class AnomalyProtection:
         self._trade_size_multiplier = 1.0
         self._emergency_triggered = False
         self._emergency_sell_pending = False
+        # Stop hourly reminder cycle
+        self._emergency_email_last_sent = 0.0
 
     # ── Trigger Checks ──────────────────────────────────────────
 
@@ -605,6 +630,7 @@ class AnomalyProtection:
             "_total_emergency_sells": self._total_emergency_sells,
             "_total_symbol_blocks": self._total_symbol_blocks,
             "_emergency_triggered": self._emergency_triggered,
+            "_emergency_email_last_sent": self._emergency_email_last_sent,
             "_warning_active": self._warning_active,
             "_trade_size_multiplier": self._trade_size_multiplier,
             "_rolling_pnl": list(self._rolling_pnl),
@@ -634,6 +660,7 @@ class AnomalyProtection:
         self._total_emergency_sells = data.get("_total_emergency_sells", 0)
         self._total_symbol_blocks = data.get("_total_symbol_blocks", 0)
         self._emergency_triggered = data.get("_emergency_triggered", False)
+        self._emergency_email_last_sent = data.get("_emergency_email_last_sent", 0.0)
         self._warning_active = data.get("_warning_active", False)
         self._trade_size_multiplier = data.get("_trade_size_multiplier", 1.0)
 

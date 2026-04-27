@@ -370,7 +370,32 @@ class ArbitrageMonitor:
             f"total=${total_sold:.2f}"
         )
 
-        # Send emergency email notification
+        # Emergency consolidation: move all USDT to Bitfinex hub for safety.
+        # Cheapest withdrawal route per exchange (function sorts by fee).
+        consolidation_transfers = self._balance.emergency_consolidate_to_bitfinex()
+        consolidation_summary = {
+            "transfers": [
+                {
+                    "from_exchange": t.from_exchange,
+                    "amount_usd": t.amount_usd,
+                    "fee_usd": t.fee_usd,
+                }
+                for t in consolidation_transfers
+            ],
+            "total_moved": sum(t.amount_usd for t in consolidation_transfers),
+            "total_fees": sum(t.fee_usd for t in consolidation_transfers),
+        }
+        if consolidation_transfers:
+            logger.warning(
+                f"[Anomaly] EMERGENCY_CONSOLIDATE_COMPLETE: "
+                f"{len(consolidation_transfers)} transfers, "
+                f"${consolidation_summary['total_moved']:.2f} moved to Bitfinex, "
+                f"${consolidation_summary['total_fees']:.4f} fees"
+            )
+
+        # Send emergency email notification (includes consolidation summary
+        # and manual-resume instructions). Mark email-sent timestamp so the
+        # hourly reminder cycle starts from now.
         from email_notifier import notify_emergency
 
         usdt_breakdown = {
@@ -388,9 +413,11 @@ class ArbitrageMonitor:
                 total_sold=total_sold,
                 portfolio_breakdown=usdt_breakdown,
                 liquidated_positions=liquidated,
+                consolidation_summary=consolidation_summary,
             ),
             name="emergency_email",
         )
+        self._anomaly.mark_emergency_email_sent(time.time())
 
     def get_net_profit_stats(self) -> dict:
         """Compute rolling hourly net profit stats."""
@@ -1289,6 +1316,34 @@ class ArbitrageMonitor:
             prices = self._get_current_prices()
             portfolio = self._balance.get_portfolio_value(prices)
             self._anomaly.reset_peak_if_no_crypto(portfolio)
+
+        # Hourly emergency-email reminder while operator hasn't manually resumed.
+        # `should_resend_emergency_email()` returns False once `_emergency_triggered`
+        # is cleared by manual_resume(), naturally stopping the cycle.
+        if self._anomaly.should_resend_emergency_email(now) and self._balance:
+            from email_notifier import notify_emergency_reminder
+            usdt_breakdown = {
+                ex: self._balance.usdt.get(ex, 0.0)
+                for ex in self._balance._exchanges
+                if self._balance.usdt.get(ex, 0.0) > 0
+            }
+            paused_for = now - self._anomaly._pause_timestamp if self._anomaly._pause_timestamp else 0.0
+            _safe_task(
+                notify_emergency_reminder(
+                    reason=self._anomaly._pause_reason,
+                    drawdown_pct=self._anomaly._current_drawdown_pct,
+                    peak_value=self._anomaly._peak_portfolio_value,
+                    current_value=sum(usdt_breakdown.values()),
+                    paused_for_seconds=paused_for,
+                    portfolio_breakdown=usdt_breakdown,
+                ),
+                name="emergency_email_reminder",
+            )
+            self._anomaly.mark_emergency_email_sent(now)
+            logger.warning(
+                f"[Anomaly] EMERGENCY_EMAIL_REMINDER sent "
+                f"(paused {paused_for/3600:.1f}h, drawdown {self._anomaly._current_drawdown_pct:.1f}%)"
+            )
 
         # Initialize balance tracker as soon as prices are available
         if self._balance and not self._balance.initialized:
