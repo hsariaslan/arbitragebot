@@ -8,6 +8,8 @@ Also handles incoming messages from the dashboard for settings updates.
 """
 
 import asyncio
+import base64
+import gzip
 import json
 import logging
 import re
@@ -16,6 +18,8 @@ import time
 import urllib.parse
 import urllib.request
 from collections import deque
+from datetime import datetime as _dt
+from datetime import timezone as _tz
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -699,7 +703,10 @@ class DashboardServer:
                     state = self._build_state()
                     payload = json.dumps(state)
                     dead: set[Any] = set()
-                    for ws in self._clients:
+                    # Snapshot to a tuple — `await ws.send()` yields control,
+                    # and new clients connecting during the await would mutate
+                    # the underlying set, raising "Set changed size during iteration".
+                    for ws in tuple(self._clients):
                         try:
                             await ws.send(payload)
                         except Exception:
@@ -972,6 +979,21 @@ class DashboardServer:
         "one_leg_failure_rate": (float, 0.0, 0.20),
         "one_leg_unwind_slippage_mult": (float, 1.0, 5.0),
         "max_position_multiplier": (float, 0, 50),
+        # Price momentum filter (Feature 3)
+        "momentum_filter_enabled": (bool, None, None),
+        "momentum_lookback_hours": (float, 1.0, 168.0),
+        "momentum_sample_interval_minutes": (float, 1.0, 360.0),
+        "momentum_min_factor": (float, 0.0, 1.0),
+        "momentum_max_factor": (float, 1.0, 5.0),
+        # Periodic inventory rebalance (Feature 4)
+        "inventory_rebalance_enabled": (bool, None, None),
+        "inventory_rebalance_interval_hours": (float, 0.5, 168.0),
+        "inventory_drift_threshold": (float, 0.05, 2.0),
+        # Bitfinex over-target redistribution (Feature 5)
+        "bitfinex_over_target_enabled": (bool, None, None),
+        "bitfinex_over_target_multiplier": (float, 1.0, 5.0),
+        # Auto-expand on understaff (Feature 6)
+        "auto_expand_on_understaff": (bool, None, None),
         # Anomaly protection
         "anomaly_protection_enabled": (bool, None, None),
         "circuit_breaker_window": (int, 60, 7200),
@@ -1273,13 +1295,13 @@ class DashboardServer:
             start_ts = msg.get("start", 0)
             end_ts = msg.get("end", time.time())
             entries = await asyncio.to_thread(self._read_bot_logs_from_disk, start_ts, end_ts)
-            await ws.send(json.dumps({"type": "export_bot_logs_result", "logs": entries}))
+            await self._send_chunked_export(ws, "export_bot_logs", entries)
 
         elif msg_type == "export_auth_logs":
             start_ts = msg.get("start", 0)
             end_ts = msg.get("end", time.time())
             entries = await asyncio.to_thread(self._read_auth_logs_from_disk, start_ts, end_ts)
-            await ws.send(json.dumps({"type": "export_auth_logs_result", "logs": entries}))
+            await self._send_chunked_export(ws, "export_auth_logs", entries)
 
         elif msg_type == "anomaly_resume":
             self._monitor._anomaly.manual_resume()
@@ -1615,18 +1637,54 @@ class DashboardServer:
         r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] (.*)$"
     )
 
-    def _read_bot_logs_from_disk(self, start_ts: float, end_ts: float) -> list[dict]:
-        """Read bot log entries from disk log files within time range."""
-        from datetime import datetime as _dt
-        from datetime import timezone as _tz
+    @staticmethod
+    def _filter_log_files_by_date(
+        files: list[Path], pattern: re.Pattern[str], start_ts: float, end_ts: float, current_file: Path | None
+    ) -> list[Path]:
+        """Pre-filter rotated log files by parsing YYYY-MM-DD from filename.
 
+        Skips files whose entire date is outside [start_ts, end_ts]. The
+        currently-active log file (no date suffix) is always included.
+        Reduces I/O by 80-95% for narrow ranges across 30 days of rotation.
+        """
+        start_day = _dt.fromtimestamp(start_ts, tz=_tz.utc).date()
+        end_day = _dt.fromtimestamp(end_ts, tz=_tz.utc).date()
+        kept: list[Path] = []
+        for f in files:
+            if current_file is not None and f == current_file:
+                kept.append(f)
+                continue
+            m = pattern.search(f.name)
+            if not m:
+                # Unparseable name — keep it to be safe (better slow than wrong)
+                kept.append(f)
+                continue
+            try:
+                file_day = _dt.strptime(m.group(1), "%Y-%m-%d").date()
+            except ValueError:
+                kept.append(f)
+                continue
+            if start_day <= file_day <= end_day:
+                kept.append(f)
+        return kept
+
+    _BOT_LOG_DATE_RE = re.compile(r"\.(\d{4}-\d{2}-\d{2})$")
+
+    def _read_bot_logs_from_disk(self, start_ts: float, end_ts: float) -> list[dict]:
+        """Read bot log entries from disk log files within time range.
+
+        Pre-filters files by filename date (Fix A) so a 1-day export doesn't
+        scan 30 days of rotated files.
+        """
         entries: list[dict] = []
         log_dir = Path("logs")
 
-        # Collect rotated files (oldest first) + current log file
         rotated = sorted(log_dir.glob("arbitragebot.log.*"))
         main = log_dir / "arbitragebot.log"
-        log_files = rotated + ([main] if main.exists() else [])
+        all_files = rotated + ([main] if main.exists() else [])
+        log_files = self._filter_log_files_by_date(
+            all_files, self._BOT_LOG_DATE_RE, start_ts, end_ts, main if main.exists() else None,
+        )
 
         for log_file in log_files:
             try:
@@ -1657,6 +1715,69 @@ class DashboardServer:
             except Exception:
                 continue
         return entries
+
+    # Chunked export: ~500 entries per chunk, gzip+base64, multi-WS-message delivery.
+    # Solves three issues that broke long-session exports (S19 9-day pull):
+    #   A. File pre-filter (above) — skip files outside date range
+    #   B. Chunk into multiple frames so no single WS message blows the size limit
+    #   C. Gzip-compress each chunk (~10× reduction on log text)
+    EXPORT_CHUNK_SIZE: int = 500
+
+    async def _send_chunked_export(self, ws: Any, kind: str, entries: list[dict]) -> None:
+        """Stream large export results to a client in compressed chunks.
+
+        Sends N messages of type `{kind}_chunk` then a final `{kind}_done`.
+        Each chunk carries gzipped+base64-encoded JSON of up to EXPORT_CHUNK_SIZE entries.
+        Yields control to the event loop between chunks so other clients keep getting
+        broadcasts and ping-pong stays alive.
+        """
+        total_entries = len(entries)
+        if total_entries == 0:
+            try:
+                await ws.send(json.dumps({
+                    "type": f"{kind}_done",
+                    "total_chunks": 0,
+                    "total_entries": 0,
+                }))
+            except Exception:
+                pass
+            return
+
+        chunk_size = self.EXPORT_CHUNK_SIZE
+        total_chunks = (total_entries + chunk_size - 1) // chunk_size
+        sent_bytes = 0
+        for i in range(total_chunks):
+            batch = entries[i * chunk_size : (i + 1) * chunk_size]
+            raw = json.dumps(batch, separators=(",", ":")).encode("utf-8")
+            compressed = gzip.compress(raw, compresslevel=6)
+            payload_b64 = base64.b64encode(compressed).decode("ascii")
+            sent_bytes += len(payload_b64)
+            try:
+                await ws.send(json.dumps({
+                    "type": f"{kind}_chunk",
+                    "chunk_index": i,
+                    "total_chunks": total_chunks,
+                    "encoding": "gzip+base64",
+                    "data": payload_b64,
+                }))
+            except Exception as e:
+                logger.warning(f"[Export] send failed at chunk {i}/{total_chunks}: {e}")
+                return
+            # Yield to event loop between chunks so we don't starve broadcasts/pings
+            await asyncio.sleep(0)
+
+        try:
+            await ws.send(json.dumps({
+                "type": f"{kind}_done",
+                "total_chunks": total_chunks,
+                "total_entries": total_entries,
+            }))
+        except Exception:
+            pass
+        logger.info(
+            f"[Export] {kind}: sent {total_entries} entries in {total_chunks} chunks "
+            f"(~{sent_bytes // 1024} KB compressed)"
+        )
 
     def _read_auth_logs_from_disk(self, start_ts: float, end_ts: float) -> list[dict]:
         """Read auth log entries from JSONL files within time range."""
@@ -1829,6 +1950,31 @@ class DashboardServer:
         if "max_position_multiplier" in settings:
             self._monitor._max_position_multiplier = float(settings["max_position_multiplier"])
 
+        # Price momentum filter (Feature 3) + Periodic inventory rebalance (Feature 4)
+        if self._optimizer:
+            if "momentum_filter_enabled" in settings:
+                self._optimizer._momentum_filter_enabled = bool(settings["momentum_filter_enabled"])
+            if "momentum_lookback_hours" in settings:
+                self._optimizer._momentum_lookback_seconds = float(settings["momentum_lookback_hours"]) * 3600
+            if "momentum_sample_interval_minutes" in settings:
+                self._optimizer._momentum_sample_interval = float(settings["momentum_sample_interval_minutes"]) * 60
+            if "momentum_min_factor" in settings:
+                self._optimizer._momentum_min_factor = float(settings["momentum_min_factor"])
+            if "momentum_max_factor" in settings:
+                self._optimizer._momentum_max_factor = float(settings["momentum_max_factor"])
+            if "inventory_rebalance_enabled" in settings:
+                self._optimizer._inventory_rebalance_enabled = bool(settings["inventory_rebalance_enabled"])
+            if "inventory_rebalance_interval_hours" in settings:
+                self._optimizer._inventory_rebalance_interval = float(settings["inventory_rebalance_interval_hours"]) * 3600
+            if "inventory_drift_threshold" in settings:
+                self._optimizer._inventory_drift_threshold = float(settings["inventory_drift_threshold"])
+            if "bitfinex_over_target_enabled" in settings:
+                self._optimizer._bitfinex_over_target_enabled = bool(settings["bitfinex_over_target_enabled"])
+            if "bitfinex_over_target_multiplier" in settings:
+                self._optimizer._bitfinex_over_target_multiplier = float(settings["bitfinex_over_target_multiplier"])
+            if "auto_expand_on_understaff" in settings:
+                self._optimizer._auto_expand_on_understaff = bool(settings["auto_expand_on_understaff"])
+
         # Anomaly protection
         anomaly = self._monitor._anomaly
         if "anomaly_protection_enabled" in settings:
@@ -1981,6 +2127,29 @@ class DashboardServer:
                 self._optimizer._very_strong_threshold = float(settings["very_strong_score_threshold"])
             if "fee_threshold_multiplier" in settings:
                 self._optimizer._fee_threshold_multiplier = float(settings["fee_threshold_multiplier"])
+            # Momentum filter + inventory rebalance
+            if "momentum_filter_enabled" in settings:
+                self._optimizer._momentum_filter_enabled = bool(settings["momentum_filter_enabled"])
+            if "momentum_lookback_hours" in settings:
+                self._optimizer._momentum_lookback_seconds = float(settings["momentum_lookback_hours"]) * 3600
+            if "momentum_sample_interval_minutes" in settings:
+                self._optimizer._momentum_sample_interval = float(settings["momentum_sample_interval_minutes"]) * 60
+            if "momentum_min_factor" in settings:
+                self._optimizer._momentum_min_factor = float(settings["momentum_min_factor"])
+            if "momentum_max_factor" in settings:
+                self._optimizer._momentum_max_factor = float(settings["momentum_max_factor"])
+            if "inventory_rebalance_enabled" in settings:
+                self._optimizer._inventory_rebalance_enabled = bool(settings["inventory_rebalance_enabled"])
+            if "inventory_rebalance_interval_hours" in settings:
+                self._optimizer._inventory_rebalance_interval = float(settings["inventory_rebalance_interval_hours"]) * 3600
+            if "inventory_drift_threshold" in settings:
+                self._optimizer._inventory_drift_threshold = float(settings["inventory_drift_threshold"])
+            if "bitfinex_over_target_enabled" in settings:
+                self._optimizer._bitfinex_over_target_enabled = bool(settings["bitfinex_over_target_enabled"])
+            if "bitfinex_over_target_multiplier" in settings:
+                self._optimizer._bitfinex_over_target_multiplier = float(settings["bitfinex_over_target_multiplier"])
+            if "auto_expand_on_understaff" in settings:
+                self._optimizer._auto_expand_on_understaff = bool(settings["auto_expand_on_understaff"])
 
         # Anomaly protection
         anomaly = self._monitor._anomaly
@@ -2272,6 +2441,10 @@ class DashboardServer:
             f"anomaly: dd_threshold={dd_t:.1f}%, dd_emergency={dd_e:.1f}x, streak_threshold={sls_t}, streak_cooldown={sls_c}s",
             f"bitfinex_reserve={bfx_pct * 100:.1f}% (${capital * bfx_pct:.0f}), hard_floor={bfx_floor * 100:.1f}% (${capital * bfx_floor:.0f})",
             f"hourly_transfer_cap=${s.get('hourly_external_transfer_cap', 2.0):.2f}",
+            f"momentum_filter: enabled={s.get('momentum_filter_enabled', True)}, lookback={s.get('momentum_lookback_hours', 24.0)}h, sample_interval={s.get('momentum_sample_interval_minutes', 60.0)}min, factor=[{s.get('momentum_min_factor', 0.3)}, {s.get('momentum_max_factor', 1.5)}]",
+            f"inventory_rebalance: enabled={s.get('inventory_rebalance_enabled', True)}, interval={s.get('inventory_rebalance_interval_hours', 6.0)}h, drift_threshold={s.get('inventory_drift_threshold', 0.3)*100:.0f}%",
+            f"bfx_over_target: enabled={s.get('bitfinex_over_target_enabled', True)}, multiplier={s.get('bitfinex_over_target_multiplier', 1.5)}x",
+            f"auto_expand_on_understaff={s.get('auto_expand_on_understaff', True)}",
             f"fee_real_mode={s.get('fee_real_mode', False)}",
             f"exchanges: {' '.join(fee_parts)}",
             f"disabled_exchanges: {', '.join(disabled_exs) if disabled_exs else 'none'}",
@@ -2302,6 +2475,15 @@ class DashboardServer:
                 "trading_score_threshold", "strong_score_threshold",
                 "very_strong_score_threshold",
                 "score_stability_factor", "score_stability_seconds",
+                "momentum_filter_enabled", "momentum_lookback_hours",
+                "momentum_sample_interval_minutes",
+                "momentum_min_factor", "momentum_max_factor",
+                "inventory_rebalance_enabled",
+                "inventory_rebalance_interval_hours",
+                "inventory_drift_threshold",
+                "bitfinex_over_target_enabled",
+                "bitfinex_over_target_multiplier",
+                "auto_expand_on_understaff",
             ]
             for k in keys_to_check:
                 old_v = old_settings.get(k)

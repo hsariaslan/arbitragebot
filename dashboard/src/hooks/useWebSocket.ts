@@ -37,6 +37,10 @@ export function useWebSocket() {
   const restartingRef = useRef(false);
   const pendingCredentials = useRef<{ username: string; password: string; remember: boolean; captchaToken?: string } | null>(null);
   const exportCallbackRef = useRef<((data: any) => void) | null>(null);
+  // Chunked export buffers — keyed by export kind ("export_bot_logs" / "export_auth_logs").
+  // Per kind we keep an indexed map (so decoders that finish out-of-order land in the right slot)
+  // and a list of in-flight decode promises so `_done` can await all before assembling.
+  const chunkBuffersRef = useRef<Record<string, { byIndex: Record<number, any[]>; pending: Promise<void>[] }>>({});
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
@@ -157,7 +161,45 @@ export function useWebSocket() {
           return;
         }
 
-        // Result callbacks (export, hard stop, distribute)
+        // Chunked export delivery (large log exports)
+        // Server sends N `{kind}_chunk` messages followed by one `{kind}_done`.
+        // Each chunk's `data` is gzip+base64-encoded JSON of partial entries.
+        if (typeof data.type === 'string' && data.type.endsWith('_chunk')) {
+          const kind = data.type.slice(0, -'_chunk'.length); // "export_bot_logs"
+          if (!chunkBuffersRef.current[kind]) chunkBuffersRef.current[kind] = { byIndex: {}, pending: [] };
+          const buf = chunkBuffersRef.current[kind];
+          const idx = data.chunk_index;
+          const decode = (async () => {
+            try {
+              const binary = Uint8Array.from(atob(data.data), c => c.charCodeAt(0));
+              const stream = new Blob([binary]).stream().pipeThrough(new DecompressionStream('gzip'));
+              const decompressed = await new Response(stream).text();
+              buf.byIndex[idx] = JSON.parse(decompressed);
+            } catch (err) {
+              console.error('Failed to decode export chunk', idx, err);
+              buf.byIndex[idx] = [];
+            }
+          })();
+          buf.pending.push(decode);
+          return;
+        }
+        if (typeof data.type === 'string' && data.type.endsWith('_done')) {
+          const kind = data.type.slice(0, -'_done'.length); // "export_bot_logs"
+          (async () => {
+            const buf = chunkBuffersRef.current[kind] || { byIndex: {}, pending: [] };
+            // Await every in-flight decode so out-of-order arrivals all land first
+            await Promise.all(buf.pending);
+            const indices = Object.keys(buf.byIndex).map(Number).sort((a, b) => a - b);
+            const logs: any[] = [];
+            for (const i of indices) logs.push(...buf.byIndex[i]);
+            chunkBuffersRef.current[kind] = { byIndex: {}, pending: [] };
+            exportCallbackRef.current?.({ type: `${kind}_result`, logs });
+            exportCallbackRef.current = null;
+          })();
+          return;
+        }
+
+        // Single-shot result callbacks (in-memory all_bot_logs, hard stop, distribute)
         if (data.type === 'export_bot_logs_result' || data.type === 'export_auth_logs_result'
             || data.type === 'all_bot_logs_result'
             || data.type === 'hard_stop_result' || data.type === 'distribute_result' || data.type === 'distribute_error') {
