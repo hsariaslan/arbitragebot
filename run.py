@@ -246,6 +246,58 @@ async def main() -> None:
 
     monitor.set_optimizer(optimizer)
     monitor.record_config_snapshot("initial")
+
+    # Funding-rate monitor (Phase A: read-only, scoring multiplier only).
+    # Polls Binance Futures /premiumIndex every 60s; optimizer reads
+    # get_funding_factor(symbol) each scoring tick.
+    from funding_monitor import FundingMonitor
+
+    funding_monitor = FundingMonitor(
+        symbols=SYMBOLS,
+        history_path="state/funding_history.json",
+        poll_interval_seconds=settings.get("funding_poll_interval_seconds", 60.0),
+        scoring_enabled=settings.get("funding_aware_scoring_enabled", True),
+        skip_threshold_4h_pct=settings.get("funding_skip_threshold_4h_pct", -0.05),
+        skip_threshold_8h_pct=settings.get("funding_skip_threshold_8h_pct", -0.05),
+        score_min_factor=settings.get("funding_score_min_factor", 0.3),
+        score_max_factor=settings.get("funding_score_max_factor", 1.5),
+    )
+    optimizer.set_funding_monitor(funding_monitor)
+
+    # Hedge manager (Phase C: shadow; Phase D: testnet/live via executor).
+    from hedge_manager import HedgeManager
+
+    hedge_execution_mode = settings.get("hedge_execution_mode", "simulation")
+    futures_executor = None
+    if hedge_execution_mode in ("testnet", "live"):
+        from executors.binance_futures_exec import BinanceFuturesExecutor
+        futures_executor = BinanceFuturesExecutor(
+            exchange_info=exchange_info,
+            mode=hedge_execution_mode,
+        )
+        if not futures_executor._credentials_ok():
+            logger.warning(
+                f"[Hedge] execution_mode={hedge_execution_mode} but Binance Futures "
+                f"credentials are not set — falling back to simulation. "
+                f"Set BINANCE_FUTURES_TESTNET_API_KEY/SECRET (testnet) or "
+                f"BINANCE_FUTURES_API_KEY/SECRET (live) in .env."
+            )
+            hedge_execution_mode = "simulation"
+            futures_executor = None
+
+    hedge_manager = HedgeManager(
+        balance=balance,
+        funding_monitor=funding_monitor,
+        optimizer=optimizer,
+        executor=futures_executor,
+        enabled=settings.get("hedging_enabled", True),
+        execution_mode=hedge_execution_mode,
+        dust_threshold_usd=settings.get("hedge_dust_threshold_usd", 20.0),
+        evaluation_interval_seconds=settings.get("hedge_evaluation_interval_seconds", 300.0),
+        margin_buffer_pct=settings.get("hedge_margin_buffer_pct", 0.20),
+        adjust_threshold_pct=settings.get("hedge_adjust_threshold_pct", 0.10),
+    )
+    monitor.set_hedge_manager(hedge_manager)
     logger.info(
         f"[Config] trade_amount=${trade_amount} capital=${total_capital:.0f} "
         f"adaptive={adaptive_mode} min_net={settings.get('min_net_profit_pct', 0.02):.2f}% "
@@ -262,6 +314,8 @@ async def main() -> None:
         optimizer.from_state_dict(saved["optimizer"])
         if "fee_manager" in saved:
             fee_manager.from_state_dict(saved["fee_manager"])
+        if "hedge_manager" in saved:
+            hedge_manager.from_state_dict(saved["hedge_manager"])
         # Sync symbols across components to match restored optimizer state
         if optimizer._active_symbols:
             monitor.update_symbols(optimizer._active_symbols)
@@ -279,6 +333,7 @@ async def main() -> None:
         optimizer=optimizer, log_handler=log_handler, state_manager=state_mgr,
         fee_manager=fee_manager,
         transfer_fee_manager=transfer_fee_manager,
+        funding_monitor=funding_monitor,
     )
 
     # Demo/testnet portfolio comparison (optional — needs API keys in .env)
@@ -355,7 +410,7 @@ async def main() -> None:
 
     def shutdown_handler():
         logger.info("Shutdown signal received, saving state...")
-        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None, fee_manager=fee_manager)
+        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None, fee_manager=fee_manager, hedge_manager=hedge_manager)
         state_mgr.stop()
         if demo_fetcher.enabled:
             demo_fetcher.stop()
@@ -364,8 +419,11 @@ async def main() -> None:
         monitor.stop()
         optimizer.stop()
         dashboard.stop()
+        funding_monitor.stop()
         if demo_executor:
             asyncio.ensure_future(demo_executor.close())
+        if futures_executor:
+            asyncio.ensure_future(futures_executor.close())
 
     if sys.platform != "win32":
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -375,9 +433,10 @@ async def main() -> None:
     tasks.append(asyncio.create_task(monitor.run()))
     tasks.append(asyncio.create_task(optimizer.run()))
     tasks.append(asyncio.create_task(dashboard.run()))
+    tasks.append(asyncio.create_task(funding_monitor.run()))
     tasks.append(asyncio.create_task(state_mgr.periodic_save(
         balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None,
-        fee_manager=fee_manager,
+        fee_manager=fee_manager, hedge_manager=hedge_manager,
     )))
     if demo_fetcher.enabled:
         tasks.append(asyncio.create_task(demo_fetcher.run()))
@@ -387,14 +446,17 @@ async def main() -> None:
     except Exception as e:
         import traceback
         logger.error(f"Fatal error: {e}\n{traceback.format_exc()}")
-        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None, fee_manager=fee_manager)
+        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None, fee_manager=fee_manager, hedge_manager=hedge_manager)
         for fetcher in fetchers:
             fetcher.stop()
         monitor.stop()
         optimizer.stop()
         dashboard.stop()
+        funding_monitor.stop()
         if demo_executor:
             await demo_executor.close()
+        if futures_executor:
+            await futures_executor.close()
         raise
     finally:
         monitor.print_summary()

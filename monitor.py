@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from executor import DemoExecutor
     from fee_manager import FeeManager
     from fetchers.base import BaseFetcher
+    from hedge_manager import HedgeManager
     from optimizer import SymbolOptimizer
     from state_manager import StateManager
 
@@ -283,9 +284,17 @@ class ArbitrageMonitor:
         self._demo_total_latency_ms: float = 0.0
         self._demo_fee_mismatches: int = 0
 
+        # Hedge manager (Phase C — set externally via set_hedge_manager).
+        # Evaluated periodically from the main loop. Shadow mode in C, live in D.
+        self._hedge_manager: "HedgeManager | None" = None
+
     def set_optimizer(self, optimizer: "SymbolOptimizer") -> None:
         """Store optimizer reference for score-based rebalance gating."""
         self._optimizer = optimizer
+
+    def set_hedge_manager(self, hedge_manager: "HedgeManager") -> None:
+        """Store hedge manager reference for periodic evaluation."""
+        self._hedge_manager = hedge_manager
 
     def set_executor(
         self,
@@ -393,31 +402,64 @@ class ArbitrageMonitor:
                 f"${consolidation_summary['total_fees']:.4f} fees"
             )
 
-        # Send emergency email notification (includes consolidation summary
-        # and manual-resume instructions). Mark email-sent timestamp so the
-        # hourly reminder cycle starts from now.
-        from email_notifier import notify_emergency
-
+        # Phase E: close all open futures hedges. Async because the executor
+        # makes REST calls. Wrapped together with the email so the email can
+        # include the hedge-close summary.
         usdt_breakdown = {
             ex: self._balance.usdt.get(ex, 0.0)
             for ex in self._balance._exchanges
             if self._balance.usdt.get(ex, 0.0) > 0
         }
         _safe_task(
-            notify_emergency(
-                reason=self._anomaly._pause_reason,
-                drawdown_pct=self._anomaly._current_drawdown_pct,
-                peak_value=self._anomaly._peak_portfolio_value,
-                current_value=sum(usdt_breakdown.values()),
+            self._emergency_close_hedges_and_notify(
                 positions_sold=positions_sold,
                 total_sold=total_sold,
-                portfolio_breakdown=usdt_breakdown,
-                liquidated_positions=liquidated,
+                liquidated=liquidated,
+                usdt_breakdown=usdt_breakdown,
                 consolidation_summary=consolidation_summary,
             ),
             name="emergency_email",
         )
         self._anomaly.mark_emergency_email_sent(time.time())
+
+    async def _emergency_close_hedges_and_notify(
+        self,
+        positions_sold: int,
+        total_sold: float,
+        liquidated: list,
+        usdt_breakdown: dict,
+        consolidation_summary: dict,
+    ) -> None:
+        """Phase E: emergency tail — close all hedges then send email.
+
+        Closing happens BEFORE the email so the email reflects post-close
+        state and includes the hedge close summary (per-symbol funding P&L).
+        """
+        from email_notifier import notify_emergency
+
+        hedge_summary = None
+        if self._hedge_manager is not None:
+            try:
+                hedge_summary = await self._hedge_manager.close_all_for_emergency(
+                    reason=self._anomaly._pause_reason or "emergency"
+                )
+            except Exception as e:
+                logger.error(f"[Hedge] close_all_for_emergency failed: {e}")
+                hedge_summary = {"error": str(e), "closed": [], "failed": [],
+                                 "total_funding_pnl_usd": 0.0, "n_closed": 0, "n_failed": 0}
+
+        await notify_emergency(
+            reason=self._anomaly._pause_reason,
+            drawdown_pct=self._anomaly._current_drawdown_pct,
+            peak_value=self._anomaly._peak_portfolio_value,
+            current_value=sum(usdt_breakdown.values()),
+            positions_sold=positions_sold,
+            total_sold=total_sold,
+            portfolio_breakdown=usdt_breakdown,
+            liquidated_positions=liquidated,
+            consolidation_summary=consolidation_summary,
+            hedge_summary=hedge_summary,
+        )
 
     def get_net_profit_stats(self) -> dict:
         """Compute rolling hourly net profit stats."""
@@ -1292,9 +1334,24 @@ class ArbitrageMonitor:
                 if not self._anomaly_paused:
                     self._anomaly_paused = True
                     logger.warning("[Monitor] Anomaly protection activated, trading paused")
+                    # Phase E: tell hedge manager to stop opening new hedges.
+                    # Existing hedges keep tracking inventory and can still close.
+                    if self._hedge_manager is not None:
+                        self._hedge_manager.on_safety_pause(reason=self._anomaly._pause_reason or "anomaly")
             elif self._anomaly_paused:
                 self._anomaly_paused = False
                 logger.info("[Monitor] Anomaly protection cleared, resuming trading")
+                # Phase E: hedge manager should re-evaluate / reconcile after resume
+                if self._hedge_manager is not None:
+                    self._hedge_manager.on_safety_resume()
+
+            # Phase E: also propagate manual-stop state to hedge manager
+            if self._hedge_manager is not None:
+                if self._manual_stopped and not self._hedge_manager._safety_paused:
+                    self._hedge_manager.on_safety_pause(reason="manual_stop")
+                elif not self._manual_stopped and not self._anomaly_paused and self._hedge_manager._safety_paused:
+                    # Both anomaly and manual-stop are clear → resume
+                    self._hedge_manager.on_safety_resume()
 
             if not self._paused and not self._anomaly_paused and not self._manual_stopped:
                 self._tick()
@@ -1350,6 +1407,15 @@ class ArbitrageMonitor:
             self._balance.initialize_crypto(self._get_current_prices())
             if self._balance.initialized:
                 self._crypto_init_time = time.time()
+
+        # Hedge manager evaluation (Phase C: shadow; Phase D: real on testnet;
+        # Phase E: respects safety-pause but still runs so demotion-driven
+        # closes can fire). Internally throttled by evaluation_interval.
+        # Gated on balance.initialized to mirror the inventory-rebalance fix.
+        # Fire as a task so the executor's REST calls don't block the main loop.
+        if (self._hedge_manager is not None
+                and self._balance and self._balance.initialized):
+            _safe_task(self._hedge_manager.evaluate(now), "hedge_evaluate")
 
         # After initialize_crypto, place demo setup orders (one-shot)
         if (self._balance and self._balance.initialized

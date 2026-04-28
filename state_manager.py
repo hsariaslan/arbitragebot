@@ -32,7 +32,7 @@ class StateManager:
     def stop(self) -> None:
         self._running = False
 
-    def save(self, balance, monitor, optimizer, demo_fetcher=None, fee_manager=None) -> bool:
+    def save(self, balance, monitor, optimizer, demo_fetcher=None, fee_manager=None, hedge_manager=None) -> bool:
         """Save all component state to disk atomically."""
         if self._skip_save:
             return False
@@ -48,6 +48,8 @@ class StateManager:
                 state["demo_fetcher"] = demo_fetcher.to_state_dict()
             if fee_manager is not None:
                 state["fee_manager"] = fee_manager.to_state_dict()
+            if hedge_manager is not None:
+                state["hedge_manager"] = hedge_manager.to_state_dict()
             # Backup existing file
             if STATE_FILE.exists():
                 STATE_BACKUP.write_bytes(STATE_FILE.read_bytes())
@@ -103,9 +105,9 @@ class StateManager:
                 f.unlink()
         logger.info("[State] Cleared saved state (fresh restart)")
 
-    async def periodic_save(self, balance, monitor, optimizer, demo_fetcher=None, fee_manager=None) -> None:
+    async def periodic_save(self, balance, monitor, optimizer, demo_fetcher=None, fee_manager=None, hedge_manager=None) -> None:
         """Async task that saves state periodically."""
         while self._running:
             await asyncio.sleep(self._save_interval)
             if self._running:
-                self.save(balance, monitor, optimizer, demo_fetcher, fee_manager=fee_manager)
+                self.save(balance, monitor, optimizer, demo_fetcher, fee_manager=fee_manager, hedge_manager=hedge_manager)

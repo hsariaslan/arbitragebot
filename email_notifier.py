@@ -91,6 +91,7 @@ def _build_emergency_html(
     portfolio_breakdown: dict[str, float] | None,
     liquidated_positions: list[dict] | None,
     consolidation_summary: dict | None,
+    hedge_summary: dict | None,
     is_reminder: bool,
     paused_for_seconds: float,
 ) -> str:
@@ -161,6 +162,48 @@ def _build_emergency_html(
             "or below per-exchange dust threshold.</i></p>"
         )
 
+    hedge_html = ""
+    if hedge_summary and (hedge_summary.get("closed") or hedge_summary.get("failed")):
+        closed = hedge_summary.get("closed", [])
+        failed = hedge_summary.get("failed", [])
+        rows = "".join(
+            f"<tr><td>{html.escape(c['symbol'])}</td>"
+            f"<td>{c['qty']:.6f}</td>"
+            f"<td>{c['held_h']:.1f}h</td>"
+            f"<td style='color:{'green' if c['funding_pnl_usd'] >= 0 else 'red'}'>"
+            f"${c['funding_pnl_usd']:+.4f}</td></tr>"
+            for c in closed
+        )
+        failed_rows = "".join(
+            f"<tr style='color:red'><td>{html.escape(f['symbol'])}</td>"
+            f"<td colspan='3'>{html.escape(str(f.get('error', 'unknown')))}</td></tr>"
+            for f in failed
+        )
+        total_funding = hedge_summary.get("total_funding_pnl_usd", 0.0)
+        hedge_html = (
+            "<h4>Futures Hedges Closed</h4>"
+            "<p>All open futures hedges were closed as part of the emergency "
+            "stop. Per-symbol cumulative funding P&L (positive = short received "
+            "income, negative = short paid):</p>"
+            "<table border='1' cellpadding='4' cellspacing='0'>"
+            "<tr><th>Symbol</th><th>Qty</th><th>Held</th><th>Funding P&L</th></tr>"
+            f"{rows}"
+            f"{failed_rows}"
+            "</table>"
+            f"<p><b>Closed:</b> {hedge_summary.get('n_closed', 0)} | "
+            f"<b>Failed:</b> {hedge_summary.get('n_failed', 0)} | "
+            f"<b>Total funding P&L:</b> "
+            f"<span style='color:{'green' if total_funding >= 0 else 'red'}'>"
+            f"${total_funding:+.4f}</span></p>"
+        )
+    elif hedge_summary is not None and "error" in hedge_summary:
+        hedge_html = (
+            f"<h4>Futures Hedges</h4>"
+            f"<p style='color:red'><b>Hedge close FAILED:</b> "
+            f"{html.escape(hedge_summary['error'])}. "
+            f"Manual reconciliation may be required on Binance Futures.</p>"
+        )
+
     if is_reminder:
         hours = paused_for_seconds / 3600.0
         header = (
@@ -183,6 +226,7 @@ def _build_emergency_html(
         f"<b>Positions liquidated:</b> {positions_sold}<br>"
         f"<b>Total crypto sold:</b> ${total_sold:.2f}</p>"
         f"{positions_html}"
+        f"{hedge_html}"
         f"{consolidation_html}"
         f"{breakdown_html}"
         f"<p style='color:red'><b>Trading is PAUSED. Manual resume required.</b></p>"
@@ -201,12 +245,14 @@ async def notify_emergency(
     portfolio_breakdown: dict[str, float] | None = None,
     liquidated_positions: list[dict] | None = None,
     consolidation_summary: dict | None = None,
+    hedge_summary: dict | None = None,
 ) -> None:
     """Email notification on emergency sell-all.
 
     Includes drawdown info, positions liquidated, emergency consolidation
-    summary (USDT moved to Bitfinex), per-exchange USDT breakdown after
-    consolidation, and step-by-step manual-resume instructions.
+    summary (USDT moved to Bitfinex), futures hedge close summary (Phase E),
+    per-exchange USDT breakdown after consolidation, and step-by-step
+    manual-resume instructions.
     """
     subject, body = _build_emergency_html(
         reason=reason,
@@ -218,6 +264,7 @@ async def notify_emergency(
         portfolio_breakdown=portfolio_breakdown,
         liquidated_positions=liquidated_positions,
         consolidation_summary=consolidation_summary,
+        hedge_summary=hedge_summary,
         is_reminder=False,
         paused_for_seconds=0.0,
     )
@@ -248,6 +295,7 @@ async def notify_emergency_reminder(
         portfolio_breakdown=portfolio_breakdown,
         liquidated_positions=None,
         consolidation_summary=None,
+        hedge_summary=None,
         is_reminder=True,
         paused_for_seconds=paused_for_seconds,
     )

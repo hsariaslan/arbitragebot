@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from balance import BalanceTracker, Transfer
     from dashboard_server import DashboardServer
     from fee_manager import FeeManager
+    from funding_monitor import FundingMonitor
     from fetchers.base import BaseFetcher
     from monitor import ArbitrageMonitor
 
@@ -349,12 +350,21 @@ class SymbolOptimizer:
         self._auto_expand_on_understaff: bool = AUTO_EXPAND_ON_UNDERSTAFF
         self._last_auto_expand_attempt: float = 0.0
 
+        # Funding-aware scoring (Phase A — set externally via set_funding_monitor)
+        self._funding_monitor: "FundingMonitor | None" = None
+        # Per-symbol throttle for [Optimizer] funding-applied summary log
+        self._last_funding_log: dict[str, float] = {}
+
     def stop(self) -> None:
         self._running = False
 
     def set_dashboard(self, dashboard: "DashboardServer") -> None:
         """Store dashboard reference for post-discovery updates."""
         self._dashboard = dashboard
+
+    def set_funding_monitor(self, monitor: "FundingMonitor") -> None:
+        """Wire the live funding-rate monitor (Phase A scoring multiplier)."""
+        self._funding_monitor = monitor
 
     def update_profit_state(self, net_profit: float, session_hourly_rate: float, grace_active: bool = False) -> None:
         """Called by dashboard to update net profit awareness for rotation gating."""
@@ -602,6 +612,14 @@ class SymbolOptimizer:
                 momentum_factor = self._compute_momentum_factor(symbol, current_mid, now)
                 if momentum_factor != 1.0:
                     best_net = best_net * momentum_factor
+
+            # Apply funding-rate multiplier (Phase A): boost positive-funding
+            # symbols, penalize negative-funding symbols. Floored at min_factor
+            # when funding is below skip threshold (effectively disqualifies).
+            if self._funding_monitor is not None and best_net > float("-inf"):
+                funding_factor = self._funding_monitor.get_funding_factor(symbol)
+                if funding_factor != 1.0:
+                    best_net = best_net * funding_factor
 
             if best_net > float("-inf"):
                 tick = SymbolTick(
@@ -1727,6 +1745,12 @@ class SymbolOptimizer:
             f"{self._demotion_period}s) — selling crypto "
             f"(freed ${freed_capital:.2f}, fees ${total_sell_fee:.4f}{saved_msg})"
         )
+
+        # Phase E: close any futures hedge for this symbol (async, fire-and-forget).
+        # The hedge manager handles real vs shadow mode internally.
+        hm = getattr(self._monitor, "_hedge_manager", None)
+        if hm is not None:
+            hm.request_close(symbol, reason=f"demoted({symbol})")
 
         # Consolidate freed USDT from local sells to Bitfinex hub
         # Skip if no active symbol is tradeable on Bitfinex (avoids circular waste)
