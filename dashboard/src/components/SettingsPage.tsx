@@ -847,7 +847,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               <Tooltip text="simulation = shadow only (Phase C, current); testnet = Binance Futures testnet (Phase D); live = mainnet (Phase G, post-30-day validation). Changing requires restart in v1. Default: simulation. Config key: hedge_execution_mode" />
             </label>
             <select value={hedgeExecutionMode}
-              onChange={e => setHedgeExecutionMode(e.target.value)}
+              onChange={e => setHedgeExecutionMode(e.target.value as 'simulation' | 'testnet' | 'live')}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
               <option value="simulation">Simulation (shadow)</option>
               <option value="testnet">Testnet</option>

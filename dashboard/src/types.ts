@@ -147,6 +147,20 @@ export interface Settings {
   one_leg_failure_rate?: number;
   one_leg_unwind_slippage_mult?: number;
   max_position_multiplier?: number;
+  // Funding-aware scoring (Phase A)
+  funding_aware_scoring_enabled?: boolean;
+  funding_skip_threshold_4h_pct?: number;
+  funding_skip_threshold_8h_pct?: number;
+  funding_score_min_factor?: number;
+  funding_score_max_factor?: number;
+  funding_poll_interval_seconds?: number;
+  // Spot-futures hedging (Phase C+)
+  hedging_enabled?: boolean;
+  hedge_execution_mode?: 'simulation' | 'testnet' | 'live';
+  hedge_dust_threshold_usd?: number;
+  hedge_evaluation_interval_seconds?: number;
+  hedge_margin_buffer_pct?: number;
+  hedge_adjust_threshold_pct?: number;
   // Anomaly protection
   anomaly_protection_enabled?: boolean;
   circuit_breaker_window?: number;
