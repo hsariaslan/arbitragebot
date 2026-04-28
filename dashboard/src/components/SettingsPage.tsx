@@ -73,6 +73,20 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [oneLegFailureRate, setOneLegFailureRate] = useState(currentSettings.one_leg_failure_rate ?? 0.02);
   const [oneLegUnwindSlippageMult, setOneLegUnwindSlippageMult] = useState(currentSettings.one_leg_unwind_slippage_mult ?? 1.5);
   const [maxPositionMultiplier, setMaxPositionMultiplier] = useState(currentSettings.max_position_multiplier ?? 5.0);
+  // Funding-aware scoring (Phase A)
+  const [fundingAwareEnabled, setFundingAwareEnabled] = useState(currentSettings.funding_aware_scoring_enabled ?? true);
+  const [fundingSkip4h, setFundingSkip4h] = useState(currentSettings.funding_skip_threshold_4h_pct ?? -0.05);
+  const [fundingSkip8h, setFundingSkip8h] = useState(currentSettings.funding_skip_threshold_8h_pct ?? -0.05);
+  const [fundingScoreMin, setFundingScoreMin] = useState(currentSettings.funding_score_min_factor ?? 0.3);
+  const [fundingScoreMax, setFundingScoreMax] = useState(currentSettings.funding_score_max_factor ?? 1.5);
+  const [fundingPollInterval, setFundingPollInterval] = useState(currentSettings.funding_poll_interval_seconds ?? 60.0);
+  // Hedging (Phase C+ — shadow mode in C, live in D)
+  const [hedgingEnabled, setHedgingEnabled] = useState(currentSettings.hedging_enabled ?? true);
+  const [hedgeExecutionMode, setHedgeExecutionMode] = useState(currentSettings.hedge_execution_mode ?? 'simulation');
+  const [hedgeDustThreshold, setHedgeDustThreshold] = useState(currentSettings.hedge_dust_threshold_usd ?? 20.0);
+  const [hedgeEvalInterval, setHedgeEvalInterval] = useState(currentSettings.hedge_evaluation_interval_seconds ?? 300.0);
+  const [hedgeMarginBuffer, setHedgeMarginBuffer] = useState(currentSettings.hedge_margin_buffer_pct ?? 0.20);
+  const [hedgeAdjustThreshold, setHedgeAdjustThreshold] = useState(currentSettings.hedge_adjust_threshold_pct ?? 0.10);
   const [anomalyEnabled, setAnomalyEnabled] = useState(currentSettings.anomaly_protection_enabled ?? true);
   const [cbWindow, setCbWindow] = useState(currentSettings.circuit_breaker_window ?? 900);
   const [cbThreshold, setCbThreshold] = useState(currentSettings.circuit_breaker_threshold ?? -5.0);
@@ -141,6 +155,18 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setOneLegFailureRate(currentSettings.one_leg_failure_rate ?? 0.02);
       setOneLegUnwindSlippageMult(currentSettings.one_leg_unwind_slippage_mult ?? 1.5);
       setMaxPositionMultiplier(currentSettings.max_position_multiplier ?? 5.0);
+      setFundingAwareEnabled(currentSettings.funding_aware_scoring_enabled ?? true);
+      setFundingSkip4h(currentSettings.funding_skip_threshold_4h_pct ?? -0.05);
+      setFundingSkip8h(currentSettings.funding_skip_threshold_8h_pct ?? -0.05);
+      setFundingScoreMin(currentSettings.funding_score_min_factor ?? 0.3);
+      setFundingScoreMax(currentSettings.funding_score_max_factor ?? 1.5);
+      setFundingPollInterval(currentSettings.funding_poll_interval_seconds ?? 60.0);
+      setHedgingEnabled(currentSettings.hedging_enabled ?? true);
+      setHedgeExecutionMode(currentSettings.hedge_execution_mode ?? 'simulation');
+      setHedgeDustThreshold(currentSettings.hedge_dust_threshold_usd ?? 20.0);
+      setHedgeEvalInterval(currentSettings.hedge_evaluation_interval_seconds ?? 300.0);
+      setHedgeMarginBuffer(currentSettings.hedge_margin_buffer_pct ?? 0.20);
+      setHedgeAdjustThreshold(currentSettings.hedge_adjust_threshold_pct ?? 0.10);
       setIpWhitelistEnabled(currentSettings.ip_whitelist_enabled ?? false);
       setIpWhitelist((currentSettings.ip_whitelist ?? []).join(', '));
       setAnomalyEnabled(currentSettings.anomaly_protection_enabled ?? true);
@@ -201,6 +227,18 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     one_leg_failure_rate: oneLegFailureRate,
     one_leg_unwind_slippage_mult: oneLegUnwindSlippageMult,
     max_position_multiplier: maxPositionMultiplier,
+    funding_aware_scoring_enabled: fundingAwareEnabled,
+    funding_skip_threshold_4h_pct: fundingSkip4h,
+    funding_skip_threshold_8h_pct: fundingSkip8h,
+    funding_score_min_factor: fundingScoreMin,
+    funding_score_max_factor: fundingScoreMax,
+    funding_poll_interval_seconds: fundingPollInterval,
+    hedging_enabled: hedgingEnabled,
+    hedge_execution_mode: hedgeExecutionMode,
+    hedge_dust_threshold_usd: hedgeDustThreshold,
+    hedge_evaluation_interval_seconds: hedgeEvalInterval,
+    hedge_margin_buffer_pct: hedgeMarginBuffer,
+    hedge_adjust_threshold_pct: hedgeAdjustThreshold,
     anomaly_protection_enabled: anomalyEnabled,
     circuit_breaker_window: cbWindow,
     circuit_breaker_threshold: cbThreshold,
@@ -718,6 +756,138 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             </label>
             <input type="number" value={maxPositionMultiplier} min={0} max={50} step={0.5}
               onChange={d(setMaxPositionMultiplier, 5.0)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+        </div>
+      </div>
+
+      {/* Funding-Aware Scoring (Phase A — read-only foundation for spot-futures hedging) */}
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Funding-Aware Scoring</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          Phase A. Live Binance Futures funding rates boost scores for symbols with positive funding (short hedge would earn) and penalize symbols with negative funding (short hedge would pay). Read-only — no positions opened.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="flex items-center gap-2 sm:col-span-2 lg:col-span-3">
+            <label className="flex items-center cursor-pointer">
+              <input type="checkbox" checked={fundingAwareEnabled}
+                onChange={e => setFundingAwareEnabled(e.target.checked)}
+                className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
+              <span className="text-sm text-slate-300">Enable Funding-Aware Scoring</span>
+            </label>
+            <Tooltip text="When enabled, each symbol's score is multiplied by a funding-aware factor: clamp(1.0 + annualized_short_pct/100, min_factor, max_factor). Positive funding → boost (short hedge earns), negative → penalty. When funding is below the skip threshold, the multiplier is floored at min_factor (effectively disqualifies the symbol). Default: enabled. Config key: funding_aware_scoring_enabled" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Skip Threshold 4h Symbols (% per period)
+              <Tooltip text="When the live funding rate for a 4h-funding symbol is worse than this threshold, the score multiplier is floored at min_factor — effectively disqualifying the symbol from activation/expansion until funding recovers. Default: -0.05% (= -0.30%/day, ~-110%/yr cost as short). Config key: funding_skip_threshold_4h_pct" />
+            </label>
+            <input type="number" value={fundingSkip4h} min={-1.0} max={1.0} step={0.01}
+              onChange={d(setFundingSkip4h, -0.05)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Skip Threshold 8h Symbols (% per period)
+              <Tooltip text="When the live funding rate for an 8h-funding symbol is worse than this threshold, the score multiplier is floored at min_factor. Default: -0.05% (= -0.15%/day, ~-55%/yr cost as short). Config key: funding_skip_threshold_8h_pct" />
+            </label>
+            <input type="number" value={fundingSkip8h} min={-1.0} max={1.0} step={0.01}
+              onChange={d(setFundingSkip8h, -0.05)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Score Min Factor
+              <Tooltip text="Floor for the funding score multiplier. When funding is severely negative or below the skip threshold, the multiplier is clamped to this value. Lower values = more aggressive penalty for bad-funding symbols. Range: 0.05-1.0. Default: 0.3 (= 70% score cut). Config key: funding_score_min_factor" />
+            </label>
+            <input type="number" value={fundingScoreMin} min={0.05} max={1.0} step={0.05}
+              onChange={d(setFundingScoreMin, 0.3)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Score Max Factor
+              <Tooltip text="Ceiling for the funding score multiplier. When funding is strongly positive (short would earn), the multiplier is capped to this value. Higher = more aggressive boost for good-funding symbols. Range: 1.0-5.0. Default: 1.5 (= 50% score boost). Config key: funding_score_max_factor" />
+            </label>
+            <input type="number" value={fundingScoreMax} min={1.0} max={5.0} step={0.05}
+              onChange={d(setFundingScoreMax, 1.5)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Poll Interval (seconds)
+              <Tooltip text="How often the bot polls Binance Futures /premiumIndex for live funding rates. One API call covers all 60 symbols (rate-limit weight 10, no key required). Default: 60s. Range: 30-600. Config key: funding_poll_interval_seconds" />
+            </label>
+            <input type="number" value={fundingPollInterval} min={30} max={600} step={10}
+              onChange={d(setFundingPollInterval, 60.0)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+        </div>
+      </div>
+
+      {/* Spot-Futures Hedging (Phase C: shadow mode; Phase D: testnet; Phase G: live) */}
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Spot-Futures Hedging</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          Phase C — shadow mode. Bot computes target hedge size from spot inventory and logs decisions, but does not place real futures orders. Phase D wires the Binance Futures executor.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="flex items-center gap-2 sm:col-span-2 lg:col-span-3">
+            <label className="flex items-center cursor-pointer">
+              <input type="checkbox" checked={hedgingEnabled}
+                onChange={e => setHedgingEnabled(e.target.checked)}
+                className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
+              <span className="text-sm text-slate-300">Enable Hedging</span>
+            </label>
+            <Tooltip text="When enabled, the hedge manager evaluates target hedge sizes and (in testnet/live modes) places futures orders. Phase C: shadow only — no real orders regardless of execution mode. Default: enabled. Config key: hedging_enabled" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Execution Mode
+              <Tooltip text="simulation = shadow only (Phase C, current); testnet = Binance Futures testnet (Phase D); live = mainnet (Phase G, post-30-day validation). Changing requires restart in v1. Default: simulation. Config key: hedge_execution_mode" />
+            </label>
+            <select value={hedgeExecutionMode}
+              onChange={e => setHedgeExecutionMode(e.target.value)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
+              <option value="simulation">Simulation (shadow)</option>
+              <option value="testnet">Testnet</option>
+              <option value="live">Live (mainnet)</option>
+            </select>
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Dust Threshold (USD)
+              <Tooltip text="Minimum spot inventory notional to bother opening a hedge. Below this threshold, the funding/fees would exceed the price-protection benefit. Default: $20. Range: $1–$10,000. Config key: hedge_dust_threshold_usd" />
+            </label>
+            <input type="number" value={hedgeDustThreshold} min={1} max={10000} step={1}
+              onChange={d(setHedgeDustThreshold, 20.0)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Evaluation Interval (s)
+              <Tooltip text="How often the hedge manager evaluates target hedge sizes. Lower = more responsive but more API calls. Default: 300s (5 min). Range: 30–7200s. Config key: hedge_evaluation_interval_seconds" />
+            </label>
+            <input type="number" value={hedgeEvalInterval} min={30} max={7200} step={30}
+              onChange={d(setHedgeEvalInterval, 300.0)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Margin Buffer
+              <Tooltip text="Required free margin as a fraction of position size, even at 1× leverage. Prevents liquidation from brief mark-price spikes. Default: 0.20 (= 20% buffer; $500 margin can hedge max $400 position). Config key: hedge_margin_buffer_pct" />
+            </label>
+            <input type="number" value={hedgeMarginBuffer} min={0} max={1.0} step={0.05}
+              onChange={d(setHedgeMarginBuffer, 0.20)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Adjust Threshold
+              <Tooltip text="Drift between current hedge size and target before triggering an adjustment. Lower = more frequent re-balancing (more fees). Default: 0.10 (= 10% drift). Range: 0.01–1.0. Config key: hedge_adjust_threshold_pct" />
+            </label>
+            <input type="number" value={hedgeAdjustThreshold} min={0.01} max={1.0} step={0.01}
+              onChange={d(setHedgeAdjustThreshold, 0.10)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
         </div>

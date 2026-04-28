@@ -9,6 +9,7 @@ import PriceGrid from './components/PriceGrid';
 import TradesTable from './components/TradesTable';
 import TransfersTable from './components/TransfersTable';
 import SymbolRankings from './components/SymbolRankings';
+import HedgesPanel from './components/HedgesPanel';
 import RotationLog from './components/RotationLog';
 import RankingPage from './components/RankingPage';
 import SettingsPage from './components/SettingsPage';
@@ -45,6 +46,7 @@ function DashboardPage({ state }: { state: DashboardState }) {
               warmupRemaining={state.optimizer.warmup_remaining}
               autoRotate={state.optimizer.auto_rotate}
               discoveryMode={state.optimizer.discovery_mode}
+              fundingRates={state.funding_rates}
             />
           </div>
           <RotationLog rotations={state.optimizer.rotations} />
@@ -59,6 +61,8 @@ function DashboardPage({ state }: { state: DashboardState }) {
       {state.demo_comparison?.enabled && (
         <DemoComparison data={state.demo_comparison} />
       )}
+
+      <HedgesPanel hedges={state.hedges} />
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 sm:gap-5">
         <TradesTable trades={state.recent_trades} totalPnl={state.portfolio.trading_pnl} />
@@ -185,6 +189,7 @@ export default function App() {
           anomalyProtection={state.anomaly_protection}
           manualStopped={state.manual_stopped}
           manualStopTimestamp={state.manual_stop_timestamp}
+          hedges={state.hedges}
           onLogout={logout}
         />
 
@@ -208,6 +213,8 @@ export default function App() {
                 profitStats={state.profit_stats}
                 hourlyPnl={state.hourly_pnl}
                 dailyPnl={state.daily_pnl}
+                hedges={state.hedges}
+                fundingRates={state.funding_rates}
               />
             } />
             <Route path="/rankings/historical" element={
@@ -225,6 +232,8 @@ export default function App() {
                 profitStats={state.profit_stats}
                 hourlyPnl={state.hourly_pnl}
                 dailyPnl={state.daily_pnl}
+                hedges={state.hedges}
+                fundingRates={state.funding_rates}
                 defaultView="historical"
               />
             } />

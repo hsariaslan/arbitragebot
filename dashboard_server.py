@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from balance import BalanceTracker
     from fee_manager import FeeManager
     from fetchers.base import BaseFetcher
+    from funding_monitor import FundingMonitor
     from monitor import ArbitrageMonitor
     from optimizer import SymbolOptimizer
     from state_manager import StateManager
@@ -127,6 +128,7 @@ class DashboardServer:
         state_manager: "StateManager | None" = None,
         fee_manager: "FeeManager | None" = None,
         transfer_fee_manager: "TransferFeeManager | None" = None,
+        funding_monitor: "FundingMonitor | None" = None,
     ) -> None:
         self._monitor = monitor
         self._balance = balance
@@ -137,6 +139,7 @@ class DashboardServer:
         self._state_manager = state_manager
         self._fee_manager = fee_manager
         self._transfer_fee_mgr = transfer_fee_manager
+        self._funding_monitor = funding_monitor
         self._demo_fetcher: "DemoPortfolioFetcher | None" = None
         if optimizer:
             optimizer.set_dashboard(self)
@@ -994,6 +997,20 @@ class DashboardServer:
         "bitfinex_over_target_multiplier": (float, 1.0, 5.0),
         # Auto-expand on understaff (Feature 6)
         "auto_expand_on_understaff": (bool, None, None),
+        # Funding-aware scoring (Phase A)
+        "funding_aware_scoring_enabled": (bool, None, None),
+        "funding_skip_threshold_4h_pct": (float, -1.0, 1.0),
+        "funding_skip_threshold_8h_pct": (float, -1.0, 1.0),
+        "funding_score_min_factor": (float, 0.05, 1.0),
+        "funding_score_max_factor": (float, 1.0, 5.0),
+        "funding_poll_interval_seconds": (float, 30.0, 600.0),
+        # Spot-futures hedging (Phase C+)
+        "hedging_enabled": (bool, None, None),
+        "hedge_execution_mode": (str, None, None),
+        "hedge_dust_threshold_usd": (float, 1.0, 10000.0),
+        "hedge_evaluation_interval_seconds": (float, 30.0, 7200.0),
+        "hedge_margin_buffer_pct": (float, 0.0, 1.0),
+        "hedge_adjust_threshold_pct": (float, 0.01, 1.0),
         # Anomaly protection
         "anomaly_protection_enabled": (bool, None, None),
         "circuit_breaker_window": (int, 60, 7200),
@@ -1010,6 +1027,7 @@ class DashboardServer:
 
     _SETTINGS_ENUMS: dict[str, list[str]] = {
         "execution_mode": ["simulation", "demo", "demo_only"],
+        "hedge_execution_mode": ["simulation", "testnet", "live"],
     }
 
     @classmethod
@@ -1975,6 +1993,41 @@ class DashboardServer:
             if "auto_expand_on_understaff" in settings:
                 self._optimizer._auto_expand_on_understaff = bool(settings["auto_expand_on_understaff"])
 
+        # Funding-aware scoring (Phase A)
+        if self._funding_monitor:
+            fm_kwargs = {}
+            if "funding_aware_scoring_enabled" in settings:
+                fm_kwargs["scoring_enabled"] = bool(settings["funding_aware_scoring_enabled"])
+            if "funding_skip_threshold_4h_pct" in settings:
+                fm_kwargs["skip_threshold_4h_pct"] = float(settings["funding_skip_threshold_4h_pct"])
+            if "funding_skip_threshold_8h_pct" in settings:
+                fm_kwargs["skip_threshold_8h_pct"] = float(settings["funding_skip_threshold_8h_pct"])
+            if "funding_score_min_factor" in settings:
+                fm_kwargs["score_min_factor"] = float(settings["funding_score_min_factor"])
+            if "funding_score_max_factor" in settings:
+                fm_kwargs["score_max_factor"] = float(settings["funding_score_max_factor"])
+            if fm_kwargs:
+                self._funding_monitor.update_settings(**fm_kwargs)
+
+        # Hedge manager (Phase C+)
+        hm = getattr(self._monitor, "_hedge_manager", None)
+        if hm is not None:
+            hm_kwargs = {}
+            if "hedging_enabled" in settings:
+                hm_kwargs["enabled"] = bool(settings["hedging_enabled"])
+            if "hedge_execution_mode" in settings:
+                hm_kwargs["execution_mode"] = str(settings["hedge_execution_mode"])
+            if "hedge_dust_threshold_usd" in settings:
+                hm_kwargs["dust_threshold_usd"] = float(settings["hedge_dust_threshold_usd"])
+            if "hedge_evaluation_interval_seconds" in settings:
+                hm_kwargs["evaluation_interval_seconds"] = float(settings["hedge_evaluation_interval_seconds"])
+            if "hedge_margin_buffer_pct" in settings:
+                hm_kwargs["margin_buffer_pct"] = float(settings["hedge_margin_buffer_pct"])
+            if "hedge_adjust_threshold_pct" in settings:
+                hm_kwargs["adjust_threshold_pct"] = float(settings["hedge_adjust_threshold_pct"])
+            if hm_kwargs:
+                hm.update_settings(**hm_kwargs)
+
         # Anomaly protection
         anomaly = self._monitor._anomaly
         if "anomaly_protection_enabled" in settings:
@@ -2151,6 +2204,41 @@ class DashboardServer:
             if "auto_expand_on_understaff" in settings:
                 self._optimizer._auto_expand_on_understaff = bool(settings["auto_expand_on_understaff"])
 
+        # Funding-aware scoring (Phase A) — startup sync
+        if self._funding_monitor:
+            fm_kwargs = {}
+            if "funding_aware_scoring_enabled" in settings:
+                fm_kwargs["scoring_enabled"] = bool(settings["funding_aware_scoring_enabled"])
+            if "funding_skip_threshold_4h_pct" in settings:
+                fm_kwargs["skip_threshold_4h_pct"] = float(settings["funding_skip_threshold_4h_pct"])
+            if "funding_skip_threshold_8h_pct" in settings:
+                fm_kwargs["skip_threshold_8h_pct"] = float(settings["funding_skip_threshold_8h_pct"])
+            if "funding_score_min_factor" in settings:
+                fm_kwargs["score_min_factor"] = float(settings["funding_score_min_factor"])
+            if "funding_score_max_factor" in settings:
+                fm_kwargs["score_max_factor"] = float(settings["funding_score_max_factor"])
+            if fm_kwargs:
+                self._funding_monitor.update_settings(**fm_kwargs)
+
+        # Hedge manager (Phase C+) — startup sync
+        hm = getattr(self._monitor, "_hedge_manager", None)
+        if hm is not None:
+            hm_kwargs = {}
+            if "hedging_enabled" in settings:
+                hm_kwargs["enabled"] = bool(settings["hedging_enabled"])
+            if "hedge_execution_mode" in settings:
+                hm_kwargs["execution_mode"] = str(settings["hedge_execution_mode"])
+            if "hedge_dust_threshold_usd" in settings:
+                hm_kwargs["dust_threshold_usd"] = float(settings["hedge_dust_threshold_usd"])
+            if "hedge_evaluation_interval_seconds" in settings:
+                hm_kwargs["evaluation_interval_seconds"] = float(settings["hedge_evaluation_interval_seconds"])
+            if "hedge_margin_buffer_pct" in settings:
+                hm_kwargs["margin_buffer_pct"] = float(settings["hedge_margin_buffer_pct"])
+            if "hedge_adjust_threshold_pct" in settings:
+                hm_kwargs["adjust_threshold_pct"] = float(settings["hedge_adjust_threshold_pct"])
+            if hm_kwargs:
+                hm.update_settings(**hm_kwargs)
+
         # Anomaly protection
         anomaly = self._monitor._anomaly
         if "anomaly_protection_enabled" in settings:
@@ -2284,12 +2372,26 @@ class DashboardServer:
             f"[Monitor] HARD_STOP_COMPLETE: {len(sells)} positions sold, "
             f"gross=${total_gross:.2f} fees=${total_fees:.4f} net=${total_net:.2f}"
         )
+
+        # Phase F: hard stop also closes all open futures hedges (fire-and-forget;
+        # operator sees result via the dashboard's hedges panel within 1s).
+        hm = getattr(self._monitor, "_hedge_manager", None)
+        hedge_close_scheduled = False
+        if hm is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(hm.close_all_for_emergency(reason="hard_stop"))
+                hedge_close_scheduled = True
+            except RuntimeError:
+                logger.warning("[Monitor] HARD_STOP: cannot schedule hedge close (no event loop)")
+
         return {
             "positions_sold": len(sells),
             "total_gross": round(total_gross, 2),
             "total_fees": round(total_fees, 4),
             "total_net": round(total_net, 2),
             "sells": sells,
+            "hedge_close_scheduled": hedge_close_scheduled,
         }
 
     def _distribute_from_bitfinex(self) -> dict:
@@ -2445,6 +2547,17 @@ class DashboardServer:
             f"inventory_rebalance: enabled={s.get('inventory_rebalance_enabled', True)}, interval={s.get('inventory_rebalance_interval_hours', 6.0)}h, drift_threshold={s.get('inventory_drift_threshold', 0.3)*100:.0f}%",
             f"bfx_over_target: enabled={s.get('bitfinex_over_target_enabled', True)}, multiplier={s.get('bitfinex_over_target_multiplier', 1.5)}x",
             f"auto_expand_on_understaff={s.get('auto_expand_on_understaff', True)}",
+            f"funding_aware: enabled={s.get('funding_aware_scoring_enabled', True)}, "
+            f"skip_4h={s.get('funding_skip_threshold_4h_pct', -0.05):+.4f}%, "
+            f"skip_8h={s.get('funding_skip_threshold_8h_pct', -0.05):+.4f}%, "
+            f"factor=[{s.get('funding_score_min_factor', 0.3):.2f}, {s.get('funding_score_max_factor', 1.5):.2f}], "
+            f"poll={s.get('funding_poll_interval_seconds', 60.0):.0f}s",
+            f"hedging: enabled={s.get('hedging_enabled', True)}, "
+            f"mode={s.get('hedge_execution_mode', 'simulation')}, "
+            f"dust=${s.get('hedge_dust_threshold_usd', 20.0):.0f}, "
+            f"eval_interval={s.get('hedge_evaluation_interval_seconds', 300.0):.0f}s, "
+            f"margin_buffer={s.get('hedge_margin_buffer_pct', 0.20)*100:.0f}%, "
+            f"adjust_threshold={s.get('hedge_adjust_threshold_pct', 0.10)*100:.0f}%",
             f"fee_real_mode={s.get('fee_real_mode', False)}",
             f"exchanges: {' '.join(fee_parts)}",
             f"disabled_exchanges: {', '.join(disabled_exs) if disabled_exs else 'none'}",
@@ -2484,6 +2597,18 @@ class DashboardServer:
                 "bitfinex_over_target_enabled",
                 "bitfinex_over_target_multiplier",
                 "auto_expand_on_understaff",
+                "funding_aware_scoring_enabled",
+                "funding_skip_threshold_4h_pct",
+                "funding_skip_threshold_8h_pct",
+                "funding_score_min_factor",
+                "funding_score_max_factor",
+                "funding_poll_interval_seconds",
+                "hedging_enabled",
+                "hedge_execution_mode",
+                "hedge_dust_threshold_usd",
+                "hedge_evaluation_interval_seconds",
+                "hedge_margin_buffer_pct",
+                "hedge_adjust_threshold_pct",
             ]
             for k in keys_to_check:
                 old_v = old_settings.get(k)
@@ -2497,6 +2622,15 @@ class DashboardServer:
             logger.info(f"[Settings]   | {line}")
         if diffs:
             logger.info(f"[Settings]   | CHANGES: {', '.join(diffs)}")
+
+    def _build_hedge_state(self) -> dict[str, Any]:
+        """Collect hedge state for dashboard broadcast (Phase F)."""
+        hm = getattr(self._monitor, "_hedge_manager", None)
+        if hm is None:
+            return {}
+        state = hm.get_debug_state()
+        state["recent_events"] = hm.get_recent_events(limit=200)
+        return state
 
     def _build_optimizer_state(self) -> dict[str, Any]:
         """Collect optimizer state for dashboard broadcast."""
@@ -2776,6 +2910,10 @@ class DashboardServer:
             "all_exchanges": ALL_EXCHANGES,
             "all_symbols": SYMBOLS,
             "optimizer": self._build_optimizer_state(),
+            "hedges": self._build_hedge_state(),
+            "funding_rates": (
+                self._funding_monitor.get_all_rates() if self._funding_monitor else {}
+            ),
             "adaptive_config": self._build_adaptive_config(),
             "all_config_history": [
                 {

@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import type { ConfigSnapshot, DailyPnlEntry, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, HourlyPnlEntry, OptimizerState, Portfolio, ProfitStats, Simulation, Trade, Transfer } from '../types';
+import type { ConfigSnapshot, DailyPnlEntry, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, FundingRateInfo, HedgeState, HourlyPnlEntry, OptimizerState, Portfolio, ProfitStats, Simulation, Trade, Transfer } from '../types';
 
 const tier1 = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT', 'ADAUSDT'];
 const tier2 = ['AVAXUSDT', 'LINKUSDT', 'POLUSDT', 'DOTUSDT', 'NEARUSDT', 'SUIUSDT', 'APTUSDT', 'TRXUSDT'];
@@ -19,6 +19,8 @@ export function exportXlsx(
   profitStats?: ProfitStats | null,
   hourlyPnl?: HourlyPnlEntry[],
   dailyPnl?: DailyPnlEntry[],
+  hedges?: HedgeState,
+  fundingRates?: Record<string, FundingRateInfo>,
 ) {
   const wb = XLSX.utils.book_new();
   const now = new Date();
@@ -601,6 +603,85 @@ export function exportXlsx(
       }));
     const wsTopHist = XLSX.utils.json_to_sheet(topHistRows);
     XLSX.utils.book_append_sheet(wb, wsTopHist, 'Top Symbols (Historical)');
+  }
+
+  // ── Phase F: Hedge Positions (current open hedges) ─────────────────
+  if (hedges && hedges.open_hedges.length > 0) {
+    const rows = hedges.open_hedges.map(h => ({
+      Symbol: h.symbol,
+      Side: h.side,
+      Qty: Number(h.qty.toFixed(8)),
+      'Entry Price': Number(h.entry_price.toFixed(6)),
+      'Mark Price': Number(h.mark_price.toFixed(6)),
+      'Notional $': Number(h.notional_usd.toFixed(2)),
+      'Unrealized P&L $': Number(h.unrealized_pnl_usd.toFixed(4)),
+      'Cumulative Funding $': Number(h.accumulated_funding_usd.toFixed(4)),
+      'Funding Rate (per period)': h.funding_rate ?? 0,
+      'Annualized Short %/yr': Number((h.annualized_short_pct ?? 0).toFixed(2)),
+      'Held (s)': Number(h.held_seconds.toFixed(0)),
+      'Held (h)': Number((h.held_seconds / 3600).toFixed(2)),
+      'Opens': h.open_count,
+      'Adjusts': h.adjust_count,
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, 'Hedges (Open)');
+  }
+
+  // ── Hedge per-symbol summary (lifetime open/close/adjust counts) ─────
+  if (hedges && hedges.recent_events.length > 0) {
+    const rows = hedges.recent_events.map(e => ({
+      Symbol: e.symbol,
+      'Open Count': e.open_count,
+      'Close Count': e.close_count,
+      'Adjust Count': e.adjust_count,
+      'Cumulative Funding $': Number(e.accumulated_funding_usd.toFixed(4)),
+      'Current Qty': Number(e.current_qty.toFixed(8)),
+      'Current Entry Price': Number(e.current_entry_price.toFixed(6)),
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, 'Hedges (Lifetime)');
+  }
+
+  // Hedge config snapshot (single-row meta)
+  if (hedges) {
+    const meta = [
+      { Key: 'Enabled', Value: hedges.enabled },
+      { Key: 'Execution Mode', Value: hedges.execution_mode },
+      { Key: 'Safety Paused', Value: hedges.safety_paused },
+      { Key: 'Reconciled', Value: hedges.reconciled },
+      { Key: 'Open Count', Value: hedges.open_count },
+      { Key: 'Total Notional $', Value: Number(hedges.total_notional_usd.toFixed(2)) },
+      { Key: 'Total Unrealized P&L $', Value: Number(hedges.total_unrealized_pnl_usd.toFixed(4)) },
+      { Key: 'Cumulative Funding $', Value: Number(hedges.cumulative_funding_usd.toFixed(4)) },
+      { Key: 'Total Opens', Value: hedges.total_opens },
+      { Key: 'Total Adjusts', Value: hedges.total_adjusts },
+      { Key: 'Total Closes', Value: hedges.total_closes },
+      { Key: 'Total Executor Errors', Value: hedges.total_executor_errors },
+      { Key: 'Dust Threshold $', Value: hedges.dust_threshold_usd },
+      { Key: 'Eval Interval (s)', Value: hedges.evaluation_interval_seconds },
+      { Key: 'Margin Buffer %', Value: Number((hedges.margin_buffer_pct * 100).toFixed(1)) },
+      { Key: 'Adjust Threshold %', Value: Number((hedges.adjust_threshold_pct * 100).toFixed(1)) },
+    ];
+    const ws = XLSX.utils.json_to_sheet(meta);
+    XLSX.utils.book_append_sheet(wb, ws, 'Hedges (Config)');
+  }
+
+  // ── Funding rates (live snapshot for all 60 symbols) ────────────────
+  if (fundingRates && Object.keys(fundingRates).length > 0) {
+    const rows = Object.entries(fundingRates)
+      .sort(([, a], [, b]) => b.annualized_short_pct - a.annualized_short_pct)
+      .map(([sym, info]) => ({
+        Symbol: sym,
+        'Rate (per period)': Number(info.rate.toFixed(8)),
+        'Rate %': Number(info.rate_pct.toFixed(4)),
+        'Interval (h)': info.interval_hours,
+        'Annualized Short %/yr': Number(info.annualized_short_pct.toFixed(2)),
+        'Mark Price': Number(info.mark_price.toFixed(6)),
+        'Score Factor': Number(info.factor.toFixed(3)),
+        'Skip-Hedge': info.skip,
+      }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, 'Funding Rates (Live)');
   }
 
   // Generate and download

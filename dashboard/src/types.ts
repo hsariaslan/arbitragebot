@@ -287,6 +287,69 @@ export interface OptimizerState {
   session_start: number;
 }
 
+// Phase F — hedge state from backend
+export interface OpenHedge {
+  symbol: string;
+  side: 'SHORT' | 'LONG';
+  qty: number;
+  entry_price: number;
+  mark_price: number;
+  notional_usd: number;
+  unrealized_pnl_usd: number;
+  opened_at: number;
+  held_seconds: number;
+  accumulated_funding_usd: number;
+  funding_rate: number | null;
+  annualized_short_pct: number | null;
+  open_count: number;
+  adjust_count: number;
+}
+
+export interface HedgeEvent {
+  symbol: string;
+  open_count: number;
+  close_count: number;
+  adjust_count: number;
+  accumulated_funding_usd: number;
+  current_qty: number;
+  current_entry_price: number;
+  opened_at: number;
+  last_adjusted_at: number;
+}
+
+export interface HedgeState {
+  enabled: boolean;
+  execution_mode: 'simulation' | 'testnet' | 'live';
+  safety_paused: boolean;
+  dust_threshold_usd: number;
+  evaluation_interval_seconds: number;
+  margin_buffer_pct: number;
+  adjust_threshold_pct: number;
+  open_count: number;
+  open_hedges: OpenHedge[];
+  total_notional_usd: number;
+  total_unrealized_pnl_usd: number;
+  cumulative_funding_usd: number;
+  total_opens: number;
+  total_closes: number;
+  total_adjusts: number;
+  total_executor_errors: number;
+  reconciled: boolean;
+  last_evaluation_ts: number;
+  recent_events: HedgeEvent[];
+}
+
+export interface FundingRateInfo {
+  rate: number;                       // decimal per period
+  rate_pct: number;                   // % per period
+  interval_hours: number;             // 4 or 8
+  annualized_short_pct: number;       // % per year for SHORT position
+  mark_price: number;
+  next_funding_time_ms: number;
+  factor: number;                     // score multiplier
+  skip: boolean;                      // skip-hedge flag
+}
+
 export interface ExchangeTransferStatus {
   withdrawal_fee: number;
   trades_to_recoup: number;
@@ -525,6 +588,8 @@ export interface DashboardState {
   all_exchanges: string[];
   all_symbols: string[];
   optimizer: OptimizerState;
+  hedges?: HedgeState;
+  funding_rates?: Record<string, FundingRateInfo>;
   adaptive_config: AdaptiveConfig;
   all_config_history: ConfigSnapshot[];
   profit_stats: ProfitStats;

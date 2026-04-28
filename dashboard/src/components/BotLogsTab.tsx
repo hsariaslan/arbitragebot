@@ -48,6 +48,11 @@ const BASE_COMPONENTS = [
   { value: 'DemoTrade', label: 'DemoTrade' },
   { value: 'FeeValidation', label: 'FeeValidation' },
   { value: 'Uptime', label: 'Uptime' },
+  { value: 'Funding', label: 'Funding' },
+  { value: 'Hedge', label: 'Hedge' },
+  { value: 'BinanceFutures', label: 'BinanceFutures' },
+  { value: 'Inventory', label: 'Inventory' },
+  { value: 'Momentum', label: 'Momentum' },
 ];
 
 const LEVEL_STYLES: Record<string, { text: string }> = {

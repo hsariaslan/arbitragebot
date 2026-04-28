@@ -1,18 +1,28 @@
-import type { SymbolRanking } from '../types';
+import type { FundingRateInfo, SymbolRanking } from '../types';
 
 const EX_SHORT: Record<string, string> = {
   Binance: 'BIN', OKX: 'OKX', Bybit: 'BYB', Bitget: 'BGT', KuCoin: 'KUC', MEXC: 'MEX', 'Gate.io': 'GAT',
 };
 function shortEx(name: string) { return EX_SHORT[name] ?? name.slice(0, 3).toUpperCase(); }
 
+// Funding rate cell color: green = positive (short earns); amber = mild
+// negative; red = severe negative (skip-hedge territory).
+function fundingColor(annualizedShortPct: number, skip: boolean): string {
+  if (skip) return 'text-red-400';
+  if (annualizedShortPct >= 0) return 'text-emerald-400';
+  if (annualizedShortPct >= -10) return 'text-slate-400';
+  return 'text-amber-400';
+}
+
 interface SymbolRankingsProps {
   rankings: SymbolRanking[];
   warmupRemaining: number;
   autoRotate: boolean;
   discoveryMode?: boolean;
+  fundingRates?: Record<string, FundingRateInfo>;
 }
 
-export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, discoveryMode }: SymbolRankingsProps) {
+export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, discoveryMode, fundingRates }: SymbolRankingsProps) {
   if (rankings.length === 0) {
     return (
       <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
@@ -50,6 +60,7 @@ export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, 
               <th className="text-right px-2 py-1.5 font-medium">Best%</th>
               <th className="text-right px-2 py-1.5 font-medium">Est $/hr</th>
               <th className="text-right px-2 py-1.5 font-medium">Trade $</th>
+              <th className="text-right px-2 py-1.5 font-medium" title="Funding rate annualized for SHORT position. Positive = short receives; negative = short pays.">Fund%/yr</th>
               <th className="text-center px-2 py-1.5 font-medium">Exchanges</th>
               <th className="text-center px-2 py-1.5 font-medium">Status</th>
             </tr>
@@ -90,6 +101,17 @@ export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, 
                   </td>
                   <td className={`px-2 py-1.5 text-right font-mono ${isActive ? r.trade_multiplier >= 1 ? 'text-emerald-400' : 'text-amber-400' : 'text-slate-600'}`}>
                     {isActive ? '$' + r.allocated_trade_size.toFixed(0) : '—'}
+                  </td>
+                  <td className="px-2 py-1.5 text-right font-mono">
+                    {(() => {
+                      const fr = fundingRates?.[r.symbol];
+                      if (!fr) return <span className="text-slate-600">—</span>;
+                      const ann = fr.annualized_short_pct;
+                      const cls = fundingColor(ann, fr.skip);
+                      const label = `${ann >= 0 ? '+' : ''}${ann.toFixed(1)}%`;
+                      const tooltip = `${fr.rate_pct >= 0 ? '+' : ''}${fr.rate_pct.toFixed(4)}% per ${fr.interval_hours}h${fr.skip ? ' (SKIP threshold)' : ''}`;
+                      return <span className={cls} title={tooltip}>{label}{fr.skip && ' ⚠'}</span>;
+                    })()}
                   </td>
                   <td className="px-2 py-1.5 text-center font-mono text-xs">
                     {r.dominant_buyers?.length > 0 ? (

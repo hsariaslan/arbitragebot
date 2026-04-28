@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
-import type { Portfolio, Simulation, ProfitStats, UptimeInfo, ProxyUptimeInfo, AnomalyProtectionState } from '../types';
+import type { Portfolio, Simulation, ProfitStats, UptimeInfo, ProxyUptimeInfo, AnomalyProtectionState, HedgeState } from '../types';
 
 interface HeaderProps {
   connected: boolean;
@@ -15,6 +15,7 @@ interface HeaderProps {
   anomalyProtection?: AnomalyProtectionState;
   manualStopped?: boolean;
   manualStopTimestamp?: number;
+  hedges?: HedgeState;
   onLogout: () => void;
 }
 
@@ -233,7 +234,7 @@ function getAnomalyStatus(anomalyProtection?: AnomalyProtectionState, manualStop
   return { label: 'Off', dotClass: 'bg-slate-500', textClass: 'text-slate-500' };
 }
 
-export default function Header({ connected, uptimeSeconds, uptimeInfo, connectedExchanges, totalExchanges, proxyUptimeInfo, portfolio, simulation, profitStats, anomalyProtection, manualStopped, manualStopTimestamp, onLogout }: HeaderProps) {
+export default function Header({ connected, uptimeSeconds, uptimeInfo, connectedExchanges, totalExchanges, proxyUptimeInfo, portfolio, simulation, profitStats, anomalyProtection, manualStopped, manualStopTimestamp, hedges, onLogout }: HeaderProps) {
   const [mobilePopup, setMobilePopup] = useState<string | null>(null);
 
   // Connection state
@@ -476,6 +477,35 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
               {simulation.skipped_trades}
             </span>
           </div>
+          {hedges && hedges.enabled && (
+            <>
+              <div className="h-3 w-px bg-slate-700" />
+              <div
+                className="flex items-center gap-1.5"
+                title={
+                  `Hedge mode: ${hedges.execution_mode} | Open: ${hedges.open_count} | ` +
+                  `Notional: $${hedges.total_notional_usd.toFixed(0)} | ` +
+                  `Unrealized: ${hedges.total_unrealized_pnl_usd >= 0 ? '+' : ''}$${hedges.total_unrealized_pnl_usd.toFixed(2)} | ` +
+                  `Cum funding: ${hedges.cumulative_funding_usd >= 0 ? '+' : ''}$${hedges.cumulative_funding_usd.toFixed(2)}` +
+                  (hedges.safety_paused ? ' | OPENS PAUSED' : '')
+                }
+              >
+                <span className="text-slate-500">Hedge:</span>
+                <span className={`font-mono font-medium ${
+                  hedges.execution_mode === 'live' ? 'text-red-300'
+                  : hedges.execution_mode === 'testnet' ? 'text-amber-300'
+                  : 'text-slate-400'
+                }`}>
+                  {hedges.open_count}
+                </span>
+                <span className="text-slate-600">|</span>
+                <PnlText value={hedges.cumulative_funding_usd} />
+                {hedges.total_executor_errors > 0 && (
+                  <span className="text-red-400 font-mono ml-1">⚠{hedges.total_executor_errors}</span>
+                )}
+              </div>
+            </>
+          )}
         </div>
       )}
     </header>
