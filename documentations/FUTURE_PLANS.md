@@ -433,3 +433,140 @@ class TimeOfDayProfile:
 | Net%-Based Dynamic Trade Sizing | — | **Implemented** (v0.22.0) | Already live as `net_pct_sizing_enabled`. Working well — fat spreads get bigger trades. |
 | Incremental Symbol Activation | Low | Deferred | Root cause (rotation churn) better addressed by pair fee gate. Defer until live trading prep. |
 | Time-of-Day Adaptive Trading | Low | Data collection (2/5 sessions) | 10:00 UTC confirmed as best hour across 2 sessions. Need 3 more for implementation. |
+
+---
+
+## Spot–Futures Delta-Neutral Hedging (Binance Perpetuals)
+
+**Status:** Designed 2026-04-28, implementation in progress same day. This section captures (1) decisions made during the design discussion, (2) operational refinements deferred to post-v1, and (3) implementation reference for future iterations.
+
+### Why hedging — the inventory bleed problem
+
+Session #19 (9-day run on $10k capital) booked **+$3,863 sim trading PnL** but actual portfolio change was **−$571** — a ~$4,434 mark-to-market gap from holding crypto inventory in a declining market. Bidirectional symmetric trading optimized for execution but built up an unhedged long-crypto position. Closing this gap requires opening short futures positions equal to the spot inventory so that price movement nets to zero — profit comes purely from arbitrage spread, not from price exposure.
+
+### Architecture decisions (v1)
+
+| Decision | Rationale |
+|---|---|
+| **Binance Futures only** | #1 by liquidity (~$25T/yr volume), 250+ perp contracts (covers ~58/60 bot symbols), tightest funding (most arbitrageurs), best testnet. Avoids implementing N futures integrations. |
+| **1× leverage** | No liquidation risk. 5× sounds attractive for capital efficiency but a 20% pump (routine for alts) liquidates the short and leaves you holding the depreciating spot. Not worth the tail risk. |
+| **Isolated margin per symbol** | Cross-margin can cascade losses across positions. Isolated caps loss to one symbol's margin. |
+| **Hedge net inventory, not per-trade** | Bot churns trades back and forth. Hedge = current crypto qty × price across all exchanges. Continuously rebalance every 5 min as inventory drifts. |
+| **Skip hedge for symbols not on Binance Futures** | ~58/60 covered. The 1–2 missing (likely PENGU, STRK) — accept inventory risk, replace them with 2 new symbols that ARE on Binance Futures. |
+| **50/50 spot/margin split (v1)** | $1000 capital → $500 spot + $500 futures margin. Trade size = 4% of $500 = $20. Conservative; user plans to test 1 month at $1k before scaling. |
+
+### Confirmed Binance Futures fees (verified from official docs)
+
+- Base: **0.02% maker / 0.05% taker** (NOT 0.04% taker — that's VIP 1 which requires $50M monthly volume)
+- BNB discount: 10% off (must hold BNB in futures wallet, fees auto-deducted from BNB)
+- Referral kickback: typically 10% (stacks with BNB discount)
+- **Effective with both stacked**: ~0.0162% maker / ~0.0405% taker
+- **Per hedge cycle (open + close, taker+taker)**: 2 × 0.0405% = **0.081%**
+- **No per-symbol fee differences** — all USDⓈ-M perpetuals charge the same base rate
+
+### Funding rate API (used for live awareness)
+
+| Endpoint | Purpose | Weight | API Key |
+|---|---|---:|---|
+| `GET /fapi/v1/premiumIndex` (no symbol) | All-symbols current funding rate + mark price in one call | 10 | No |
+| `GET /fapi/v1/fundingRate?symbol=X&limit=N` | Historical funding (~83d at 8h, 166d at 4h) | 1 | No |
+| `GET /fapi/v1/fundingInfo` | Per-symbol funding rate caps/floors and interval | 1 | No |
+
+Bot polls `/premiumIndex` every 60s for live data — exposes `fee_manager.get_funding_rate(symbol) -> float`. Optimizer reads this every scoring tick and applies to score (positive funding = boost, negative = penalty).
+
+### Funding-aware skip threshold (v1)
+
+Default: **−0.05% per period** (or **−0.10% per period for 8h-funding symbols** to keep daily cost equivalent).
+
+Tiered behavior:
+
+| Funding Rate (per period) | Action |
+|---|---|
+| > 0% | Hedge as usual — earning income |
+| 0% to −0.02% | Hedge, normal scoring |
+| −0.02% to −0.05% | Hedge, mild score penalty |
+| −0.05% to −0.10% | Hedge but heavy penalty + flag for early demotion |
+| < −0.10% | Skip hedge, immediate demote, blacklist symbol for 1h |
+
+Reasoning: at −0.05%/period for a 4h-funding symbol → 0.30%/day cost. Typical alt loses ~0.5%/day to spot price drift, hedge fees ~0.08%/day amortized. Beyond −0.05%/period the hedge starts costing more than the price loss it prevents. Below that threshold, the symbol shouldn't be held at all.
+
+### v1 implementation operational checklist
+
+These were called out during design and should be applied in the v1 build:
+
+1. **BNB + referral fee setup** — hold ~$5 BNB in futures wallet (fees auto-deducted), apply referral code at signup. Together drop taker 0.05% → 0.0405% (19% reduction).
+2. **Live funding monitor** — poll `/fapi/v1/premiumIndex` every 60s for all symbols. Cache results. Expose via `fee_manager.get_funding_rate(symbol)`. Optimizer scoring uses this to penalize/boost.
+3. **Funding-rate-aware scoring** — `adjusted_score = base_score - (hedge_cost_pct_per_day × expected_hold_hours / 24)`. Symbols with positive funding score higher; deeply-negative symbols get penalized AND skip the hedge.
+4. **Live hedge-skip blacklist** — if a symbol's funding < −0.05% (4h symbols) or < −0.10% (8h) for 3 consecutive periods, skip the hedge AND demote. Persisted in state with 1h re-check window.
+5. **Don't hedge dust positions** — if `crypto_value[ex][sym] < $20`, don't open a futures hedge. Fees would exceed protection. Accumulate inventory above the threshold first.
+6. **Liquidation buffer at 1× leverage** — even at 1× leverage, mark price spikes can briefly trigger a liquidation if margin = exactly position size. Keep a **20% margin buffer**. So $500 margin should hedge $400 maximum, not $500.
+7. **Pause-on-emergency closes futures** — when the anomaly emergency triggers and trading is paused, also CLOSE all futures positions. Otherwise they sit open paying funding while the bot is paused.
+8. **Funding-payment timing optimization** — funding settles at exact UTC timestamps (00:00, 04:00, 08:00, ... for 4h symbols). If you're closing a hedge anyway, do it 1–2 minutes BEFORE settlement to avoid paying the fee. Saves cents per cycle, free wins.
+9. **Recovery on bot restart** — at startup, query Binance for actual open futures positions per symbol, reconcile with persisted state. Without this, a crash → silent position drift.
+10. **Atomic execution or fast unwind** — spot fill + futures fill can fail independently. If one succeeds and the other fails, immediately unwind the successful leg. Naked long is the thing we're trying to avoid; naked short is worse (unbounded loss on pump).
+
+### Funding history analyzer script (also v1)
+
+One-time analyzer pulled all 8 top-symbol funding histories during the design discussion. Should be productionized:
+
+- Pulls 90-day funding history for all 60 symbols (~60 API calls, ~1 minute total)
+- Persists to `state/funding_history.json` with `{symbol: {avg, median, p5, p95, worst_spike, period_hours}}`
+- Triggered at deploy + once a week (cron)
+- Live data continues via `/premiumIndex` poll
+- Used to set per-symbol thresholds adaptively (a symbol whose historical p5 is −0.20%/period should have a tighter blacklist than one whose p5 is −0.02%)
+
+### Refinement: Selective Close-Before-Settlement Trick
+
+**Status:** Explicitly deferred — implement only after v1 is stable and operating profitably for 1+ month.
+
+**The user's idea**: close the short ~30s before each funding settlement (e.g., 03:59:30 UTC for 04:00 settlement) and reopen ~30s after, to avoid paying funding.
+
+**Why it doesn't work as a default strategy** (math from design discussion):
+
+- Per-dodge cost: 2 × 0.0405% taker = **0.081%** (open + close round-trip)
+- Typical funding cost avoided: **0.04%** (an "expensive" period)
+- **Net loss per dodge: 0.041%** — fees exceed savings
+- Plus 30–60s of unhedged exposure around settlement (price can move 0.5%+ on volatile alts)
+- Plus thinner liquidity around settlement (everyone tries this trick)
+- For 4h-funding symbols with 6 settlements/day, constant dodging = 12 trades × 0.0405% = **0.49%/day in fees** vs typical ~0.05%/day funding cost = **10× more expensive**
+
+**The smarter version (the actual refinement to implement later):**
+
+Only close-before-settlement when **BOTH** conditions hold:
+1. **Projected funding rate > 0.10%/period** (extreme spike, beyond the 0.081% dodge cost)
+2. **Settlement is within the next 5 minutes** (no opportunity cost on holding the dodge logic active for hours)
+
+This catches single-period spikes (e.g., the APE −0.687% event from March 27 — would have been catastrophic to hold, very profitable to dodge) without constant churning during normal funding cycles.
+
+Even better with maker orders for the dodge (~0.032% round trip vs 0.081% taker), break-even drops to funding > 0.04%/period — but maker orders add fill risk (maybe partial fills, may miss the window). Defer to v2.
+
+**Settings that would be added**:
+- `funding_dodge_enabled` (bool, default false in v1, true in v2)
+- `funding_dodge_threshold_pct` (float, default 0.10 = 0.10%/period)
+- `funding_dodge_window_seconds` (int, default 300 = 5 min before settlement)
+- `funding_dodge_use_maker` (bool, default false)
+
+### Why v1 doesn't need every refinement
+
+The v1 implementation answers the binary question "does delta-neutral hedging actually convert sim profit into real portfolio gain?" That answer requires:
+- Correct hedge sizing (net inventory tracking)
+- Correct execution (spot + futures atomic-ish)
+- Correct funding awareness (live data + skip threshold)
+- Correct emergency handling (close shorts on pause)
+
+The optimizations above (close-before-settlement, maker-only orders, dynamic per-symbol thresholds, etc.) only improve a system that already works. Build the working core first, then optimize.
+
+### Success criteria for v1 (1-month evaluation)
+
+After deploying with $1k capital ($500 spot + $500 futures margin) for 30 days:
+
+| Metric | Target |
+|---|---|
+| Portfolio change (real) | **Positive**, ideally matching arbitrage PnL within ±10% |
+| Mark-to-market gap (target=0) | **<5% of arbitrage PnL** |
+| Funding cost / arbitrage profit | **<20%** |
+| Hedge fee / arbitrage profit | **<15%** |
+| No emergency triggers | **0** |
+| Liquidations | **0** (1× leverage should make this impossible barring exchange bugs) |
+
+If all 6 met after 30 days → scale to $5k capital. If any fail badly → diagnose, iterate, retry at $1k.

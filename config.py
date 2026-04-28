@@ -6,7 +6,7 @@ All symbols, exchange settings, and operational parameters.
 
 import os
 
-__version__ = "0.27.1-beta"
+__version__ = "0.28.0-beta"
 
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
@@ -361,6 +361,27 @@ BITFINEX_OVER_TARGET_MULTIPLIER: float = 1.5  # Trigger when BFX USDT > reserve_
 # Auto-expand on understaff (Feature 6 — bypass eval interval when active symbols < min)
 AUTO_EXPAND_ON_UNDERSTAFF: bool = True
 
+# Funding-aware scoring (Phase A — read-only foundation for spot-futures hedging)
+# Multiplier is applied to symbol score: positive funding boosts, negative penalizes.
+# Skip threshold: when funding worse than this, score factor is floored (effectively
+# disqualifies the symbol for activation/expansion until funding recovers).
+FUNDING_AWARE_SCORING_ENABLED: bool = True
+FUNDING_SKIP_THRESHOLD_4H_PCT: float = -0.05  # % per 4h period
+FUNDING_SKIP_THRESHOLD_8H_PCT: float = -0.05  # % per 8h period
+FUNDING_SCORE_MIN_FACTOR: float = 0.3         # floor for the multiplier
+FUNDING_SCORE_MAX_FACTOR: float = 1.5         # cap for the multiplier
+FUNDING_POLL_INTERVAL_SECONDS: float = 60.0   # how often to poll /premiumIndex
+
+# Spot-futures hedging (Phase C — shadow mode; Phase D wires execution)
+HEDGING_ENABLED: bool = True
+# Execution mode: "simulation" (Phase C — shadow only, no orders),
+# "testnet" (Phase D — Binance Futures testnet), "live" (Phase G — mainnet).
+HEDGE_EXECUTION_MODE: str = "simulation"
+HEDGE_DUST_THRESHOLD_USD: float = 20.0        # min spot notional to hedge
+HEDGE_EVALUATION_INTERVAL_SECONDS: float = 300.0  # 5 min between hedge eval cycles
+HEDGE_MARGIN_BUFFER_PCT: float = 0.20         # keep margin >= 1.2× position size
+HEDGE_ADJUST_THRESHOLD_PCT: float = 0.10      # only adjust if drift > 10% of size
+
 # Anomaly protection (configurable via settings page)
 ANOMALY_PROTECTION_ENABLED: bool = True
 CIRCUIT_BREAKER_WINDOW: int = 900            # Rolling P&L window in seconds (15min)
@@ -640,6 +661,13 @@ DASHBOARD_BIND_HOST: str = os.environ.get("DASHBOARD_BIND_HOST", "127.0.0.1")
 # Demo/testnet API keys (for portfolio comparison + Phase 2 order execution)
 BINANCE_TESTNET_API_KEY: str = os.environ.get("BINANCE_TESTNET_API_KEY", "")
 BINANCE_TESTNET_API_SECRET: str = os.environ.get("BINANCE_TESTNET_API_SECRET", "")
+# Binance USDⓈ-M Futures testnet keys (separate from spot testnet — different
+# credential sets at https://testnet.binancefuture.com). Used by the Phase B
+# futures executor for delta-neutral hedging.
+BINANCE_FUTURES_TESTNET_API_KEY: str = os.environ.get("BINANCE_FUTURES_TESTNET_API_KEY", "")
+BINANCE_FUTURES_TESTNET_API_SECRET: str = os.environ.get("BINANCE_FUTURES_TESTNET_API_SECRET", "")
+BINANCE_FUTURES_API_KEY: str = os.environ.get("BINANCE_FUTURES_API_KEY", "")  # mainnet (Phase G+)
+BINANCE_FUTURES_API_SECRET: str = os.environ.get("BINANCE_FUTURES_API_SECRET", "")
 OKX_DEMO_API_KEY: str = os.environ.get("OKX_DEMO_API_KEY", "")
 OKX_DEMO_API_SECRET: str = os.environ.get("OKX_DEMO_API_SECRET", "")
 OKX_DEMO_PASSPHRASE: str = os.environ.get("OKX_DEMO_PASSPHRASE", "")

@@ -616,6 +616,99 @@ These were identified as Session #20 mitigations but deferred until proven neces
 
 **When to implement**: only if Feature 6 (Auto-Expand) doesn't restore active count within 5 min after >50% of demotions across multiple sessions.
 
+## Spot-Futures Delta-Neutral Hedging (v0.28.0-beta)
+
+Continuous short-futures hedge against spot inventory on **Binance Futures** (USDⓈ-M perpetuals). Profit comes purely from arbitrage spread; price-direction risk on held crypto is neutralized by the hedge. Implementation phased so each layer is independently testable. See `documentations/FUTURE_PLANS.md` for design rationale.
+
+### Phase A — Funding-Aware Scoring (read-only)
+
+`funding_monitor.py` polls Binance Futures `/fapi/v1/premiumIndex` every 60s in one API call (no auth, weight 10) to track live funding rates for all 60 trading symbols. Each scoring tick the optimizer reads `get_funding_factor(symbol)` and multiplies `best_net_pct` by it.
+
+- **Multiplier**: `clamp(1.0 + annualized_short_pct/100, min, max)`. Positive funding (short earns) boosts score, negative (short pays) penalizes.
+- **Skip threshold**: when funding worse than `-0.05%/period` (4h or 8h symbols), the multiplier is floored at `min_factor=0.3` — effectively disqualifies the symbol from activation/expansion.
+- **1000X mapping**: `FUTURES_SYMBOL_OVERRIDE = {"PEPEUSDT": ("1000PEPEUSDT", 1000), ...}` — single source of truth for spot↔futures symbol mapping.
+- **Settings (hot-applied)**: `funding_aware_scoring_enabled`, `funding_skip_threshold_4h_pct`, `funding_skip_threshold_8h_pct`, `funding_score_min_factor`, `funding_score_max_factor`, `funding_poll_interval_seconds`.
+- **Logging**: `[Funding] Monitor started`, `[Funding] Poll #N`, `[Funding] SYMBOL: ann=±X%/yr factor=X.XXX (boost|penalty)`, `[Funding] SKIP SYMBOL`. Throttled per-symbol/10min for factor logs.
+
+`scripts/analyze_funding_history.py` is a standalone analyzer that pulls 90 days of historical funding for all 60 symbols (60 API calls, ~1 minute) and writes `state/funding_history.json` with avg/median/p5/p95/worst-spike/interval per symbol. Used by FundingMonitor at startup to seed per-symbol funding intervals (4h vs 8h) before the first live poll.
+
+### Phase B — Binance Futures Executor
+
+`executors/binance_futures_exec.py` — `BinanceFuturesExecutor` for testnet (`https://testnet.binancefuture.com`) or mainnet (`mode='live'`). HMAC-SHA256 signing, conservative rate limit (1500/min vs Binance's 2400 limit). Inherits from `ExecutionEngine` ABC.
+
+Key methods:
+- `place_market_order(symbol, side, qty, client_order_id, reduce_only)` — auto-rounds qty DOWN to LOT_SIZE step and validates min_notional locally before API call (avoids -1111/-2010/-4164 round-trips)
+- `close_position(symbol)` — auto-detects current side (signed `positionAmt`), closes via reduceOnly market
+- `get_position(symbol)`, `get_all_positions()` — for restart reconciliation
+- `get_account_info()`, `get_balance(asset)` — wallet/margin balance
+- `set_leverage(symbol, leverage)`, `set_margin_type(symbol, isolated)` — cached, idempotent
+- `get_symbol_filters(symbol)`, `round_quantity(symbol, qty)` — lazily-loaded `/fapi/v1/exchangeInfo` cache (705+ symbols on testnet)
+
+Standalone test: `scripts/test_futures_executor.py [--symbol BTCUSDT] [--notional 60]` — 7-step end-to-end (account info → leverage/margin setup → open short → verify position → verify in get_all_positions → close → verify flat). No bot integration.
+
+Credentials via `.env`: `BINANCE_FUTURES_TESTNET_API_KEY/SECRET` (testnet) or `BINANCE_FUTURES_API_KEY/SECRET` (live).
+
+### Phase C — Hedge State + Sizing (shadow mode)
+
+`hedge_manager.py` — `HedgeManager` + `ShadowHedge` dataclass.
+
+For each active symbol on each main-loop tick (throttled to `evaluation_interval_seconds`, default 300s):
+- `target_qty = sum(balance.crypto[ex][symbol])` across all exchanges
+- `target_usd = target_qty × mid_price`
+- `should_hedge()` checks: enabled, dust threshold ($20 default), futures contract availability, funding rate skip threshold
+- Decisions: open if no hedge + above threshold; adjust if drift ≥ 10% (`adjust_threshold_pct`); close on inactivity, dust drop, funding spike, or symbol demotion
+- Per-symbol `asyncio.Lock` serializes concurrent ops on the same symbol
+- Funding accrual estimated continuously between ticks: `rate × periods_fraction × notional` adds to per-symbol `accumulated_funding_usd`
+
+State persisted in `state/session.json` under `hedge_manager` key (lifetime open/close/adjust counters, per-symbol shadow state, cumulative funding P&L) so observations survive restarts.
+
+**Settings (hot-applied)**: `hedging_enabled`, `hedge_execution_mode` (simulation|testnet|live), `hedge_dust_threshold_usd`, `hedge_evaluation_interval_seconds`, `hedge_margin_buffer_pct`, `hedge_adjust_threshold_pct`.
+
+**Logging in shadow mode**: `[Hedge] WOULD_OPEN`, `[Hedge] WOULD_ADJUST`, `[Hedge] WOULD_CLOSE`, `[Hedge] Eval cycle: N hedges open ...` per cycle.
+
+### Phase D — Live Hedging on Testnet
+
+When `hedge_execution_mode` = `testnet` or `live`, `evaluate()` calls the executor instead of just updating shadow state.
+
+- **`_open()`**: ensures leverage/margin set per symbol (cached) → checks margin buffer (`available_balance >= notional × 1.2`) → places SELL market with `reduce_only=False` → on success updates shadow with real fill price → logs `[Hedge] OPEN`. Margin shortfall logs `[Hedge] OPEN_BLOCKED`. API failure logs `[Hedge] OPEN_FAILED`.
+- **`_adjust()`**: computes delta, places BUY (reduceOnly) to shrink or SELL to grow → updates shadow on success.
+- **`_close()`**: calls `executor.close_position()` (auto-detects side) → updates shadow on success.
+- **Reconciliation**: `reconcile_with_executor()` runs once on first eval after startup. Queries `get_all_positions()`, treats real positions as source of truth. Any drift logged as `[Hedge] RECONCILE SYMBOL: shadow_qty=X actual_real=Y → syncing`. Orphan real positions (no shadow entry) logged + adopted. Run summary: `[Hedge] RECONCILE_DONE: N drift, N orphans, N missing`.
+- **Errors**: `_total_executor_errors` counter incremented on any executor failure. Visible in HedgesPanel header.
+
+**Per-symbol locking** prevents concurrent ops (e.g. demote-during-eval) from racing.
+
+### Phase E — Anomaly + Demotion + Hard-Stop Integration
+
+- **Anomaly emergency**: `monitor._emergency_sell_all()` calls `hedge_manager.close_all_for_emergency(reason)` BEFORE sending the email. Returns `{closed: [...], failed: [...], total_funding_pnl_usd, n_closed, n_failed}` summary, included in the email's "Futures Hedges Closed" section with per-symbol qty/held/funding-PnL table.
+- **Demotion**: `optimizer._execute_demotion(symbol)` calls `hedge_manager.request_close(symbol, reason="demoted(SYM)")` after the spot sell. The sync `request_close` schedules an async close via the running event loop.
+- **Manual stop / anomaly pause**: `on_safety_pause(reason)` blocks new opens but lets existing hedges keep tracking inventory and close on demotion. Logged as `[Hedge] SAFETY_PAUSE engaged`. Resume via `on_safety_resume()` clears the flag, drops the eval throttle, and forces a reconcile.
+- **Hard stop**: dashboard's hard-stop button schedules `close_all_for_emergency(reason="hard_stop")` after the spot sell-all.
+
+### Phase F — Dashboard Observability
+
+- **Header stat bar**: "Hedge: N | $X" (count + cumulative funding PnL, color-coded by sign). Hover tooltip shows mode, notional, unrealized, safety-pause status, executor errors.
+- **HedgesPanel** on main Dashboard: execution-mode badge (SHADOW/TESTNET/LIVE), safety-pause indicator, reconcile-pending indicator, aggregate cards (open count, notional, unrealized PnL, cumulative funding), and a table of open hedges with symbol/side/qty/entry/mark/notional/unrealized/funding/annualized-rate/held-time.
+- **Symbol Rankings table**: new "Fund%/yr" column with color-coded annualized funding (green positive = short earns, slate mild negative, amber moderate, red ⚠ when ≥ skip threshold). Tooltip shows per-period rate + interval.
+- **Settings page**: two new sections — "Funding-Aware Scoring" (6 controls) and "Spot-Futures Hedging" (6 controls including execution mode dropdown).
+- **Bot Logs filter**: dropdown includes new components — `Funding`, `Hedge`, `BinanceFutures`, `Inventory`, `Momentum`.
+- **XLSX export** adds 4 new sheets: `Hedges (Open)`, `Hedges (Lifetime)`, `Hedges (Config)`, `Funding Rates (Live)`.
+
+### Phase G — Live Mainnet Transition (Not Yet Done)
+
+After 30 days of stable testnet operation, flip `hedge_execution_mode` from `testnet` → `live` via dashboard settings + restart. Set `BINANCE_FUTURES_API_KEY/SECRET` in VPS `.env` (separate from testnet credentials). Apply BNB+referral fee setup. See FUTURE_PLANS.md for the success criteria checklist (mark-to-market gap < 5%, funding cost < 20% of arb profit, zero liquidations, etc.).
+
+### Key Files
+
+| File | Responsibility |
+|------|---------------|
+| `funding_monitor.py` | Polls `/premiumIndex`, exposes `get_funding_factor()`, `should_skip_hedge()`, `get_all_rates()` |
+| `hedge_manager.py` | Shadow + real hedge state, `evaluate()`, `reconcile_with_executor()`, `close_all_for_emergency()`, `request_close()`, `on_safety_pause/resume()` |
+| `executors/binance_futures_exec.py` | `BinanceFuturesExecutor` — REST client, HMAC signing, qty rounding, min_notional check, position management |
+| `scripts/analyze_funding_history.py` | One-shot 90-day funding history analyzer → `state/funding_history.json` |
+| `scripts/test_futures_executor.py` | Standalone end-to-end testnet test for the executor (no bot integration) |
+| `dashboard/src/components/HedgesPanel.tsx` | Live hedge state UI |
+
 ## Anomaly Protection
 
 3-layer trading safety system that detects performance decline and takes targeted action. Per-symbol blocking for isolated issues, global pause only for systemic problems. All settings configurable via dashboard Settings, hot-applied without restart. Separate `AnomalyProtection` class in `anomaly_protection.py`.
