@@ -371,6 +371,16 @@ AUTO_EXPAND_ON_UNDERSTAFF: bool = True
 DIVERSIFICATION_FLOOR_ENABLED: bool = True
 DIVERSIFICATION_FLOOR_MULTIPLIER: float = 0.7  # 30% easier to clear when understaffed
 
+# Auto-disable thinly-traded symbols per exchange. Daily at 00:01 UTC, the bot
+# fetches 24h volumes from each exchange and adds (exchange, symbol) combos
+# below the threshold to the auto-blocklist. Operator-set `disabled_symbols`
+# remain untouched (manual decisions never override automatic ones, and vice-
+# versa). Threshold should grow with capital — at $1k capital, $10k/day volume
+# is the floor for a $20-40 trade to find a counterparty without slippage; at
+# $10k capital aim for $100k+ volume.
+AUTO_DISABLE_VOLUME_ENABLED: bool = True
+AUTO_DISABLE_VOLUME_THRESHOLD_USD: float = 10000.0  # 24h USD volume floor
+
 # Funding-aware scoring (Phase A — read-only foundation for spot-futures hedging)
 # Multiplier is applied to symbol score: positive funding boosts, negative penalizes.
 # Skip threshold: when funding worse than this, score factor is floored (effectively

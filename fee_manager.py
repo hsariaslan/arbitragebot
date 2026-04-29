@@ -43,6 +43,13 @@ class ExchangeFeeConfig:
     # disable thinly-traded symbols on illiquid exchanges (e.g. LDO/HYPE
     # on Bitfinex have ~$2/day volume — useless to trade).
     disabled_symbols: list[str] = field(default_factory=list)
+    # Auto-managed blocklist — refreshed daily at 00:01 UTC by the
+    # volume-based auto-disable task. Operator-set `disabled_symbols`
+    # are never touched by automation, and vice-versa: a manual block
+    # survives auto-rescue, an auto-block can be manually cleared
+    # (until the next daily refresh re-adds it if volume is still low).
+    # `is_symbol_enabled()` checks BOTH lists.
+    auto_disabled_symbols: list[str] = field(default_factory=list)
     # Soft preference multipliers for pair selection. 1.0 = neutral, >1.0
     # makes the exchange a more-attractive buyer/seller, <1.0 makes it less.
     # Default Bitfinex.buyer_boost=5.0 + MEXC.seller_boost=5.0 enforces a
@@ -88,6 +95,7 @@ class ExchangeFeeConfig:
             "as_buyer": self.as_buyer,
             "as_seller": self.as_seller,
             "disabled_symbols": list(self.disabled_symbols),
+            "auto_disabled_symbols": list(self.auto_disabled_symbols),
             "buyer_boost": self.buyer_boost,
             "seller_boost": self.seller_boost,
         }
@@ -113,6 +121,7 @@ class ExchangeFeeConfig:
             as_buyer=bool(data.get("as_buyer", True)),
             as_seller=bool(data.get("as_seller", True)),
             disabled_symbols=list(data.get("disabled_symbols", [])),
+            auto_disabled_symbols=list(data.get("auto_disabled_symbols", [])),
             buyer_boost=float(data.get("buyer_boost", 1.0)),
             seller_boost=float(data.get("seller_boost", 1.0)),
         )
@@ -232,12 +241,13 @@ class FeeManager:
         Operator-set per-role flags constrain pair selection — e.g. setting
         only Bitfinex.as_buyer=True and MEXC.as_seller=True restricts trades
         to the cheapest possible pair. Disabled exchanges always return False.
-        Symbols in the manual `disabled_symbols` blocklist also return False.
+        Symbols in either the manual `disabled_symbols` blocklist or the
+        daily-refreshed `auto_disabled_symbols` blocklist also return False.
         """
         cfg = self._configs.get(exchange)
         if cfg is None:
             return True  # unknown = allow
-        if symbol and symbol in cfg.disabled_symbols:
+        if symbol and (symbol in cfg.disabled_symbols or symbol in cfg.auto_disabled_symbols):
             return False
         return cfg.enabled and cfg.as_buyer
 
@@ -246,19 +256,20 @@ class FeeManager:
         cfg = self._configs.get(exchange)
         if cfg is None:
             return True
-        if symbol and symbol in cfg.disabled_symbols:
+        if symbol and (symbol in cfg.disabled_symbols or symbol in cfg.auto_disabled_symbols):
             return False
         return cfg.enabled and cfg.as_seller
 
     def is_symbol_enabled(self, exchange: str, symbol: str) -> bool:
         """Check if a (exchange, symbol) combination is allowed (either role).
 
-        Blocked if symbol is in the manual blocklist (`disabled_symbols`).
+        Blocked if symbol is in either the manual blocklist (`disabled_symbols`)
+        or the auto-managed daily blocklist (`auto_disabled_symbols`).
         """
         cfg = self._configs.get(exchange)
         if cfg is None:
             return True
-        return symbol not in cfg.disabled_symbols
+        return symbol not in cfg.disabled_symbols and symbol not in cfg.auto_disabled_symbols
 
     def get_buyer_boost(self, exchange: str) -> float:
         """Soft preference multiplier when this exchange is selected as buyer.
@@ -282,6 +293,34 @@ class FeeManager:
         if cfg is None:
             return 1.0
         return max(0.0, cfg.seller_boost)
+
+    def apply_auto_disable(
+        self, per_exchange: dict[str, list[str]]
+    ) -> dict[str, dict]:
+        """Replace the auto-managed blocklist for each exchange.
+
+        `per_exchange`: {exchange: [symbols_to_auto_disable]}. Each exchange's
+        existing `auto_disabled_symbols` is fully replaced (so symbols whose
+        volume rose back above threshold are automatically un-blocked).
+        Manual `disabled_symbols` is never touched here.
+
+        Returns a per-exchange diff: {exchange: {"added": [...], "removed": [...], "kept": [...]}}.
+        Caller should persist via to_settings_dict + save_settings.
+        """
+        diffs: dict[str, dict] = {}
+        for exchange, new_list in per_exchange.items():
+            cfg = self._configs.get(exchange)
+            if cfg is None:
+                continue
+            new_set = set(new_list)
+            old_set = set(cfg.auto_disabled_symbols)
+            added = sorted(new_set - old_set)
+            removed = sorted(old_set - new_set)
+            kept = sorted(new_set & old_set)
+            cfg.auto_disabled_symbols = sorted(new_set)
+            if added or removed:
+                diffs[exchange] = {"added": added, "removed": removed, "kept": kept}
+        return diffs
 
     def get_fee_model(self, exchange: str) -> str:
         """Get fee deduction model for an exchange.

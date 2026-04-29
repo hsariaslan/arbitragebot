@@ -12,6 +12,7 @@ import base64
 import gzip
 import json
 import logging
+import os
 import re
 import secrets
 import time
@@ -181,6 +182,24 @@ class DashboardServer:
         self._trade_amount_rescale_interval: float = 3600.0  # 1 hour
         self._last_trade_amount_rescale_ts: float = 0.0
         self._last_discovery_state: bool | None = None  # None = not yet observed
+
+        # Daily auto-disable thinly-traded (exchange, symbol) combos. Runs once
+        # per UTC day at 00:01 UTC (or on first eligible cycle after restart if
+        # the scheduled time was missed during downtime). State persisted to
+        # disk so multi-restart days don't double-run, and so a bot that was
+        # offline at 00:01 UTC catches up on next start. See
+        # `_maybe_run_auto_disable_volumes()`.
+        self._auto_disable_target_hour_utc: int = 0   # 00:01 UTC
+        self._auto_disable_target_minute_utc: int = 1
+        self._auto_disable_state_file = Path("state/auto_disable_volumes.json")
+        self._last_auto_disable_run_date_utc: str = ""  # "YYYY-MM-DD"
+        self._last_auto_disable_run_ts: float = 0.0
+        # Track manual volume fetches server-side too, so the Fee Management
+        # tab's "last manual fetch" indicator survives component remounts
+        # (sub-tab navigation, WS reconnect, browser refresh). Stored in the
+        # same state file so it survives bot restart.
+        self._last_manual_volumes_fetch_ts: float = 0.0
+        self._load_auto_disable_state()
         self._load_sessions()
 
         # Restart grace period — suppress login email after bot restart
@@ -731,6 +750,8 @@ class DashboardServer:
                 self._track_proxy_state()
                 # Auto trade-amount rescale (hourly + on discovery transitions)
                 self._check_trade_amount_rescale_triggers()
+                # Daily auto-disable thinly-traded (exchange, symbol) combos at 00:01 UTC
+                await self._maybe_run_auto_disable_volumes()
                 # Periodic auth cleanup (~every 5 min)
                 now = time.time()
                 if now - self._last_cleanup > 300:
@@ -1010,6 +1031,8 @@ class DashboardServer:
         # Diversification floor (S21 follow-up)
         "diversification_floor_enabled": (bool, None, None),
         "diversification_floor_multiplier": (float, 0.1, 1.0),
+        "auto_disable_volume_enabled": (bool, None, None),
+        "auto_disable_volume_threshold_usd": (float, 0.0, 10_000_000.0),
         # Funding-aware scoring (Phase A)
         "funding_aware_scoring_enabled": (bool, None, None),
         "funding_skip_threshold_4h_pct": (float, -1.0, 1.0),
@@ -1084,6 +1107,7 @@ class DashboardServer:
         "as_buyer": (bool, None, None),
         "as_seller": (bool, None, None),
         "disabled_symbols": (list, None, None),
+        "auto_disabled_symbols": (list, None, None),
         "buyer_boost": (float, 0.0, 100.0),
         "seller_boost": (float, 0.0, 100.0),
     }
@@ -1327,11 +1351,20 @@ class DashboardServer:
             try:
                 from volume_fetcher import fetch_all_24h_volumes
                 volumes = await fetch_all_24h_volumes()
+                fetched_at = time.time()
+                # Record server-side so the "Last manual fetch" indicator
+                # survives component unmount/remount on the frontend.
+                self._last_manual_volumes_fetch_ts = fetched_at
+                # Persist to state file so it also survives bot restart.
+                # Reuse the auto-disable state file (same scope: volume-fetch
+                # bookkeeping). Pass None for auto-run fields so the existing
+                # blocklist snapshot is preserved (partial update).
+                self._save_auto_disable_state()
                 await ws.send(json.dumps({
                     "type": "volumes_response",
                     "ok": True,
                     "volumes": volumes,
-                    "fetched_at": time.time(),
+                    "fetched_at": fetched_at,
                 }))
                 logger.info(
                     f"[VolumeFetch] Fetched 24h volumes: "
@@ -1602,6 +1635,197 @@ class DashboardServer:
         )
         self._last_trade_amount_rescale_ts = time.time()
         return True
+
+    def _load_auto_disable_state(self) -> None:
+        """Read last-run timestamp from state/auto_disable_volumes.json.
+
+        Survives bot restarts so that:
+        - A bot restarted multiple times in the same UTC day does NOT re-fetch
+          volumes on every restart (would otherwise hit each exchange's REST
+          API redundantly).
+        - A bot that was offline at 00:01 UTC reads the stale date on startup
+          and the existing time-check logic in `_maybe_run_auto_disable_volumes`
+          fires immediately on the first eligible tick.
+        """
+        if not self._auto_disable_state_file.exists():
+            return
+        try:
+            data = json.loads(self._auto_disable_state_file.read_text())
+            self._last_auto_disable_run_date_utc = str(data.get("last_run_date_utc", ""))
+            self._last_auto_disable_run_ts = float(data.get("last_run_ts", 0.0))
+            self._last_manual_volumes_fetch_ts = float(data.get("last_manual_fetch_ts", 0.0))
+            if self._last_auto_disable_run_date_utc:
+                age_hours = (time.time() - self._last_auto_disable_run_ts) / 3600.0
+                today_utc = time.strftime("%Y-%m-%d", time.gmtime(time.time()))
+                stale = self._last_auto_disable_run_date_utc != today_utc
+                logger.info(
+                    f"[AutoDisable] Loaded last-run state: {self._last_auto_disable_run_date_utc} "
+                    f"({age_hours:.1f}h ago) — {'stale, will fire on next eligible tick' if stale else 'current, will skip until next UTC day'}"
+                )
+        except Exception as e:
+            logger.warning(f"[AutoDisable] Failed to read state file (will run fresh): {e}")
+            self._last_auto_disable_run_date_utc = ""
+            self._last_auto_disable_run_ts = 0.0
+
+    def _save_auto_disable_state(
+        self,
+        threshold: float | None = None,
+        per_exchange_disable: dict[str, list[str]] | None = None,
+        diffs: dict[str, dict] | None = None,
+    ) -> None:
+        """Persist last-run timestamp + threshold + blocklist snapshot.
+
+        Partial update semantics: pass `None` for fields the caller doesn't
+        want to overwrite (e.g. the manual-fetch handler doesn't have new
+        blocklist data). Existing values are read from disk and preserved.
+
+        Atomic write via temp file + os.replace, same pattern as state_manager.
+        """
+        try:
+            self._auto_disable_state_file.parent.mkdir(parents=True, exist_ok=True)
+            # Preserve existing fields when caller passes None
+            existing: dict = {}
+            if self._auto_disable_state_file.exists():
+                try:
+                    existing = json.loads(self._auto_disable_state_file.read_text())
+                except Exception:
+                    existing = {}
+            payload = {
+                "last_run_date_utc": self._last_auto_disable_run_date_utc,
+                "last_run_ts": self._last_auto_disable_run_ts,
+                "last_manual_fetch_ts": self._last_manual_volumes_fetch_ts,
+                "threshold_used_usd": (
+                    threshold if threshold is not None
+                    else existing.get("threshold_used_usd", 10000.0)
+                ),
+                "blocked_per_exchange": (
+                    {ex: list(syms) for ex, syms in per_exchange_disable.items()}
+                    if per_exchange_disable is not None
+                    else existing.get("blocked_per_exchange", {})
+                ),
+                "last_diff": (
+                    diffs if diffs is not None
+                    else existing.get("last_diff", {})
+                ),
+            }
+            tmp = self._auto_disable_state_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, indent=2))
+            os.replace(tmp, self._auto_disable_state_file)
+        except Exception:
+            logger.exception("[AutoDisable] Failed to persist state file")
+
+    async def _maybe_run_auto_disable_volumes(self) -> None:
+        """Daily auto-disable of thinly-traded (exchange, symbol) combos.
+
+        Fires at the configured UTC hour:minute (default 00:01 UTC) once per
+        calendar day. If the bot was down at the trigger moment, runs on the
+        first eligible cycle after restart (still capped at once per UTC day
+        via `_last_auto_disable_run_date_utc`).
+
+        For each enabled exchange × each symbol in SYMBOLS:
+          - Fetch live 24h USD volume from the exchange
+          - If volume < threshold → add to auto_disabled_symbols
+          - If volume >= threshold → ensure it's NOT in auto_disabled_symbols
+        Manual `disabled_symbols` per exchange are never touched.
+        """
+        if not self._fee_manager:
+            return
+        if not bool(self._settings.get("auto_disable_volume_enabled", True)):
+            return
+
+        # Trigger logic: it's at-or-after the target time today AND we haven't run today
+        now_utc = time.gmtime(time.time())
+        today_utc = time.strftime("%Y-%m-%d", now_utc)
+        if today_utc == self._last_auto_disable_run_date_utc:
+            return  # already ran today
+        target_h = int(self._auto_disable_target_hour_utc)
+        target_m = int(self._auto_disable_target_minute_utc)
+        if (now_utc.tm_hour, now_utc.tm_min) < (target_h, target_m):
+            return  # not yet target time today
+
+        threshold = float(self._settings.get("auto_disable_volume_threshold_usd", 10000.0))
+        from config import SYMBOLS
+
+        # Mark as run BEFORE the slow fetch — if the fetch fails we still don't
+        # retry until tomorrow, and prevents the broadcast loop from firing this
+        # method twice while the first call is in-flight (~5-10s for 9 exchanges).
+        # We also persist immediately so a crash mid-fetch doesn't cause a re-run
+        # on next start (the previous-day blocklist remains in fee_configs).
+        self._last_auto_disable_run_date_utc = today_utc
+        self._last_auto_disable_run_ts = time.time()
+
+        try:
+            from volume_fetcher import fetch_all_24h_volumes
+            volumes = await fetch_all_24h_volumes()
+        except Exception as e:
+            logger.exception("[AutoDisable] Volume fetch failed; skipping today's run: %s", e)
+            # Persist the attempt so we don't retry today even though fetch failed.
+            # Pass None for blocklist fields so the prior day's audit snapshot is
+            # preserved (the live blocklist in fee_configs is also untouched).
+            self._save_auto_disable_state(threshold=threshold)
+            return
+
+        # Build per-exchange lists of symbols to auto-disable. Limit scope to
+        # bot-tracked symbols (SYMBOLS) and currently-enabled exchanges.
+        configured_symbols = set(SYMBOLS)
+        per_exchange_disable: dict[str, list[str]] = {}
+        per_exchange_kept_count: dict[str, int] = {}
+        for exchange in self._fee_manager.get_enabled_exchanges():
+            ex_vols = volumes.get(exchange, {})
+            disable_list: list[str] = []
+            keep_count = 0
+            for sym in configured_symbols:
+                vol = ex_vols.get(sym)
+                if vol is None:
+                    # Symbol not listed on this exchange — leave alone (not auto-managed)
+                    continue
+                if vol < threshold:
+                    disable_list.append(sym)
+                else:
+                    keep_count += 1
+            per_exchange_disable[exchange] = sorted(disable_list)
+            per_exchange_kept_count[exchange] = keep_count
+
+        # Apply, then persist + log diff
+        diffs = self._fee_manager.apply_auto_disable(per_exchange_disable)
+
+        # Persist updated fee_configs to settings.json so the auto-block survives
+        # restarts (matches manual disabled_symbols persistence behavior).
+        self._settings["fee_configs"] = self._fee_manager.to_settings_dict()
+        try:
+            save_settings(self._settings)
+        except Exception:
+            logger.exception("[AutoDisable] Failed to persist fee_configs")
+
+        # Persist last-run timestamp + threshold + diff to state file so the
+        # next bot start knows whether today's run already happened.
+        self._save_auto_disable_state(threshold, per_exchange_disable, diffs)
+
+        # Logging: one summary line, then per-exchange detail when there were changes
+        total_added = sum(len(d.get("added", [])) for d in diffs.values())
+        total_removed = sum(len(d.get("removed", [])) for d in diffs.values())
+        total_blocked = sum(len(syms) for syms in per_exchange_disable.values())
+        logger.info(
+            f"[AutoDisable] Daily run @ {time.strftime('%Y-%m-%d %H:%M:%S', now_utc)} UTC: "
+            f"threshold=${threshold:,.0f}/24h, blocked={total_blocked} pairs across "
+            f"{len(per_exchange_disable)} exchanges, +{total_added} added, -{total_removed} removed"
+        )
+        for exchange in sorted(per_exchange_disable.keys()):
+            disable_list = per_exchange_disable[exchange]
+            kept = per_exchange_kept_count.get(exchange, 0)
+            diff = diffs.get(exchange, {})
+            added = diff.get("added", [])
+            removed = diff.get("removed", [])
+            if added or removed:
+                logger.info(
+                    f"[AutoDisable]   {exchange}: blocked={len(disable_list)}/kept={kept} | "
+                    f"added={added or 'none'} removed={removed or 'none'}"
+                )
+            else:
+                # Quiet line (no change since yesterday)
+                logger.info(
+                    f"[AutoDisable]   {exchange}: blocked={len(disable_list)}/kept={kept} (unchanged)"
+                )
 
     def _check_trade_amount_rescale_triggers(self) -> None:
         """Called from the broadcast loop. Fires hourly + on discovery transitions."""
@@ -2905,6 +3129,9 @@ class DashboardServer:
             "connected_exchanges": connected,
             "total_exchanges": len(active_exchanges),
             "crypto_symbols": sorted(crypto_symbols),
+            # Snapshot the configured capital so to_state_dict can persist it.
+            # On next load, mismatched capital triggers a peak reset.
+            "total_capital": float(getattr(self._monitor, "_total_capital", 0.0) or 0.0),
         })
 
         # Net profit awareness: update optimizer to gate rotations when in deficit
@@ -3136,6 +3363,15 @@ class DashboardServer:
             "demo_comparison": self._build_demo_state() if self._demo_fetcher and self._demo_fetcher.enabled else None,
             **(self._fee_manager.to_broadcast_dict() if self._fee_manager else {}),
             **(self._transfer_fee_mgr.to_broadcast_dict() if self._transfer_fee_mgr else {}),
+            "auto_disable_state": {
+                "last_run_date_utc": self._last_auto_disable_run_date_utc,
+                "last_run_ts": self._last_auto_disable_run_ts,
+                "last_manual_fetch_ts": self._last_manual_volumes_fetch_ts,
+                "threshold_used_usd": float(
+                    self._settings.get("auto_disable_volume_threshold_usd", 10000.0)
+                ),
+                "enabled": bool(self._settings.get("auto_disable_volume_enabled", True)),
+            },
         }
 
     def _build_hourly_pnl(self) -> list[dict[str, Any]]:

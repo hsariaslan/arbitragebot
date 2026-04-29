@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import type { ExchangeFeeConfig, FeeStats } from '../types';
+import type { ExchangeFeeConfig, FeeStats, AutoDisableState } from '../types';
 
 // Default configs matching config.py DEFAULT_FEE_CONFIGS
 const DEFAULT_CONFIGS: Record<string, ExchangeFeeConfig> = {
@@ -78,6 +78,7 @@ interface FeeManagementTabProps {
   feeConfigs?: Record<string, ExchangeFeeConfig>;
   feeRealMode?: boolean;
   feeStats?: FeeStats;
+  autoDisableState?: AutoDisableState;
   onSendMessage: (msg: object) => void;
   onSendWithCallback?: (msg: object, callback: (data: unknown) => void) => void;
 }
@@ -98,6 +99,7 @@ type EditableConfig = {
   as_buyer: boolean;
   as_seller: boolean;
   disabled_symbols: Set<string>;
+  auto_disabled_symbols: Set<string>;  // read-only: managed by daily auto-task
   buyer_boost: number;
   seller_boost: number;
 };
@@ -119,9 +121,35 @@ function toEditable(cfg: ExchangeFeeConfig): EditableConfig {
     as_buyer: cfg.as_buyer ?? true,
     as_seller: cfg.as_seller ?? true,
     disabled_symbols: new Set(cfg.disabled_symbols ?? []),
+    auto_disabled_symbols: new Set(cfg.auto_disabled_symbols ?? []),
     buyer_boost: cfg.buyer_boost ?? 1.0,
     seller_boost: cfg.seller_boost ?? 1.0,
   };
+}
+
+function formatRelativeTime(epochSec: number): string {
+  if (!epochSec || epochSec <= 0) return 'never';
+  const ageSec = Date.now() / 1000 - epochSec;
+  if (ageSec < 0) return 'just now';
+  if (ageSec < 60) return `${Math.floor(ageSec)}s ago`;
+  if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
+  if (ageSec < 86400) {
+    const h = Math.floor(ageSec / 3600);
+    const m = Math.floor((ageSec % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m ago` : `${h}h ago`;
+  }
+  return `${Math.floor(ageSec / 86400)}d ago`;
+}
+
+function formatAbsoluteUTC(epochSec: number): string {
+  if (!epochSec || epochSec <= 0) return '—';
+  const d = new Date(epochSec * 1000);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mi = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi} UTC`;
 }
 
 function formatVolume(usd: number): string {
@@ -154,7 +182,7 @@ function computeEffective(cfg: EditableConfig): { effective: number; afterReferr
   return { effective, afterReferral: afterRef };
 }
 
-export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, onSendMessage, onSendWithCallback }: FeeManagementTabProps) {
+export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, autoDisableState, onSendMessage, onSendWithCallback }: FeeManagementTabProps) {
   const serverConfigs = feeConfigs ?? {};
   const [configs, setConfigs] = useState<Record<string, EditableConfig>>(() => {
     const initial: Record<string, EditableConfig> = {};
@@ -166,9 +194,11 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
   const [dirty, setDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
-  // Volume-fetch state
+  // Volume-fetch state — `volumes` map is local (the data itself isn't broadcast,
+  // re-fetch on demand). The "last fetched" timestamp comes from the backend via
+  // `autoDisableState.last_manual_fetch_ts` so it survives component remount,
+  // WebSocket reconnect, browser refresh, and bot restart.
   const [volumes, setVolumes] = useState<Record<string, Record<string, number>> | null>(null);
-  const [volumesFetchedAt, setVolumesFetchedAt] = useState<number | null>(null);
   const [volumesLoading, setVolumesLoading] = useState(false);
   const [volumesError, setVolumesError] = useState<string | null>(null);
   const [expandedBlocklist, setExpandedBlocklist] = useState<Record<string, boolean>>({});
@@ -185,7 +215,8 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
       const d = data as { ok?: boolean; volumes?: Record<string, Record<string, number>>; error?: string; fetched_at?: number };
       if (d.ok && d.volumes) {
         setVolumes(d.volumes);
-        setVolumesFetchedAt(d.fetched_at ?? Date.now() / 1000);
+        // Note: `fetched_at` timestamp display is driven by `autoDisableState.last_manual_fetch_ts`
+        // (backend-tracked, broadcast every tick) — it'll update within ~1s of this response.
       } else {
         setVolumesError(d.error || 'Unknown error');
       }
@@ -313,14 +344,82 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
             >
               {volumesLoading ? 'Fetching…' : volumes ? 'Refresh 24h Volumes' : 'Fetch 24h Volumes'}
             </button>
-            {volumesFetchedAt && (
-              <span className="text-[10px] text-slate-500">
-                Fetched {new Date(volumesFetchedAt * 1000).toLocaleTimeString()}
-              </span>
-            )}
             {volumesError && (
               <span className="text-[11px] text-red-400">{volumesError}</span>
             )}
+          </div>
+        </div>
+
+        {/* Last-run status (manual + auto) — visible at-a-glance freshness signal.
+            Both timestamps are backend-tracked + broadcast, so they survive
+            component remount, sub-tab switching, WS reconnect, and bot restart. */}
+        <div className="mt-3 pt-3 border-t border-slate-700/50 grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+          {/* Manual fetch indicator */}
+          {(() => {
+            const manualTs = autoDisableState?.last_manual_fetch_ts ?? 0;
+            return (
+              <div className="flex items-start gap-2">
+                <span className={`mt-0.5 inline-block w-2 h-2 rounded-full flex-shrink-0 ${manualTs > 0 ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+                <div>
+                  <div className="text-slate-400 font-medium">Last manual fetch</div>
+                  {manualTs > 0 ? (
+                    <>
+                      <div className="text-slate-200">{formatRelativeTime(manualTs)}</div>
+                      <div className="text-slate-500 text-[10px]">{formatAbsoluteUTC(manualTs)}</div>
+                    </>
+                  ) : (
+                    <div className="text-slate-500 italic">Never (use button above)</div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Auto-disable last run */}
+          <div className="flex items-start gap-2">
+            {(() => {
+              const ts = autoDisableState?.last_run_ts ?? 0;
+              const enabled = autoDisableState?.enabled ?? false;
+              const ageHours = ts > 0 ? (Date.now() / 1000 - ts) / 3600 : Infinity;
+              // Stale if disabled, never run, or >36h old (>1 daily cycle missed)
+              const stale = !enabled || ts === 0 || ageHours > 36;
+              const fresh = !stale && ageHours <= 26;  // green if within ~1 day window
+              const dotClass = !enabled
+                ? 'bg-slate-600'
+                : ts === 0
+                  ? 'bg-amber-500'
+                  : fresh
+                    ? 'bg-emerald-400'
+                    : 'bg-amber-500';
+              return (
+                <>
+                  <span className={`mt-0.5 inline-block w-2 h-2 rounded-full flex-shrink-0 ${dotClass}`} />
+                  <div className="flex-1">
+                    <div className="text-slate-400 font-medium">
+                      Last automatic update
+                      {!enabled && <span className="ml-1 text-slate-500">(disabled)</span>}
+                    </div>
+                    {ts > 0 ? (
+                      <>
+                        <div className="text-slate-200">
+                          {formatRelativeTime(ts)}
+                          {autoDisableState?.last_run_date_utc && (
+                            <span className="ml-1 text-slate-500">· run for {autoDisableState.last_run_date_utc}</span>
+                          )}
+                        </div>
+                        <div className="text-slate-500 text-[10px]">
+                          {formatAbsoluteUTC(ts)} · threshold ${autoDisableState?.threshold_used_usd?.toLocaleString() ?? '—'}/24h
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-slate-500 italic">
+                        {enabled ? 'Pending — fires daily at 00:01 UTC' : 'Auto-disable disabled in Settings'}
+                      </div>
+                    )}
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       </div>
@@ -562,8 +661,13 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
                 <span className="font-medium">
                   Symbol Blocklist
                   {cfg.disabled_symbols.size > 0 && (
-                    <span className="ml-2 text-amber-400">
-                      ({cfg.disabled_symbols.size} disabled)
+                    <span className="ml-2 text-red-400">
+                      ({cfg.disabled_symbols.size} manual)
+                    </span>
+                  )}
+                  {cfg.auto_disabled_symbols.size > 0 && (
+                    <span className="ml-1 text-amber-400">
+                      ({cfg.auto_disabled_symbols.size} auto)
                     </span>
                   )}
                 </span>
@@ -584,6 +688,7 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
                   Object.keys(exVols).forEach(s => symbolSet.add(s));
                 }
                 cfg.disabled_symbols.forEach(s => symbolSet.add(s));
+                cfg.auto_disabled_symbols.forEach(s => symbolSet.add(s));
                 const symbolList = Array.from(symbolSet);
                 if (exVols) {
                   symbolList.sort((a, b) => (exVols[b] ?? 0) - (exVols[a] ?? 0));
@@ -627,18 +732,29 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
                         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-1 max-h-80 overflow-y-auto bg-slate-900/40 rounded p-2">
                           {symbolList.map(sym => {
                             const vol = exVols[sym] ?? 0;
-                            const isDisabled = cfg.disabled_symbols.has(sym);
+                            const isManualDisabled = cfg.disabled_symbols.has(sym);
+                            const isAutoDisabled = cfg.auto_disabled_symbols.has(sym);
+                            const isDisabled = isManualDisabled || isAutoDisabled;
+                            const bg = isManualDisabled
+                              ? 'bg-red-900/30 hover:bg-red-900/50'
+                              : isAutoDisabled
+                                ? 'bg-amber-900/20 hover:bg-amber-900/40'
+                                : 'hover:bg-slate-800';
                             return (
                               <label key={sym}
-                                className={`flex items-center gap-1.5 text-[11px] px-1.5 py-1 rounded cursor-pointer ${
-                                  isDisabled ? 'bg-red-900/30 hover:bg-red-900/50' : 'hover:bg-slate-800'
-                                }`}
+                                className={`flex items-center gap-1.5 text-[11px] px-1.5 py-1 rounded cursor-pointer ${bg}`}
+                                title={isAutoDisabled && !isManualDisabled
+                                  ? 'Auto-disabled by daily volume sweep. Will re-enable automatically when volume rises above threshold.'
+                                  : isManualDisabled ? 'Manually disabled by operator.' : ''}
                               >
-                                <input type="checkbox" checked={!isDisabled}
+                                <input type="checkbox" checked={!isManualDisabled}
                                   onChange={() => toggleSymbolDisabled(exchange, sym)}
                                   className="w-3 h-3 rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-emerald-500" />
                                 <span className={`font-mono ${isDisabled ? 'text-slate-500 line-through' : 'text-slate-200'}`}>
                                   {sym.replace('USDT', '')}
+                                  {isAutoDisabled && !isManualDisabled && (
+                                    <span className="ml-1 text-[9px] text-amber-400 align-top">auto</span>
+                                  )}
                                 </span>
                                 <span className={`ml-auto font-mono ${volumeColor(vol)}`}>
                                   {formatVolume(vol)}

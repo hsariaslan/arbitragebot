@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { NavLink, useParams } from 'react-router-dom';
-import type { Settings, ExchangeFeeConfig, ExchangeTransferConfig, FeeStats, AnomalyProtectionState, ExchangeBalance } from '../types';
+import type { Settings, ExchangeFeeConfig, ExchangeTransferConfig, FeeStats, AnomalyProtectionState, ExchangeBalance, AutoDisableState } from '../types';
 import FeeManagementTab from './FeeManagementTab';
 import TransferFeeManagementTab from './TransferFeeManagementTab';
 import Tooltip from './Tooltip';
@@ -14,6 +14,7 @@ interface SettingsPageProps {
   feeConfigs?: Record<string, ExchangeFeeConfig>;
   feeRealMode?: boolean;
   feeStats?: FeeStats;
+  autoDisableState?: AutoDisableState;
   transferConfigs?: Record<string, ExchangeTransferConfig>;
   anomalyProtection?: AnomalyProtectionState;
   manualStopped?: boolean;
@@ -23,7 +24,7 @@ interface SettingsPageProps {
 
 type SettingsSubTab = 'general' | 'fees' | 'transfers';
 
-export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage, onSendWithCallback, feeConfigs, feeRealMode, feeStats, transferConfigs, anomalyProtection, manualStopped, balances, distributeEnabled }: SettingsPageProps) {
+export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage, onSendWithCallback, feeConfigs, feeRealMode, feeStats, autoDisableState, transferConfigs, anomalyProtection, manualStopped, balances, distributeEnabled }: SettingsPageProps) {
   const { subTab } = useParams<{ subTab?: string }>();
   const activeSubTab: SettingsSubTab = subTab === 'fees' ? 'fees' : subTab === 'transfers' ? 'transfers' : 'general';
   const [tradeAmount, setTradeAmount] = useState(currentSettings.trade_amount_usd);
@@ -76,6 +77,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   // Funding-aware scoring (Phase A)
   const [diversificationFloorEnabled, setDiversificationFloorEnabled] = useState(currentSettings.diversification_floor_enabled ?? true);
   const [diversificationFloorMultiplier, setDiversificationFloorMultiplier] = useState(currentSettings.diversification_floor_multiplier ?? 0.7);
+  const [autoDisableVolumeEnabled, setAutoDisableVolumeEnabled] = useState(currentSettings.auto_disable_volume_enabled ?? true);
+  const [autoDisableVolumeThreshold, setAutoDisableVolumeThreshold] = useState(currentSettings.auto_disable_volume_threshold_usd ?? 10000);
   const [fundingAwareEnabled, setFundingAwareEnabled] = useState(currentSettings.funding_aware_scoring_enabled ?? true);
   const [fundingSkip4h, setFundingSkip4h] = useState(currentSettings.funding_skip_threshold_4h_pct ?? -0.05);
   const [fundingSkip8h, setFundingSkip8h] = useState(currentSettings.funding_skip_threshold_8h_pct ?? -0.05);
@@ -159,6 +162,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setMaxPositionMultiplier(currentSettings.max_position_multiplier ?? 5.0);
       setDiversificationFloorEnabled(currentSettings.diversification_floor_enabled ?? true);
       setDiversificationFloorMultiplier(currentSettings.diversification_floor_multiplier ?? 0.7);
+      setAutoDisableVolumeEnabled(currentSettings.auto_disable_volume_enabled ?? true);
+      setAutoDisableVolumeThreshold(currentSettings.auto_disable_volume_threshold_usd ?? 10000);
       setFundingAwareEnabled(currentSettings.funding_aware_scoring_enabled ?? true);
       setFundingSkip4h(currentSettings.funding_skip_threshold_4h_pct ?? -0.05);
       setFundingSkip8h(currentSettings.funding_skip_threshold_8h_pct ?? -0.05);
@@ -233,6 +238,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     max_position_multiplier: maxPositionMultiplier,
     diversification_floor_enabled: diversificationFloorEnabled,
     diversification_floor_multiplier: diversificationFloorMultiplier,
+    auto_disable_volume_enabled: autoDisableVolumeEnabled,
+    auto_disable_volume_threshold_usd: autoDisableVolumeThreshold,
     funding_aware_scoring_enabled: fundingAwareEnabled,
     funding_skip_threshold_4h_pct: fundingSkip4h,
     funding_skip_threshold_8h_pct: fundingSkip8h,
@@ -301,6 +308,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           feeConfigs={feeConfigs}
           feeRealMode={feeRealMode}
           feeStats={feeStats}
+          autoDisableState={autoDisableState}
           onSendMessage={onSendMessage}
           onSendWithCallback={onSendWithCallback}
         />
@@ -792,6 +800,40 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             <input type="number" value={diversificationFloorMultiplier} min={0.1} max={1.0} step={0.05}
               onChange={d(setDiversificationFloorMultiplier, 0.7)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+        </div>
+      </div>
+
+      {/* Auto-Disable by Volume (daily 00:01 UTC volume sweep) */}
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Auto-Disable Thinly-Traded Pairs</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          Every day at 00:01 UTC, the bot fetches live 24h USD volumes from each enabled exchange and auto-disables any (exchange, symbol) combo whose volume is below the threshold. Manual blocklists set in Fee Management are never touched. Symbols whose volume rises back above the threshold are auto-re-enabled on the next daily run.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="flex items-center gap-2">
+            <label className="flex items-center cursor-pointer">
+              <input type="checkbox" checked={autoDisableVolumeEnabled}
+                onChange={e => setAutoDisableVolumeEnabled(e.target.checked)}
+                className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
+              <span className="text-sm text-slate-300">Enable Daily Auto-Disable</span>
+            </label>
+            <Tooltip text="When enabled, the bot runs at 00:01 UTC every day, fetches 24h USD volumes from each enabled exchange, and auto-disables (exchange, symbol) combos below the volume threshold. Operator-set manual blocklists in Fee Management are never affected. Default: enabled. Config key: auto_disable_volume_enabled" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Volume Threshold (24h USD)
+              <Tooltip text={"Minimum 24h USD volume for a symbol to remain enabled on an exchange. Symbols below this on any exchange are auto-blocked there only (not globally). REMINDER: increase this value as your capital and trade size grow — at $1k capital, $10k/24h is fine for $20-40 trades; at $10k capital aim for $100k+. Rule of thumb: threshold ≈ 250× max trade size. Default: $10,000. Config key: auto_disable_volume_threshold_usd"} />
+            </label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
+              <input type="number" value={autoDisableVolumeThreshold} min={0} step={1000}
+                onChange={d(setAutoDisableVolumeThreshold, 10000)}
+                className="w-full bg-slate-700 border border-slate-600 rounded-lg pl-7 pr-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+            </div>
+            <p className="text-[11px] text-amber-500/80 mt-1">
+              Increase as capital grows — rule of thumb: threshold ≈ 250× max trade size
+            </p>
           </div>
         </div>
       </div>

@@ -247,6 +247,7 @@ export default function App() {
                 feeConfigs={state.fee_configs}
                 feeRealMode={state.fee_real_mode}
                 feeStats={state.fee_stats}
+                autoDisableState={state.auto_disable_state}
                 transferConfigs={state.transfer_configs}
                 anomalyProtection={state.anomaly_protection}
                 manualStopped={state.manual_stopped}
@@ -264,6 +265,7 @@ export default function App() {
                 feeConfigs={state.fee_configs}
                 feeRealMode={state.fee_real_mode}
                 feeStats={state.fee_stats}
+                autoDisableState={state.auto_disable_state}
                 transferConfigs={state.transfer_configs}
                 anomalyProtection={state.anomaly_protection}
                 manualStopped={state.manual_stopped}

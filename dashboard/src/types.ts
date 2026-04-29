@@ -150,6 +150,8 @@ export interface Settings {
   // Diversification floor (S21 follow-up)
   diversification_floor_enabled?: boolean;
   diversification_floor_multiplier?: number;
+  auto_disable_volume_enabled?: boolean;
+  auto_disable_volume_threshold_usd?: number;
   // Funding-aware scoring (Phase A)
   funding_aware_scoring_enabled?: boolean;
   funding_skip_threshold_4h_pct?: number;
@@ -535,6 +537,7 @@ export interface ExchangeFeeConfig {
   as_buyer?: boolean;
   as_seller?: boolean;
   disabled_symbols?: string[];
+  auto_disabled_symbols?: string[];
   buyer_boost?: number;
   seller_boost?: number;
 }
@@ -545,6 +548,17 @@ export interface FeeStats {
   pending_count: number;
   referrer_earnings_total: number;
   referrer_earnings_per_exchange: Record<string, number>;
+}
+
+// Daily auto-disable scheduler state + manual-fetch tracking (broadcast each tick).
+// Both timestamps come from the backend so they survive component remount, WS
+// reconnect, browser refresh, and bot restart (persisted in state/auto_disable_volumes.json).
+export interface AutoDisableState {
+  last_run_date_utc: string;        // "YYYY-MM-DD" or "" if auto-task never ran
+  last_run_ts: number;              // unix epoch seconds — auto-task last completion
+  last_manual_fetch_ts: number;     // unix epoch seconds — operator's last "Fetch 24h Volumes" click
+  threshold_used_usd: number;       // current setting (live, not snapshot)
+  enabled: boolean;
 }
 
 // ── Transfer Fee Management ─────────────────────────────────────────
@@ -623,6 +637,7 @@ export interface DashboardState {
   fee_configs?: Record<string, ExchangeFeeConfig>;
   fee_real_mode?: boolean;
   fee_stats?: FeeStats;
+  auto_disable_state?: AutoDisableState;
   // Transfer fee management
   transfer_configs?: Record<string, ExchangeTransferConfig>;
   // Anomaly protection
