@@ -173,6 +173,14 @@ class DashboardServer:
         self._remember_expiry = 2592000.0  # 30 days absolute max for remember-me
         self._last_cleanup = 0.0
         self._captcha_threshold = 3  # require CAPTCHA after this many failures
+
+        # Auto trade-amount rescale (when trade_amount_pct > 0). Hourly tick
+        # plus immediate trigger on discovery state transitions, so the bot
+        # trades larger as capital compounds rather than staying pegged to
+        # the configured `total_capital` constant. See _rescale_trade_amount().
+        self._trade_amount_rescale_interval: float = 3600.0  # 1 hour
+        self._last_trade_amount_rescale_ts: float = 0.0
+        self._last_discovery_state: bool | None = None  # None = not yet observed
         self._load_sessions()
 
         # Restart grace period — suppress login email after bot restart
@@ -721,6 +729,8 @@ class DashboardServer:
                 self._save_uptime_heartbeat()
                 # Track proxy (Zurich VPS) connection state
                 self._track_proxy_state()
+                # Auto trade-amount rescale (hourly + on discovery transitions)
+                self._check_trade_amount_rescale_triggers()
                 # Periodic auth cleanup (~every 5 min)
                 now = time.time()
                 if now - self._last_cleanup > 300:
@@ -1511,6 +1521,113 @@ class DashboardServer:
             f"[Uptime] Bangkok VPS first start at "
             f"{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))} UTC"
         )
+
+    def _rescale_trade_amount(self, reason: str) -> bool:
+        """Recompute trade_amount from current portfolio value × trade_amount_pct.
+
+        Auto-scaling mode: when `trade_amount_pct > 0`, the bot's per-trade size
+        should grow with capital. Without this rescale, trade_amount is locked to
+        `configured_capital × pct` at startup/settings-apply time and never moves
+        as profits compound.
+
+        Triggered:
+        - hourly during normal operation (`hourly_tick`)
+        - on discovery start/complete transitions (`discovery_started`, `discovery_completed`)
+          so symbol allocations use the freshest sizing.
+
+        No-ops when:
+        - `trade_amount_pct <= 0` (fixed-size mode is in force)
+        - balance is uninitialized (pre-discovery)
+        - the new value would be within $0.01 of the existing one
+
+        Returns True if a rescale actually happened.
+        """
+        if not self._monitor or not self._balance or not self._optimizer:
+            return False
+        pct = float(self._settings.get("trade_amount_pct", 0.0))
+        if pct <= 0:
+            return False  # fixed-size mode, nothing to do
+        if not self._balance.initialized:
+            return False  # pre-discovery, no portfolio value yet
+
+        # Use the same price source the monitor uses for trade decisions, so the
+        # rescale tracks the value the bot will actually trade against.
+        try:
+            prices = self._monitor._get_current_prices()
+        except Exception:
+            return False
+
+        # Include hedge unrealized PnL — same convention as _build_state's
+        # portfolio_value, so drawdown/peak/trade-size all share one definition.
+        hedge_pnl_usd = 0.0
+        hm = getattr(self._monitor, "_hedge_manager", None)
+        if hm is not None:
+            try:
+                hedge_pnl_usd = float(hm.get_debug_state().get("total_unrealized_pnl_usd", 0.0))
+            except Exception:
+                hedge_pnl_usd = 0.0
+
+        try:
+            portfolio_value = self._balance.get_portfolio_value(prices, hedge_pnl_usd=hedge_pnl_usd)
+        except Exception:
+            return False
+        if portfolio_value <= 0:
+            return False
+
+        new_trade_amount = round(portfolio_value * pct, 2)
+        old_trade_amount = float(self._monitor._trade_amount)
+        old_capital = float(self._monitor._total_capital)
+        if abs(new_trade_amount - old_trade_amount) < 0.01 and abs(portfolio_value - old_capital) < 0.01:
+            return False  # within rounding noise
+
+        # Apply to monitor + optimizer (both consume _trade_amount and _total_capital
+        # for trade sizing, depth gates, expansion cost estimates, etc.)
+        self._monitor._trade_amount = new_trade_amount
+        self._monitor._total_capital = portfolio_value
+        self._optimizer._trade_amount = new_trade_amount
+        self._optimizer._total_capital = portfolio_value
+
+        delta_amount = new_trade_amount - old_trade_amount
+        delta_pct = (delta_amount / old_trade_amount * 100) if old_trade_amount > 0 else 0.0
+        capital_delta = portfolio_value - old_capital
+        capital_delta_pct = (capital_delta / old_capital * 100) if old_capital > 0 else 0.0
+
+        logger.info(
+            f"[TradeSize] Rescale ({reason}): "
+            f"trade_amount ${old_trade_amount:.2f} → ${new_trade_amount:.2f} "
+            f"({delta_pct:+.2f}%, Δ${delta_amount:+.2f}) | "
+            f"capital ${old_capital:.2f} → ${portfolio_value:.2f} "
+            f"({capital_delta_pct:+.2f}%, Δ${capital_delta:+.2f}) | "
+            f"pct={pct * 100:.2f}%"
+        )
+        self._last_trade_amount_rescale_ts = time.time()
+        return True
+
+    def _check_trade_amount_rescale_triggers(self) -> None:
+        """Called from the broadcast loop. Fires hourly + on discovery transitions."""
+        if not self._monitor or not self._optimizer:
+            return
+        now = time.time()
+
+        # Hourly tick — wait until first tick fires before starting the timer
+        # (avoids firing during the 10s startup window before settings are logged).
+        if self._last_trade_amount_rescale_ts == 0.0:
+            self._last_trade_amount_rescale_ts = now
+        elif now - self._last_trade_amount_rescale_ts >= self._trade_amount_rescale_interval:
+            self._rescale_trade_amount("hourly_tick")
+
+        # Discovery state transitions — fire once per state change
+        try:
+            cur_state = bool(self._optimizer._discovery_complete)
+        except AttributeError:
+            cur_state = None
+        if cur_state is not None:
+            if self._last_discovery_state is not None and cur_state != self._last_discovery_state:
+                if cur_state:
+                    self._rescale_trade_amount("discovery_completed")
+                else:
+                    self._rescale_trade_amount("discovery_started")
+            self._last_discovery_state = cur_state
 
     def _save_uptime_heartbeat(self, force: bool = False) -> None:
         """Update last_heartbeat and write to disk. Called every 60s."""
