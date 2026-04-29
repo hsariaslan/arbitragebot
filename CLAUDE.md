@@ -82,7 +82,7 @@ BUSD was discontinued in December 2023. Its replacement is **FDUSD**, which offe
 
 This is a significant advantage for limit orders on high-volume majors. Consider using FDUSD pairs on Binance alongside USDT pairs for reduced costs.
 
-## Trading Symbols (60 Symbols in 4 Tiers)
+## Trading Symbols (63 Symbols in 5 Tiers)
 
 All symbols use **/USDT** quote currency exclusively for simplicity and cheap rebalancing.
 
@@ -109,6 +109,14 @@ ARB, OP, FIL, ATOM, INJ
 Sorted by ~24h volume. 38/40 available on all 9 exchanges.
 
 AAVE, BCH, PEPE, ZEC (6/7, not Bybit), LTC, HYPE (6/7, not Binance), XLM, UNI, ENA, SNX, TON, SHIB, ICP, ETC, TRUMP, HBAR, CHZ, AXS, PENGU, WLD, WIF, RENDER, ONDO, STRK, CRV, AR, FET, LDO, ALGO, EIGEN, PENDLE, APE, TIA, FLOKI, W, GRT, ORDI, JUP, COMP, DYDX
+
+### Tier 5 - Bitfinex+MEXC Pair Expansion (3 symbols, added v0.29.0-beta)
+
+Added after S24 confirmed AR/MEXC structural inefficiency drives ~96% of profitable trades through MEXC. These three are listed on both Bitfinex AND MEXC AND Binance Futures (so the spot-futures hedge can offset price risk on inventory):
+
+XMR (Monero), ZRO (LayerZero), NEO
+
+Two candidates from the Bitfinex∩MEXC scan (XDC, USAT) were skipped because they lack Binance Futures listings — can't be hedged. See `scripts/find_bitfinex_mexc_pairs.py` and `scripts/compare_bfx_mex_volumes.py` for the analysis.
 
 ## Rebalancing Strategy
 
@@ -356,6 +364,65 @@ After discovery, capital is allocated per-symbol **symmetrically** to ALL domina
 
 The "Exchanges" column in Symbol Rankings shows dominant pairs as `BIN→KUC` (buyer→seller). The Buy-Sell Distribution sheet in XLSX shows per-exchange tick counts.
 
+## Per-Exchange Routing Controls (v0.29.0-beta)
+
+Three orthogonal layers let the operator shape pair selection without losing the safety net for genuinely better opportunities elsewhere.
+
+### Layer 1 — Per-Role Hard Gate (`as_buyer` / `as_seller`)
+
+Each exchange has independent `as_buyer: bool = True` and `as_seller: bool = True` flags in `ExchangeFeeConfig`. Disabling a role excludes the exchange from that side of pair selection completely.
+
+- **Use case**: pin trades to a specific route (e.g. `Bitfinex.as_buyer=True, Bitfinex.as_seller=False, MEXC.as_buyer=False, MEXC.as_seller=True` forces all trades through Bitfinex(buyer) → MEXC(seller)).
+- **Enforcement**: `FeeManager.can_buy(exchange, symbol)` / `can_sell(exchange, symbol)` checked in `optimizer._compute_dominant_pairs` (filters dominant-pair selection) and `monitor._tick` (filters per-tick pair iteration).
+- **UI**: checkboxes in Fee Management tab next to the per-exchange enable toggle.
+
+### Layer 2 — Per-Symbol Blocklist (`disabled_symbols` + `auto_disabled_symbols`)
+
+Two parallel lists per exchange. A symbol blocked in either list is excluded from pair selection on that exchange for that symbol — the exchange continues trading other symbols normally.
+
+- `disabled_symbols: list[str]` — operator-set, never touched by automation. Editable via Fee Management UI checkboxes (red highlight when blocked).
+- `auto_disabled_symbols: list[str]` — refreshed daily by the auto-disable scheduler (see below). Operator can manually un-toggle but the next daily run re-blocks if volume is still below threshold.
+- **Enforcement**: `is_symbol_enabled(exchange, symbol)` returns `False` if the symbol is in either list. Same `can_buy/can_sell` integration as Layer 1.
+- **UI**: collapsible per-exchange section in Fee Management. Manual blocks render with red background; auto blocks render with amber background and an `auto` superscript label. Quick-disable buttons (`< $1K`, `< $10K`, `< $100K /24h`) for bulk operator action.
+
+### Layer 3 — Soft Preference Multipliers (`buyer_boost` / `seller_boost`)
+
+Each exchange has independent `buyer_boost: float = 1.0` and `seller_boost: float = 1.0`. Defaults give Bitfinex.buyer_boost=5.0 and MEXC.seller_boost=5.0 — biases pair selection toward the empirically-best route while still letting strong opportunities elsewhere win.
+
+- **Math**: `scoring_net *= buyer_boost × seller_boost` in `monitor._tick` pair iteration. With Bitfinex+MEXC defaults the preferred pair gets 25× the selection weight. A non-preferred pair must beat the preferred pair's net% by ~25× to overtake — a 12% AR spike on OKX→MEXC easily clears, a marginal 0.05% advantage doesn't.
+- **Also applied in dominant-pair detection**: `_select_top()` multiplies each exchange's weight by its boost for the corresponding direction.
+- **Trading P&L unaffected**: the boost only influences selection ranking. Actual `net_pct`, trade sizing, and recorded statistics use raw values.
+- **`raw_scoring_net`** (used for EVD demotion detection) is captured BEFORE the boost is applied, so role boosting doesn't interfere with the EVD penalty system.
+- **UI**: numeric input next to each role checkbox in Fee Management. Cyan highlight for non-default buyer boost, rose for non-default seller boost.
+
+### Daily Auto-Disable Scheduler (00:01 UTC)
+
+`DashboardServer._maybe_run_auto_disable_volumes()` runs once per UTC day at 00:01 UTC (or on the first eligible cycle after restart if the bot was offline at 00:01). For each enabled exchange, fetches live 24h USD volumes via `volume_fetcher.fetch_all_24h_volumes()`; symbols below `auto_disable_volume_threshold_usd` (default $10,000) get auto-blocked, symbols whose volume rises above the threshold get auto-unblocked.
+
+- **Settings**: `auto_disable_volume_enabled` (default True), `auto_disable_volume_threshold_usd` (default $10,000 — increase as capital grows; rule of thumb: threshold ≈ 250× max trade size).
+- **Manual blocks survive**: only `auto_disabled_symbols` is rewritten on each run. Operator's `disabled_symbols` is never touched.
+- **State persisted to `state/auto_disable_volumes.json`**: `last_run_date_utc`, `last_run_ts`, `last_manual_fetch_ts`, `threshold_used_usd`, `blocked_per_exchange`, `last_diff`. Survives bot restart so a multi-restart day doesn't double-fetch, and a bot offline at 00:01 catches up on next start.
+- **Atomic update**: `FeeManager.apply_auto_disable(per_exchange)` replaces auto-blocklist + returns diff (`added`, `removed`, `kept`) for logging.
+- **Logging**: per-day summary line + per-exchange detail line listing added/removed symbols. Filterable in Bot Logs by component `AutoDisable`.
+
+### On-Demand Volume Fetcher
+
+`volume_fetcher.py` exposes `fetch_all_24h_volumes(exchanges=None)` returning `{exchange: {symbol: usd_volume_24h}}` from public REST endpoints across all 9 exchanges in parallel (thread pool). Used by:
+- The "Fetch 24h Volumes" button in Fee Management UI (operator-initiated)
+- The daily auto-disable scheduler
+
+The Fee Management tab shows two freshness indicators side-by-side: "Last manual fetch" and "Last automatic update" — both backend-tracked + broadcast each tick, so they survive component remount, sub-tab navigation, WebSocket reconnect, browser refresh, and bot restart. Color-coded dots (grey=never, amber=stale/disabled, green=fresh) make stale data immediately visible.
+
+### Comprehensive `[Settings]` Logging
+
+`_log_all_settings()` emits three new lines per session start / settings change for diagnosability:
+```
+[Settings] role_boosts: BFX(buy=5.0x,sell=1.0x) MEX(buy=1.0x,sell=5.0x)
+[Settings] role_restrictions: none (all enabled as buyer+seller)
+[Settings] symbol_blocklists: BFX=[LDOUSDT,HYPEUSDT]
+```
+Only non-default values appear (compact). Filterable by component `Settings`.
+
 ## Bitfinex Capital Hub
 
 Bitfinex has $0 withdrawal fees on 14/15 networks and 0% taker fees, making it the ideal capital hub. The system prevents "death spirals" where the net P&L gate blocks rebalancing, capital gets stuck on wrong exchanges, and trading stalls.
@@ -403,6 +470,7 @@ The bot has a capital-aware adaptive trading system controlled by the **Adaptive
 Each active symbol gets a **trade multiplier** based on its focus tier (see Strong-Only Trading above). Active symbols always receive non-zero multipliers (1.0× floor for weak tier).
 
 - **Auto-scaling trade amount**: `trade_amount_pct` (default 0 = disabled). When > 0, `trade_amount = total_capital × trade_amount_pct` — auto-scales as capital grows. E.g., 1% of $3,000 = $30; capital grows to $5,000 → auto-updates to $50. Configurable via Settings UI ("Fixed $" / "% of Capital" toggle). When disabled (0), uses manual `trade_amount_usd`.
+- **Hourly + on-discovery rescale (v0.29.0-beta)**: when `trade_amount_pct > 0`, `DashboardServer._rescale_trade_amount(reason)` recomputes `trade_amount = current_portfolio_value × pct` every hour AND immediately on discovery state transitions (`discovery_started` / `discovery_completed`). Without this, trade_amount stays pegged to the configured `total_capital` constant — even when realized P&L doubles capital. The rescale uses the SAME `balance.get_portfolio_value(prices, hedge_pnl_usd=...)` source as drawdown tracking, so trade size, peak/drawdown, and the dashboard's portfolio number share one definition of "current capital". Fires from the broadcast loop; first tick after startup is a grace period (no rescale until 1h after first eligible tick). Hot-applies to `monitor._trade_amount`, `monitor._total_capital`, `optimizer._trade_amount`, `optimizer._total_capital`. Logged as `[TradeSize] Rescale (hourly_tick|discovery_started|discovery_completed): trade_amount $X → $Y (±Z%, Δ$W) | capital $A → $B (±C%, ΔD)`.
 - `allocated_trade_size = trade_amount × multiplier × net_pct_multiplier`
 - **Net%-based sizing** (`net_pct_sizing_enabled`, default true): scales trade size by current tick's net profitability. Tiers: <0.03%=0.5×, 0.03–0.08%=1.0×, 0.08–0.15%=1.5×, 0.15–0.25%=2.0×, >0.25%=2.5×. Capped by `net_pct_multiplier_cap` (default 2.5). Fat spreads get bigger trades; thin margins get smaller ones.
 - **Dynamic buffer**: Trade size capped by 95% of available balance when balance < 2× min_trade (small positions), 80% otherwise. Prevents wasting $2-8 on tiny positions.
@@ -738,7 +806,11 @@ Tracks portfolio value vs session peak. Blocks declining symbols on threshold br
 
 **Peak reset after liquidation**: When all crypto is sold (emergency sell or demotion), `reset_peak_if_no_crypto()` resets `_peak_portfolio_value` to current portfolio value. Breaks the deadlock where drawdown stays permanently above resume threshold after crypto is liquidated. Called from `monitor._tick()` (after emergency sell) and `optimizer._evaluate_demotions()` (after demotion sells all crypto).
 
-**Peak growth cap (v0.28.3-beta)**: `update_portfolio_value()` limits how much peak can grow per tick to `PEAK_MAX_GROWTH_PER_TICK_PCT` (default 5%). Without this cap, a single bad price tick (flash quote / stale feed) can ratchet peak up 30%+ in one update and poison drawdown tracking until manual reset — observed in Session #23 with peak=$1,297 vs real portfolio $1,002 driving false symbol-blocks despite stable spot prices. Real sustained rallies still compound smoothly (5% per ~1 Hz update is well beyond any realistic gain rate).
+**Peak growth cap**: `update_portfolio_value()` limits how much peak can grow per tick to `PEAK_MAX_GROWTH_PER_TICK_PCT`. Without this cap, a single bad price tick (flash quote / stale feed) can ratchet peak up 30%+ in one update and poison drawdown tracking until manual reset — observed in S23 with peak=$1,297 vs real portfolio $1,002 driving false symbol-blocks despite stable spot prices. Tightened from **5% to 1% in v0.29.0-beta** after S24 revealed sub-cap accumulation: at 5%/tick over a 113-second AR spike (~113 ticks), compound headroom of `1.05^113 ≈ huge` allowed peak to drift up enough that a small dip later read as 21.91% drawdown. 1%/tick still compounds real rallies (1.01^60 = +82% per minute theoretical ceiling, never reached) while filtering individual flash quotes effectively.
+
+**Basis-change peak reset (v0.29.0-beta)**: `reset_peak_on_basis_change(portfolio_value, reason)` — called by the dashboard when the hedge transitions between zero-hedge and active-hedge states. The accounting basis changes (`portfolio = spot only` ↔ `portfolio = spot + hedge_pnl`), so the historical peak becomes apples-to-oranges. Without this reset, S24 showed: peak captured at $1,040 during pre-hedge spot fluctuation; once hedge engaged and offset price moves, current settled at $1,000 → 4% phantom drawdown. The method mirrors `reset_peak_if_no_crypto` and emits a `PEAK_RESET` event for diagnostics.
+
+**Capital-change peak reset (v0.29.0-beta)**: `from_state_dict(data, current_total_capital)` accepts the configured capital and compares against `_total_capital_at_save` (snapshotted in `to_state_dict`). If they differ by >$0.50 (operator changed `total_capital` between sessions, OR loading an old state file), peak is reset to 0 — re-seeded on the first `update_portfolio_value` call. Without this, an old $1,800-capital session's peak would create a permanent ~44% phantom drawdown on a $1,000-capital restart. Logged as `[Anomaly] Capital changed across restart: $1800 → $1000. Resetting peak (was $X.XX) to avoid stale-peak phantom drawdown.`
 
 **Combined-portfolio drawdown (v0.28.3-beta)**: `BalanceTracker.get_portfolio_value()` accepts an optional `hedge_pnl_usd` argument. Dashboard's `_build_state` passes `HedgeManager.get_debug_state()['total_unrealized_pnl_usd']` so peak/drawdown represents **net spot + futures exposure**, not single-side noise. In shadow mode this is the simulated PnL preview; in testnet/live it's the real position PnL — the metric becomes economically meaningful (real spot price moves are offset by opposing futures PnL).
 
