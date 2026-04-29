@@ -287,6 +287,10 @@ class ArbitrageMonitor:
         # Hedge manager (Phase C — set externally via set_hedge_manager).
         # Evaluated periodically from the main loop. Shadow mode in C, live in D.
         self._hedge_manager: "HedgeManager | None" = None
+        # Tracks whether any hedge was open last tick. When this transitions
+        # 0→N or N→0, the anomaly tracker's peak basis changes (spot-only ↔
+        # spot+hedge_pnl) and we reset peak so drawdown is apples-to-apples.
+        self._prev_hedge_count: int = 0
 
     def set_optimizer(self, optimizer: "SymbolOptimizer") -> None:
         """Store optimizer reference for score-based rebalance gating."""
@@ -1417,6 +1421,24 @@ class ArbitrageMonitor:
                 and self._balance and self._balance.initialized):
             _safe_task(self._hedge_manager.evaluate(now), "hedge_evaluate")
 
+            # Detect hedge-state transition (0↔N) and reset anomaly peak
+            # so drawdown is apples-to-apples after the basis change.
+            try:
+                hedge_state = self._hedge_manager.get_debug_state()
+                cur_count = int(hedge_state.get("open_count", 0))
+                if (self._prev_hedge_count == 0) != (cur_count == 0):
+                    # Transition between zero-hedge and active-hedge state
+                    prices = self._get_current_prices()
+                    portfolio = self._balance.get_portfolio_value(
+                        prices,
+                        hedge_pnl_usd=float(hedge_state.get("total_unrealized_pnl_usd", 0.0)),
+                    )
+                    direction = "hedge_opened" if cur_count > 0 else "hedge_closed"
+                    self._anomaly.reset_peak_on_basis_change(portfolio, direction)
+                self._prev_hedge_count = cur_count
+            except Exception as e:
+                logger.debug(f"[Hedge] state transition check failed: {e}")
+
         # After initialize_crypto, place demo setup orders (one-shot)
         if (self._balance and self._balance.initialized
                 and not self._demo_setup_complete
@@ -2469,9 +2491,13 @@ class ArbitrageMonitor:
         self._one_leg_sim_count = data.get("_one_leg_sim_count", 0)
         self._one_leg_sim_cost = data.get("_one_leg_sim_cost", 0.0)
         self._position_cap_skips = data.get("_position_cap_skips", 0)
-        # Anomaly protection
+        # Anomaly protection — pass current configured capital so the load
+        # can detect operator-changed capital and reset stale peak.
         if "_anomaly" in data:
-            self._anomaly.from_state_dict(data["_anomaly"])
+            self._anomaly.from_state_dict(
+                data["_anomaly"],
+                current_total_capital=float(self._total_capital or 0.0),
+            )
             if self._anomaly._paused:
                 # Reset pause timestamp to now so cooldown re-starts from this
                 # boot — gives the system time to collect fresh data before

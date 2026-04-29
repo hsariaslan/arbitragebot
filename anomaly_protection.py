@@ -149,6 +149,37 @@ class AnomalyProtection:
         """Record timestamp of an emergency email (initial or reminder)."""
         self._emergency_email_last_sent = now
 
+    def reset_peak_on_basis_change(self, portfolio_value: float, reason: str) -> None:
+        """Reset peak when the portfolio_value accounting basis changes.
+
+        Called when hedge transitions between zero-hedge and active-hedge
+        states. The accounting basis changes (`portfolio = spot only` ↔
+        `portfolio = spot + hedge_pnl`), so the historical peak is no
+        longer an apples-to-apples comparison with current value. Pattern
+        mirrors `reset_peak_if_no_crypto`.
+
+        Without this reset, S24 showed: peak captured at $1,040 during
+        pre-hedge spot fluctuation; after hedge engaged and offset price
+        moves, current settled at $1,000 → 4% phantom drawdown.
+        """
+        if not self._enabled or portfolio_value <= 0:
+            return
+        old_peak = self._peak_portfolio_value
+        old_dd = self._current_drawdown_pct
+        self._peak_portfolio_value = portfolio_value
+        self._current_drawdown_pct = 0.0
+        logger.info(
+            f"[Anomaly] PEAK_RESET ({reason}): basis change\n"
+            f"  | old_peak=${old_peak:.2f} new_peak=${portfolio_value:.2f}\n"
+            f"  | old_drawdown={old_dd:.2f}% new_drawdown=0.00%"
+        )
+        self._events.append(AnomalyEvent(
+            timestamp=time.time(), layer="drawdown", level="resume",
+            reason=f"Peak reset: {reason}",
+            value=portfolio_value, threshold=old_peak,
+            details={"old_peak": f"${old_peak:.2f}", "old_drawdown": f"{old_dd:.2f}%"},
+        ))
+
     def reset_peak_if_no_crypto(self, portfolio_value: float) -> None:
         """Reset peak portfolio value when portfolio is 100% USDT.
 
@@ -242,9 +273,12 @@ class AnomalyProtection:
     # Cap how fast peak can grow per tick. A flash quote / stale price feed
     # could otherwise inflate peak by 30%+ in a single tick (S23 observed
     # peak=$1297 with portfolio actually at $1000), poisoning drawdown
-    # tracking until a manual reset. Conservative 5%/tick allows real bull
-    # rallies to compound peak smoothly while filtering single-tick spikes.
-    PEAK_MAX_GROWTH_PER_TICK_PCT: float = 5.0
+    # tracking until a manual reset. 1%/tick at ~1 Hz still compounds real
+    # rallies smoothly (3,600%/hr theoretical ceiling — never reached) but
+    # filters individual flash quotes effectively. Tightened from 5% to 1%
+    # in v0.29.0-beta after S24 showed a 4% drawdown from sub-cap accumulation
+    # of small spikes during the pre-hedge inventory-build window.
+    PEAK_MAX_GROWTH_PER_TICK_PCT: float = 1.0
 
     def update_portfolio_value(
         self, value: float, context: dict | None = None,
@@ -652,6 +686,9 @@ class AnomalyProtection:
             "_emergency_email_last_sent": self._emergency_email_last_sent,
             "_warning_active": self._warning_active,
             "_trade_size_multiplier": self._trade_size_multiplier,
+            # Snapshot the configured capital at save time so the next load
+            # can detect operator-changed capital and reset stale peak.
+            "_total_capital_at_save": self._portfolio_context.get("total_capital", 0.0),
             "_rolling_pnl": list(self._rolling_pnl),
             "_events": [
                 {
@@ -664,14 +701,37 @@ class AnomalyProtection:
             ],
         }
 
-    def from_state_dict(self, data: dict) -> None:
-        """Restore state from saved dict."""
+    def from_state_dict(self, data: dict, current_total_capital: float = 0.0) -> None:
+        """Restore state from saved dict.
+
+        If `current_total_capital` is provided AND the saved
+        `_total_capital_at_save` differs (operator changed capital between
+        sessions, or restoring from an old state file), the peak is reset.
+        Otherwise the saved peak's drawdown comparisons are meaningless
+        (e.g. a $1,800 peak from old capital vs $1,000 current → 44%
+        permanent phantom drawdown).
+        """
         self._paused = data.get("_paused", False)
         self._pause_reason = data.get("_pause_reason", "")
         self._pause_layer = data.get("_pause_layer", "")
         self._pause_timestamp = data.get("_pause_timestamp", 0.0)
         self._rolling_pnl_at_pause = data.get("_rolling_pnl_at_pause", 0.0)
-        self._peak_portfolio_value = data.get("_peak_portfolio_value", 0.0)
+        saved_peak = data.get("_peak_portfolio_value", 0.0)
+        saved_capital = data.get("_total_capital_at_save", 0.0)
+        if (
+            current_total_capital > 0
+            and saved_capital > 0
+            and abs(saved_capital - current_total_capital) > 0.5  # > $0.50 differ
+        ):
+            logger.warning(
+                f"[Anomaly] Capital changed across restart: "
+                f"${saved_capital:.0f} → ${current_total_capital:.0f}. "
+                f"Resetting peak (was ${saved_peak:.2f}) to avoid stale-peak "
+                f"phantom drawdown."
+            )
+            self._peak_portfolio_value = 0.0  # will be set on first update_portfolio_value
+        else:
+            self._peak_portfolio_value = saved_peak
         self._symbol_consecutive_losses = data.get("_symbol_consecutive_losses", {})
         self._symbol_blocked_until = data.get("_symbol_blocked_until", {})
         self._total_pauses = data.get("_total_pauses", 0)
