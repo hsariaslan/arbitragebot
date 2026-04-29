@@ -2938,13 +2938,38 @@ class SymbolOptimizer:
                 for ex, count in stats.sell_exchange_counts.items():
                     sell_scores[ex] += count
 
+        # Per-role filtering: drop buyer/seller scores for exchanges the
+        # operator has disabled in that role (Fee Management → Buyer/Seller
+        # checkboxes). Lets operator pin trades to specific routes, e.g.
+        # Bitfinex(buyer)+MEXC(seller) only.
+        if self._fee_manager:
+            buy_scores = {
+                ex: s for ex, s in buy_scores.items()
+                if self._fee_manager.can_buy(ex, symbol)
+            }
+            sell_scores = {
+                ex: s for ex, s in sell_scores.items()
+                if self._fee_manager.can_sell(ex, symbol)
+            }
+
         if not buy_scores or not sell_scores:
+            # Fall back to active exchanges respecting role flags
+            allowed_buyers = [
+                ex for ex in self._active_exchanges
+                if not self._fee_manager or self._fee_manager.can_buy(ex, symbol)
+            ]
+            allowed_sellers = [
+                ex for ex in self._active_exchanges
+                if not self._fee_manager or self._fee_manager.can_sell(ex, symbol)
+            ]
             equal_w = 1.0 / max(len(self._active_exchanges), 1)
-            all_ex = list(self._active_exchanges)
             return {
-                "buyers": [(ex, equal_w) for ex in all_ex[:max_per_direction]],
-                "sellers": [(ex, equal_w) for ex in all_ex[:max_per_direction]],
-                "num_exchanges": min(len(all_ex), max_per_direction * 2),
+                "buyers": [(ex, equal_w) for ex in allowed_buyers[:max_per_direction]],
+                "sellers": [(ex, equal_w) for ex in allowed_sellers[:max_per_direction]],
+                "num_exchanges": min(
+                    len(set(allowed_buyers) | set(allowed_sellers)),
+                    max_per_direction * 2,
+                ),
             }
 
         def _select_top(
@@ -2964,6 +2989,20 @@ class SymbolOptimizer:
                     (ex, w * (1 + (max_fee - fees.get(ex, max_fee)) / max_fee))
                     for ex, w in weighted
                 ]
+
+                # Per-exchange role boost: operator-set preference multiplier
+                # (default 1.0 = neutral, Bitfinex.buyer_boost=5.0 / MEXC.seller_boost=5.0
+                # bias the bot toward the cheapest sustainable route).
+                if direction == "buy":
+                    weighted = [
+                        (ex, w * self._fee_manager.get_buyer_boost(ex))
+                        for ex, w in weighted
+                    ]
+                else:  # "sell"
+                    weighted = [
+                        (ex, w * self._fee_manager.get_seller_boost(ex))
+                        for ex, w in weighted
+                    ]
 
             # Seller penalty: USDT accumulates on sell exchanges, so penalize
             # those with high withdrawal fees (capital gets trapped there).

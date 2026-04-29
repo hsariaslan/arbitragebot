@@ -199,10 +199,11 @@ export function useWebSocket() {
           return;
         }
 
-        // Single-shot result callbacks (in-memory all_bot_logs, hard stop, distribute)
+        // Single-shot result callbacks (in-memory all_bot_logs, hard stop, distribute, volumes)
         if (data.type === 'export_bot_logs_result' || data.type === 'export_auth_logs_result'
             || data.type === 'all_bot_logs_result'
-            || data.type === 'hard_stop_result' || data.type === 'distribute_result' || data.type === 'distribute_error') {
+            || data.type === 'hard_stop_result' || data.type === 'distribute_result' || data.type === 'distribute_error'
+            || data.type === 'volumes_response') {
           exportCallbackRef.current?.(data);
           exportCallbackRef.current = null;
           return;

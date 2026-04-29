@@ -79,6 +79,7 @@ interface FeeManagementTabProps {
   feeRealMode?: boolean;
   feeStats?: FeeStats;
   onSendMessage: (msg: object) => void;
+  onSendWithCallback?: (msg: object, callback: (data: unknown) => void) => void;
 }
 
 type EditableConfig = {
@@ -94,6 +95,11 @@ type EditableConfig = {
   referrer_commission_pct: number;
   zero_fee_pairs: string;
   enabled: boolean;
+  as_buyer: boolean;
+  as_seller: boolean;
+  disabled_symbols: Set<string>;
+  buyer_boost: number;
+  seller_boost: number;
 };
 
 function toEditable(cfg: ExchangeFeeConfig): EditableConfig {
@@ -110,7 +116,29 @@ function toEditable(cfg: ExchangeFeeConfig): EditableConfig {
     referrer_commission_pct: cfg.referrer_commission_pct ?? 0,
     zero_fee_pairs: cfg.zero_fee_pairs.join(', '),
     enabled: cfg.enabled ?? true,
+    as_buyer: cfg.as_buyer ?? true,
+    as_seller: cfg.as_seller ?? true,
+    disabled_symbols: new Set(cfg.disabled_symbols ?? []),
+    buyer_boost: cfg.buyer_boost ?? 1.0,
+    seller_boost: cfg.seller_boost ?? 1.0,
   };
+}
+
+function formatVolume(usd: number): string {
+  if (usd <= 0) return '—';
+  if (usd >= 1e9) return '$' + (usd / 1e9).toFixed(2) + 'B';
+  if (usd >= 1e6) return '$' + (usd / 1e6).toFixed(2) + 'M';
+  if (usd >= 1e3) return '$' + (usd / 1e3).toFixed(1) + 'K';
+  return '$' + usd.toFixed(0);
+}
+
+function volumeColor(usd: number): string {
+  if (usd <= 0) return 'text-slate-600';
+  if (usd < 1_000) return 'text-red-400';        // dead
+  if (usd < 10_000) return 'text-amber-400';     // very low
+  if (usd < 100_000) return 'text-yellow-300';   // low
+  if (usd < 1_000_000) return 'text-emerald-400'; // healthy
+  return 'text-emerald-300';                     // strong
 }
 
 function computeEffective(cfg: EditableConfig): { effective: number; afterReferral: number } {
@@ -126,7 +154,7 @@ function computeEffective(cfg: EditableConfig): { effective: number; afterReferr
   return { effective, afterReferral: afterRef };
 }
 
-export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, onSendMessage }: FeeManagementTabProps) {
+export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, onSendMessage, onSendWithCallback }: FeeManagementTabProps) {
   const serverConfigs = feeConfigs ?? {};
   const [configs, setConfigs] = useState<Record<string, EditableConfig>>(() => {
     const initial: Record<string, EditableConfig> = {};
@@ -137,6 +165,67 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
   });
   const [dirty, setDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
+
+  // Volume-fetch state
+  const [volumes, setVolumes] = useState<Record<string, Record<string, number>> | null>(null);
+  const [volumesFetchedAt, setVolumesFetchedAt] = useState<number | null>(null);
+  const [volumesLoading, setVolumesLoading] = useState(false);
+  const [volumesError, setVolumesError] = useState<string | null>(null);
+  const [expandedBlocklist, setExpandedBlocklist] = useState<Record<string, boolean>>({});
+
+  const handleFetchVolumes = () => {
+    if (!onSendWithCallback) {
+      setVolumesError('Volume fetch not available — websocket callback missing.');
+      return;
+    }
+    setVolumesLoading(true);
+    setVolumesError(null);
+    onSendWithCallback({ type: 'fetch_volumes' }, (data: unknown) => {
+      setVolumesLoading(false);
+      const d = data as { ok?: boolean; volumes?: Record<string, Record<string, number>>; error?: string; fetched_at?: number };
+      if (d.ok && d.volumes) {
+        setVolumes(d.volumes);
+        setVolumesFetchedAt(d.fetched_at ?? Date.now() / 1000);
+      } else {
+        setVolumesError(d.error || 'Unknown error');
+      }
+    });
+  };
+
+  const toggleBlocklist = (exchange: string) => {
+    setExpandedBlocklist(prev => ({ ...prev, [exchange]: !prev[exchange] }));
+  };
+
+  const toggleSymbolDisabled = (exchange: string, symbol: string) => {
+    setDirty(true);
+    setConfigs(prev => {
+      const cur = prev[exchange];
+      const next = new Set(cur.disabled_symbols);
+      if (next.has(symbol)) next.delete(symbol); else next.add(symbol);
+      return { ...prev, [exchange]: { ...cur, disabled_symbols: next } };
+    });
+  };
+
+  const bulkDisableBelow = (exchange: string, threshold: number) => {
+    const exVols = volumes?.[exchange] ?? {};
+    setDirty(true);
+    setConfigs(prev => {
+      const cur = prev[exchange];
+      const next = new Set(cur.disabled_symbols);
+      for (const [sym, vol] of Object.entries(exVols)) {
+        if (vol < threshold) next.add(sym);
+      }
+      return { ...prev, [exchange]: { ...cur, disabled_symbols: next } };
+    });
+  };
+
+  const clearBlocklist = (exchange: string) => {
+    setDirty(true);
+    setConfigs(prev => ({
+      ...prev,
+      [exchange]: { ...prev[exchange], disabled_symbols: new Set() },
+    }));
+  };
 
   // Sync from server when not dirty
   const configKey = JSON.stringify(feeConfigs);
@@ -176,6 +265,11 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
         referrer_commission_pct: cfg.referrer_commission_pct,
         zero_fee_pairs: cfg.zero_fee_pairs.split(',').map(s => s.trim()).filter(Boolean),
         enabled: cfg.enabled,
+        as_buyer: cfg.as_buyer,
+        as_seller: cfg.as_seller,
+        disabled_symbols: Array.from(cfg.disabled_symbols).sort(),
+        buyer_boost: cfg.buyer_boost,
+        seller_boost: cfg.seller_boost,
       };
     }
     onSendMessage({ type: 'save_fee_settings', fee_configs: feeData });
@@ -197,6 +291,39 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
           </p>
         </div>
       )}
+
+      {/* 24h Volume fetch banner — feeds the per-exchange symbol blocklist UI */}
+      <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg px-4 py-3">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex-1 min-w-[200px]">
+            <h3 className="text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
+              Per-Symbol Blocklist
+            </h3>
+            <p className="text-xs text-slate-500">
+              Fetch live 24h USD volumes from each exchange, then disable individual symbols where the
+              exchange has insufficient liquidity (e.g. LDO/HYPE on Bitfinex). Disabled symbols are
+              skipped in pair selection but still trade on other enabled exchanges.
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-1">
+            <button
+              onClick={handleFetchVolumes}
+              disabled={volumesLoading || !onSendWithCallback}
+              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-lg text-xs font-medium transition-colors"
+            >
+              {volumesLoading ? 'Fetching…' : volumes ? 'Refresh 24h Volumes' : 'Fetch 24h Volumes'}
+            </button>
+            {volumesFetchedAt && (
+              <span className="text-[10px] text-slate-500">
+                Fetched {new Date(volumesFetchedAt * 1000).toLocaleTimeString()}
+              </span>
+            )}
+            {volumesError && (
+              <span className="text-[11px] text-red-400">{volumesError}</span>
+            )}
+          </div>
+        </div>
+      </div>
 
       {/* Cashback stats */}
       {feeStats && (feeStats.pending_count > 0 || feeStats.credited_cashback_total > 0) && (
@@ -269,9 +396,55 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
                 {!cfg.enabled && (
                   <span className="text-xs px-1.5 py-0.5 rounded bg-red-900/40 text-red-400">Disabled</span>
                 )}
+                {cfg.enabled && !cfg.as_buyer && !cfg.as_seller && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-400" title="No roles enabled — exchange present but unused">No roles</span>
+                )}
+                {cfg.enabled && cfg.as_buyer && !cfg.as_seller && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-cyan-900/40 text-cyan-400">Buyer only</span>
+                )}
+                {cfg.enabled && !cfg.as_buyer && cfg.as_seller && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-rose-900/40 text-rose-400">Seller only</span>
+                )}
               </div>
               <span className="text-xs font-mono px-2 py-0.5 rounded bg-slate-700 text-emerald-400">
                 Effective: {(effective * 100).toFixed(4)}%
+              </span>
+            </div>
+
+            {/* Per-role checkboxes — operator can pin a route by enabling
+                only specific buyers/sellers. E.g. Bitfinex(buyer)+MEXC(seller)
+                forces all trades through the cheapest pair. */}
+            <div className="flex flex-wrap items-end gap-x-4 gap-y-2 mb-3">
+              <div className="flex items-center gap-1.5">
+                <label className={`flex items-center gap-1.5 text-xs cursor-pointer ${cfg.enabled ? 'text-slate-300' : 'text-slate-600'}`}>
+                  <input type="checkbox" checked={cfg.as_buyer} disabled={!cfg.enabled}
+                    onChange={e => updateField(exchange, 'as_buyer', e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-700 text-cyan-500 focus:ring-cyan-500" />
+                  <span>Allow as Buyer</span>
+                </label>
+                <span className="text-[10px] text-slate-500">×</span>
+                <input type="number" step="0.5" min="0" max="100"
+                  value={cfg.buyer_boost} disabled={!cfg.enabled || !cfg.as_buyer}
+                  onChange={e => updateField(exchange, 'buyer_boost', Number(e.target.value) || 1.0)}
+                  title="Buyer boost multiplier (1.0 = neutral, 5.0 = strong preference)"
+                  className={`w-16 text-xs text-right rounded px-1.5 py-0.5 ${cfg.buyer_boost !== 1.0 ? 'bg-cyan-900/40 border border-cyan-700 text-cyan-200' : 'bg-slate-700 border border-slate-600 text-slate-300'} disabled:opacity-50`} />
+              </div>
+              <div className="flex items-center gap-1.5">
+                <label className={`flex items-center gap-1.5 text-xs cursor-pointer ${cfg.enabled ? 'text-slate-300' : 'text-slate-600'}`}>
+                  <input type="checkbox" checked={cfg.as_seller} disabled={!cfg.enabled}
+                    onChange={e => updateField(exchange, 'as_seller', e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-700 text-rose-500 focus:ring-rose-500" />
+                  <span>Allow as Seller</span>
+                </label>
+                <span className="text-[10px] text-slate-500">×</span>
+                <input type="number" step="0.5" min="0" max="100"
+                  value={cfg.seller_boost} disabled={!cfg.enabled || !cfg.as_seller}
+                  onChange={e => updateField(exchange, 'seller_boost', Number(e.target.value) || 1.0)}
+                  title="Seller boost multiplier (1.0 = neutral, 5.0 = strong preference)"
+                  className={`w-16 text-xs text-right rounded px-1.5 py-0.5 ${cfg.seller_boost !== 1.0 ? 'bg-rose-900/40 border border-rose-700 text-rose-200' : 'bg-slate-700 border border-slate-600 text-slate-300'} disabled:opacity-50`} />
+              </div>
+              <span className="text-[11px] text-slate-500 italic flex-1 min-w-[200px]">
+                Boost ≥1× biases pair selection toward this role; non-preferred pairs need to beat preferred by ~boost× to win
               </span>
             </div>
 
@@ -378,6 +551,115 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, on
                 onChange={e => updateField(exchange, 'zero_fee_pairs', e.target.value)}
                 placeholder="e.g. BTCUSDT, ETHUSDT"
                 className={inputCls + ' placeholder-slate-500'} />
+            </div>
+
+            {/* Per-Symbol Blocklist */}
+            <div className="border-t border-slate-700/50 pt-3 mt-3">
+              <button
+                onClick={() => toggleBlocklist(exchange)}
+                className="w-full flex items-center justify-between text-xs text-slate-300 hover:text-white"
+              >
+                <span className="font-medium">
+                  Symbol Blocklist
+                  {cfg.disabled_symbols.size > 0 && (
+                    <span className="ml-2 text-amber-400">
+                      ({cfg.disabled_symbols.size} disabled)
+                    </span>
+                  )}
+                </span>
+                <span className="text-slate-500">{expandedBlocklist[exchange] ? '▾' : '▸'}</span>
+              </button>
+
+              {expandedBlocklist[exchange] && (() => {
+                const exVols = volumes?.[exchange] ?? null;
+                // Build sorted symbol list — union of (a) bot-tracked symbols
+                // appearing in volumes, (b) currently-disabled symbols (in case
+                // the exchange dropped them from its ticker), (c) zero-fee pairs.
+                const symbolSet = new Set<string>();
+                if (exVols) {
+                  // Only include symbols that are also configured for the bot.
+                  // (We use zero-fee pair list + volumes intersection as a heuristic.)
+                  // Easier: include ALL symbols the exchange returns that end with USDT.
+                  // For UX, sort by volume desc.
+                  Object.keys(exVols).forEach(s => symbolSet.add(s));
+                }
+                cfg.disabled_symbols.forEach(s => symbolSet.add(s));
+                const symbolList = Array.from(symbolSet);
+                if (exVols) {
+                  symbolList.sort((a, b) => (exVols[b] ?? 0) - (exVols[a] ?? 0));
+                } else {
+                  symbolList.sort();
+                }
+
+                return (
+                  <div className="mt-3">
+                    {!exVols && (
+                      <p className="text-xs text-slate-500 italic mb-2">
+                        Click "Fetch 24h Volumes" above to populate volume data.
+                        {cfg.disabled_symbols.size > 0 && (
+                          <span className="ml-1 text-amber-500">
+                            Currently disabled: {Array.from(cfg.disabled_symbols).sort().join(', ')}
+                          </span>
+                        )}
+                      </p>
+                    )}
+                    {exVols && (
+                      <>
+                        <div className="flex items-center gap-2 mb-2 text-[11px] flex-wrap">
+                          <span className="text-slate-500">Quick disable below:</span>
+                          <button onClick={() => bulkDisableBelow(exchange, 1_000)}
+                            className="px-2 py-0.5 rounded bg-red-900/40 hover:bg-red-900/60 text-red-300">
+                            &lt; $1K/24h
+                          </button>
+                          <button onClick={() => bulkDisableBelow(exchange, 10_000)}
+                            className="px-2 py-0.5 rounded bg-amber-900/40 hover:bg-amber-900/60 text-amber-300">
+                            &lt; $10K/24h
+                          </button>
+                          <button onClick={() => bulkDisableBelow(exchange, 100_000)}
+                            className="px-2 py-0.5 rounded bg-yellow-900/40 hover:bg-yellow-900/60 text-yellow-300">
+                            &lt; $100K/24h
+                          </button>
+                          <button onClick={() => clearBlocklist(exchange)}
+                            className="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 ml-auto">
+                            Clear all
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-1 max-h-80 overflow-y-auto bg-slate-900/40 rounded p-2">
+                          {symbolList.map(sym => {
+                            const vol = exVols[sym] ?? 0;
+                            const isDisabled = cfg.disabled_symbols.has(sym);
+                            return (
+                              <label key={sym}
+                                className={`flex items-center gap-1.5 text-[11px] px-1.5 py-1 rounded cursor-pointer ${
+                                  isDisabled ? 'bg-red-900/30 hover:bg-red-900/50' : 'hover:bg-slate-800'
+                                }`}
+                              >
+                                <input type="checkbox" checked={!isDisabled}
+                                  onChange={() => toggleSymbolDisabled(exchange, sym)}
+                                  className="w-3 h-3 rounded border-slate-600 bg-slate-700 text-emerald-500 focus:ring-emerald-500" />
+                                <span className={`font-mono ${isDisabled ? 'text-slate-500 line-through' : 'text-slate-200'}`}>
+                                  {sym.replace('USDT', '')}
+                                </span>
+                                <span className={`ml-auto font-mono ${volumeColor(vol)}`}>
+                                  {formatVolume(vol)}
+                                </span>
+                              </label>
+                            );
+                          })}
+                          {symbolList.length === 0 && (
+                            <span className="text-xs text-slate-500 col-span-full italic p-2">
+                              No symbols returned for this exchange.
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-slate-500 mt-1.5">
+                          Checked = enabled · unchecked = blocked from this exchange · volumes are 24h USD turnover
+                        </p>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Effective rate summary */}

@@ -532,6 +532,11 @@ export interface ExchangeFeeConfig {
   referrer_commission_pct: number;
   zero_fee_pairs: string[];
   enabled: boolean;
+  as_buyer?: boolean;
+  as_seller?: boolean;
+  disabled_symbols?: string[];
+  buyer_boost?: number;
+  seller_boost?: number;
 }
 
 export interface FeeStats {

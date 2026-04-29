@@ -33,6 +33,24 @@ class ExchangeFeeConfig:
     referrer_commission_pct: float = 0.0  # % of fee earned by referrer (user's account)
     zero_fee_pairs: list[str] = field(default_factory=list)
     enabled: bool = True  # Whether this exchange is active for trading
+    # Per-role enable flags (within an enabled exchange). Operator can pin
+    # the bot to specific routes — e.g. Bitfinex(buyer)+MEXC(seller) only.
+    # Both default to True (full participation when enabled).
+    as_buyer: bool = True
+    as_seller: bool = True
+    # Per-symbol blocklist — symbols listed here are excluded from this
+    # exchange's pair selection (both buyer and seller side). Used to
+    # disable thinly-traded symbols on illiquid exchanges (e.g. LDO/HYPE
+    # on Bitfinex have ~$2/day volume — useless to trade).
+    disabled_symbols: list[str] = field(default_factory=list)
+    # Soft preference multipliers for pair selection. 1.0 = neutral, >1.0
+    # makes the exchange a more-attractive buyer/seller, <1.0 makes it less.
+    # Default Bitfinex.buyer_boost=5.0 + MEXC.seller_boost=5.0 enforces a
+    # strong "Bitfinex(buy)+MEXC(sell)" route preference, while still letting
+    # other pairs win if their net% beats the preferred pair's by more than
+    # the boost factor (e.g. AR's 12% spike on OKX→MEXC trivially overrides).
+    buyer_boost: float = 1.0
+    seller_boost: float = 1.0
 
     @property
     def effective_taker_rate(self) -> float:
@@ -67,6 +85,11 @@ class ExchangeFeeConfig:
             "referrer_commission_pct": self.referrer_commission_pct,
             "zero_fee_pairs": list(self.zero_fee_pairs),
             "enabled": self.enabled,
+            "as_buyer": self.as_buyer,
+            "as_seller": self.as_seller,
+            "disabled_symbols": list(self.disabled_symbols),
+            "buyer_boost": self.buyer_boost,
+            "seller_boost": self.seller_boost,
         }
 
     @classmethod
@@ -87,6 +110,11 @@ class ExchangeFeeConfig:
             referrer_commission_pct=float(data.get("referrer_commission_pct", 0.0)),
             zero_fee_pairs=list(data.get("zero_fee_pairs", [])),
             enabled=bool(data.get("enabled", True)),
+            as_buyer=bool(data.get("as_buyer", True)),
+            as_seller=bool(data.get("as_seller", True)),
+            disabled_symbols=list(data.get("disabled_symbols", [])),
+            buyer_boost=float(data.get("buyer_boost", 1.0)),
+            seller_boost=float(data.get("seller_boost", 1.0)),
         )
 
 
@@ -197,6 +225,63 @@ class FeeManager:
     def get_enabled_exchanges(self) -> list[str]:
         """Return list of all enabled exchange names."""
         return [ex for ex, cfg in self._configs.items() if cfg.enabled]
+
+    def can_buy(self, exchange: str, symbol: str = "") -> bool:
+        """Check if an enabled exchange is allowed to act as a BUYER for a symbol.
+
+        Operator-set per-role flags constrain pair selection — e.g. setting
+        only Bitfinex.as_buyer=True and MEXC.as_seller=True restricts trades
+        to the cheapest possible pair. Disabled exchanges always return False.
+        Symbols in the manual `disabled_symbols` blocklist also return False.
+        """
+        cfg = self._configs.get(exchange)
+        if cfg is None:
+            return True  # unknown = allow
+        if symbol and symbol in cfg.disabled_symbols:
+            return False
+        return cfg.enabled and cfg.as_buyer
+
+    def can_sell(self, exchange: str, symbol: str = "") -> bool:
+        """Check if an enabled exchange is allowed to act as a SELLER for a symbol."""
+        cfg = self._configs.get(exchange)
+        if cfg is None:
+            return True
+        if symbol and symbol in cfg.disabled_symbols:
+            return False
+        return cfg.enabled and cfg.as_seller
+
+    def is_symbol_enabled(self, exchange: str, symbol: str) -> bool:
+        """Check if a (exchange, symbol) combination is allowed (either role).
+
+        Blocked if symbol is in the manual blocklist (`disabled_symbols`).
+        """
+        cfg = self._configs.get(exchange)
+        if cfg is None:
+            return True
+        return symbol not in cfg.disabled_symbols
+
+    def get_buyer_boost(self, exchange: str) -> float:
+        """Soft preference multiplier when this exchange is selected as buyer.
+
+        Stacks on top of fee weighting in pair scoring. Default 1.0 (neutral).
+        Bitfinex defaults to 5.0 to bias the bot toward the cheapest sustainable
+        route, while still letting strong opportunities on other pairs win.
+        """
+        cfg = self._configs.get(exchange)
+        if cfg is None:
+            return 1.0
+        return max(0.0, cfg.buyer_boost)
+
+    def get_seller_boost(self, exchange: str) -> float:
+        """Soft preference multiplier when this exchange is selected as seller.
+
+        MEXC defaults to 5.0 — pairs with Bitfinex(buyer) for the cheapest
+        possible round-trip on USDT pairs the bot supports.
+        """
+        cfg = self._configs.get(exchange)
+        if cfg is None:
+            return 1.0
+        return max(0.0, cfg.seller_boost)
 
     def get_fee_model(self, exchange: str) -> str:
         """Get fee deduction model for an exchange.

@@ -1071,6 +1071,11 @@ class DashboardServer:
         "referrer_commission_pct": (float, 0.0, 1.0),
         "zero_fee_pairs": (list, None, None),
         "enabled": (bool, None, None),
+        "as_buyer": (bool, None, None),
+        "as_seller": (bool, None, None),
+        "disabled_symbols": (list, None, None),
+        "buyer_boost": (float, 0.0, 100.0),
+        "seller_boost": (float, 0.0, 100.0),
     }
     _FEE_ENUMS: dict[str, list[str]] = {
         "fee_mechanism": ["instant", "rebate", "tier"],
@@ -1306,6 +1311,29 @@ class DashboardServer:
                 self._transfer_fee_mgr.update_from_settings(transfer_data)
             await ws.send(json.dumps({"type": "transfer_settings_saved", "ok": True}))
             logger.info("[Transfer] Transfer fee settings saved and applied")
+
+        elif msg_type == "fetch_volumes":
+            # On-demand 24h USD volume fetch for all 9 exchanges (Fee Mgmt tab)
+            try:
+                from volume_fetcher import fetch_all_24h_volumes
+                volumes = await fetch_all_24h_volumes()
+                await ws.send(json.dumps({
+                    "type": "volumes_response",
+                    "ok": True,
+                    "volumes": volumes,
+                    "fetched_at": time.time(),
+                }))
+                logger.info(
+                    f"[VolumeFetch] Fetched 24h volumes: "
+                    f"{ {ex: len(v) for ex, v in volumes.items()} }"
+                )
+            except Exception as e:
+                logger.exception("[VolumeFetch] Failed")
+                await ws.send(json.dumps({
+                    "type": "volumes_response",
+                    "ok": False,
+                    "error": str(e),
+                }))
 
         elif msg_type == "request_all_bot_logs":
             # Return ALL in-memory session logs (for filtered views)
@@ -2510,6 +2538,9 @@ class DashboardServer:
         fee_parts = []
         fee_cfgs = s.get("fee_configs", {})
         disabled_exs = []
+        boost_parts: list[str] = []
+        role_parts: list[str] = []
+        blocklist_parts: list[str] = []
         for ex_name in sorted(fee_cfgs.keys()):
             cfg = fee_cfgs[ex_name]
             if not cfg.get("enabled", True):
@@ -2525,6 +2556,21 @@ class DashboardServer:
             ref_comm = cfg.get("referrer_commission_pct", 0)
             ref_str = f"+ref{ref_comm * 100:.0f}%" if ref_comm > 0 else ""
             fee_parts.append(f"{short}={eff * 100:.3f}%{ref_str}")
+            # Boost markers (only when non-default 1.0)
+            buy_b = cfg.get("buyer_boost", 1.0)
+            sell_b = cfg.get("seller_boost", 1.0)
+            if buy_b != 1.0 or sell_b != 1.0:
+                boost_parts.append(f"{short}(buy={buy_b:.1f}x,sell={sell_b:.1f}x)")
+            # Role flags (only when restrictive)
+            as_buy = cfg.get("as_buyer", True)
+            as_sell = cfg.get("as_seller", True)
+            if not as_buy or not as_sell:
+                role_str = "buyer-only" if as_buy and not as_sell else "seller-only" if as_sell and not as_buy else "no-role"
+                role_parts.append(f"{short}={role_str}")
+            # Per-symbol blocklist
+            blocked_syms = cfg.get("disabled_symbols", [])
+            if blocked_syms:
+                blocklist_parts.append(f"{short}=[{','.join(sorted(blocked_syms))}]")
 
         # Anomaly settings
         ano_enabled = s.get("anomaly_protection_enabled", True)
@@ -2574,6 +2620,9 @@ class DashboardServer:
             f"adjust_threshold={s.get('hedge_adjust_threshold_pct', 0.10)*100:.0f}%",
             f"fee_real_mode={s.get('fee_real_mode', False)}",
             f"exchanges: {' '.join(fee_parts)}",
+            f"role_boosts: {' '.join(boost_parts) if boost_parts else 'all neutral (1.0x)'}",
+            f"role_restrictions: {' '.join(role_parts) if role_parts else 'none (all enabled as buyer+seller)'}",
+            f"symbol_blocklists: {' '.join(blocklist_parts) if blocklist_parts else 'none'}",
             f"disabled_exchanges: {', '.join(disabled_exs) if disabled_exs else 'none'}",
             f"execution_mode={s.get('execution_mode', 'simulation')}",
         ]

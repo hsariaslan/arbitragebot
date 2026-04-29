@@ -211,6 +211,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referrer_commission_pct": 0.40,  # 40% referrer commission (independent, 1080 days)
         "zero_fee_pairs": [],
         "enabled": True,
+        "seller_boost": 5.0,  # Strong seller-side preference (Bitfinex+MEXC default route)
     },
     "Bitget": {
         "base_taker_rate": 0.001,
@@ -281,6 +282,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referrer_commission_pct": 0.0,
         "zero_fee_pairs": [],
         "enabled": True,
+        "buyer_boost": 5.0,  # Strong buyer-side preference (Bitfinex+MEXC default route)
     },
 }
 

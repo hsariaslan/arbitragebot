@@ -302,6 +302,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           feeRealMode={feeRealMode}
           feeStats={feeStats}
           onSendMessage={onSendMessage}
+          onSendWithCallback={onSendWithCallback}
         />
       ) : activeSubTab === 'transfers' ? (
         <TransferFeeManagementTab

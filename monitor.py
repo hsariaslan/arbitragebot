@@ -1557,6 +1557,15 @@ class ArbitrageMonitor:
                     if i == j:
                         continue
 
+                    # Per-role gate: skip pairs where the operator has disabled
+                    # buyer or seller role (Fee Management → Buyer/Seller checkboxes)
+                    # or where the symbol is in the exchange's disabled_symbols list.
+                    if self._fee_manager and (
+                        not self._fee_manager.can_buy(ex_buy, symbol)
+                        or not self._fee_manager.can_sell(ex_sell, symbol)
+                    ):
+                        continue
+
                     # Skip if insufficient depth (use min_trade as threshold)
                     min_depth = max(5.0, self._total_capital * 0.003) if self._adaptive_mode else self._trade_amount
                     if ask_depth_i < min_depth or bid_depth_j < min_depth:
@@ -1575,6 +1584,17 @@ class ArbitrageMonitor:
                     s_sell = self._fee_manager.get_scoring_fee(ex_sell, symbol) if self._fee_manager else 0.001
                     raw_scoring_net = spread_pct - (s_buy + s_sell) * 100 - slippage_pct
                     scoring_net = raw_scoring_net
+
+                    # Per-role boost: multiply scoring_net by the buyer/seller
+                    # preference multipliers. Default 1.0 (neutral) — operator can
+                    # set Bitfinex.buyer_boost=5.0 + MEXC.seller_boost=5.0 to bias
+                    # selection toward the cheapest sustainable route. A non-preferred
+                    # pair must beat the preferred pair's net% by at least the boost
+                    # ratio to win — a 12% spike on OKX→MEXC easily overrides 5×.
+                    if self._fee_manager:
+                        buy_boost = self._fee_manager.get_buyer_boost(ex_buy)
+                        sell_boost = self._fee_manager.get_seller_boost(ex_sell)
+                        scoring_net *= buy_boost * sell_boost
 
                     # Penalize event-driven sellers (stale bid risk)
                     if self._event_driven_seller_penalty > 0 and ex_sell in self._event_driven_exchanges:
