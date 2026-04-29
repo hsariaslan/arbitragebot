@@ -75,6 +75,10 @@ SYMBOLS: list[str] = [
     "JUPUSDT",
     "COMPUSDT",
     "DYDXUSDT",
+    # Tier 5 - Bitfinex+MEXC pair expansion (added v0.29.0-beta)
+    "XMRUSDT",
+    "ZROUSDT",
+    "NEOUSDT",
 ]
 
 # Snapshot interval - how often to write CSV rows and print to console
