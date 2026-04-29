@@ -738,6 +738,10 @@ Tracks portfolio value vs session peak. Blocks declining symbols on threshold br
 
 **Peak reset after liquidation**: When all crypto is sold (emergency sell or demotion), `reset_peak_if_no_crypto()` resets `_peak_portfolio_value` to current portfolio value. Breaks the deadlock where drawdown stays permanently above resume threshold after crypto is liquidated. Called from `monitor._tick()` (after emergency sell) and `optimizer._evaluate_demotions()` (after demotion sells all crypto).
 
+**Peak growth cap (v0.28.3-beta)**: `update_portfolio_value()` limits how much peak can grow per tick to `PEAK_MAX_GROWTH_PER_TICK_PCT` (default 5%). Without this cap, a single bad price tick (flash quote / stale feed) can ratchet peak up 30%+ in one update and poison drawdown tracking until manual reset — observed in Session #23 with peak=$1,297 vs real portfolio $1,002 driving false symbol-blocks despite stable spot prices. Real sustained rallies still compound smoothly (5% per ~1 Hz update is well beyond any realistic gain rate).
+
+**Combined-portfolio drawdown (v0.28.3-beta)**: `BalanceTracker.get_portfolio_value()` accepts an optional `hedge_pnl_usd` argument. Dashboard's `_build_state` passes `HedgeManager.get_debug_state()['total_unrealized_pnl_usd']` so peak/drawdown represents **net spot + futures exposure**, not single-side noise. In shadow mode this is the simulated PnL preview; in testnet/live it's the real position PnL — the metric becomes economically meaningful (real spot price moves are offset by opposing futures PnL).
+
 ### Layer 3: Per-Symbol Loss Streak — Targeted
 
 Blocks individual symbols after consecutive losses. Other profitable symbols keep trading.

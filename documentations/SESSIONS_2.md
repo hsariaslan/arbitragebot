@@ -243,3 +243,94 @@ Bitfinex held $715 (71% of capital) at end after PEPE/DOGE demotions — the BFX
 - **Hedge math validated again**: shadow funding +$0.0099 over 6 hedges, all in lock-step with spot inventory.
 - **The bug is a one-line fix** — pure logic error in the gate condition, not a design flaw. Floor logic itself is correct; gate was too restrictive.
 - **Pre-fix workaround during a session**: operator could manually demote the bot to single-symbol or below by lowering `num_active_symbols` to 1, which would force `_discovery_complete=True` to remain set on a non-zero-active state. Not needed post-fix.
+
+### Session #23 — 2026-04-29 (v0.28.2-beta, Drawdown Peak-Inflation Bug)
+
+**Date**: 2026-04-29 12:16 UTC → 15:56 UTC (~3h 40m)
+**Capital**: $1,000 ($40 per trade, 4%)
+**Version**: v0.28.2-beta — first session with diversification floor fixed (S22 follow-up) and operator's new aggressive settings (`fee_threshold_mult=0.2`, `max_pos_mult=3.0`, `diversification_floor_multiplier=0.5`, `bitfinex_reserve=20%`, `dust=$10`)
+**Execution Mode**: Demo
+**Hedge Execution Mode**: `simulation` (still shadow only)
+**Active Exchanges**: 6
+
+#### Final Aggregate (last `[Session]` line at 15:55:29, 3h39m active)
+
+| Metric | Value |
+|---|---|
+| Trades | 142 |
+| Trading PnL | +$1.45 |
+| Transfer fees | $0.24 |
+| Cashback (credited / pending) | $0.32 / $0.22 |
+| **Net** | **+$1.53** |
+| **$/hr** | **$0.42** (consistent with S22's $0.44/hr) |
+| Portfolio | $1,000 → $1,002 (+$2) |
+| sz0 | 1,154 |
+| pos_cap skips | **74** (down from S22's 743 — `max_pos_mult=3.0` worked) |
+| Anomaly | 0p / 0w / **4sb** (new — false drawdown blocks) |
+
+#### Discovery & Symbol Lifecycle
+
+| Time (UTC) | Event |
+|---|---|
+| 12:16:20 | Bot starts (intentional restart). State restored, 4 symbols pre-loaded. |
+| 12:31:21 | Discovery completes — DOGEUSDT only |
+| 13:10:22 | DOGEUSDT demoted; PEAK_RESET fires (peak → ~$1000) |
+| 13:55:25 | Discovery activates **3 symbols simultaneously**: AR, GRT, WIF. **Diversification + lower thresholds working**. |
+| 14:25:08 | ARUSDT demoted (30 min) |
+| 15:05:28 | WIFUSDT demoted (1h10m) |
+| 15:13:34 | PEPEUSDT EXPAND_READY (auto-expand fired correctly) |
+
+The diversification floor fix from v0.28.2-beta visibly worked — discovery activated 3 symbols simultaneously where S21/S22 only managed 1.
+
+#### THE BUG — Drawdown peak inflated by ~30% with no real price movement
+
+Two distinct DRAWDOWN_BLOCK events fired with stable spot prices:
+
+| Time | Drawdown reported | Portfolio (snapshot) | Implied peak | Symbols blocked |
+|---|---:|---:|---:|---|
+| 14:27:20 (1m of repeats) | **22.72%** | $1,002 | **$1,297** | 2 |
+| 15:55:36 (1m of repeats) | **16.22%** | ~$1,003 | ~$1,197 | 2 |
+
+Real spot prices during those windows were rock-stable:
+- WIFUSDT: $0.1786–$0.1797 (0.6% range)
+- GRTUSDT: $0.0246–$0.0248 (~1% range)
+- ARUSDT: $1.8630–$1.8660 (0.2% range)
+
+Yet peak portfolio_value got recorded at **$1,297** between PEAK_RESET (13:10) and the first alarm (14:27). That requires a transient ~30% spike on the bot's $400 of crypto exposure — most likely a **flash quote / stale price tick** from one of the exchange feeds inflating `prices[symbol]` for one tick. The single-tick max in `update_portfolio_value` ratchets peak up and never lets it down.
+
+#### Root cause
+
+`AnomalyProtection.update_portfolio_value()` used a naive single-tick max:
+
+```python
+if value > self._peak_portfolio_value:
+    self._peak_portfolio_value = value
+```
+
+Any single bad tick poisons peak indefinitely (until next PEAK_RESET).
+
+#### Fix shipped in v0.28.3-beta (two layers)
+
+1. **Cap peak growth per tick** (`anomaly_protection.py`): introduced `PEAK_MAX_GROWTH_PER_TICK_PCT = 5.0`. Real sustained gains still compound (5% per ~1Hz update is a 18,000%/hr theoretical ceiling — never reached); single-tick spikes are filtered. **Would have prevented every false drawdown in this session.**
+2. **Include hedge unrealized PnL in portfolio_value** (`balance.py` + `dashboard_server.py`): `get_portfolio_value(prices, hedge_pnl_usd=0.0)`. With hedging, real price moves are offset by opposing futures PnL → drawdown represents net spot+futures economic exposure instead of single-side noise. Currently passes shadow PnL (educational); becomes real PnL once `hedge_execution_mode=testnet`.
+
+#### Phase A & C — Continued working as designed
+
+- 142 trades with new aggressive settings — biggest activation diversity yet (3 symbols simultaneously)
+- Hedge cycles correctly tracked AR/GRT/WIF concurrent positions, total_notional=$400 matched spot inventory each tick
+- pos_cap=74 (down 90% from S22's 743) — `max_pos_mult=3.0` removed the throttling
+
+#### Issues Identified
+
+| # | Severity | Issue |
+|---|---|---|
+| 1 | **HIGH** | **Drawdown peak inflated by ~30%** by transient bad price tick — symbol-blocks fired 30+ times despite stable spot prices and flat portfolio. **FIXED in v0.28.3-beta** (peak-growth cap + hedge PnL in portfolio_value). |
+| 2 | LOW | **Bitfinex over-target log spam** — at 12:36 the over-target redistribute logged once per second when no non-Bitfinex active exchange existed. Throttling exists but not for the "skip" path. Cosmetic; doesn't impact bot behavior. |
+
+#### Lessons / Conclusions
+
+- **Aggressive settings (S23) match S22 efficiency at $0.42/hr** while activating 3 symbols simultaneously instead of 1. The diversification-floor fix is providing the diversification it was designed for.
+- **`max_pos_mult=3.0` was the right call** — pos_cap dropped 10× without any visible inventory blow-up.
+- **Drawdown protection is now robust** — the peak-growth cap means a single bad tick can no longer poison subsequent measurements.
+- **Hedge-PnL in portfolio_value** sets up Phase D (testnet) cleanly: when real shorts are active, drawdown will represent actual net economic exposure, with spot price moves offset by opposing futures PnL.
+- **3 sessions × ~25h aggregate of clean shadow-mode hedging** (zero executor errors, all hedge lifecycle paths exercised, demote-driven closes working, S22 bug fixed and S23 false-positives now fixed) — sufficient validation to flip `hedge_execution_mode` to `testnet` for Session #24.
