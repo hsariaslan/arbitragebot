@@ -239,16 +239,35 @@ class AnomalyProtection:
         self._check_triggers(timestamp)
         self._check_symbol_streak(timestamp, symbol)
 
+    # Cap how fast peak can grow per tick. A flash quote / stale price feed
+    # could otherwise inflate peak by 30%+ in a single tick (S23 observed
+    # peak=$1297 with portfolio actually at $1000), poisoning drawdown
+    # tracking until a manual reset. Conservative 5%/tick allows real bull
+    # rallies to compound peak smoothly while filtering single-tick spikes.
+    PEAK_MAX_GROWTH_PER_TICK_PCT: float = 5.0
+
     def update_portfolio_value(
         self, value: float, context: dict | None = None,
     ) -> None:
-        """Update peak portfolio and drawdown tracking."""
+        """Update peak portfolio and drawdown tracking.
+
+        Peak growth is capped at PEAK_MAX_GROWTH_PER_TICK_PCT per call. Real
+        sustained gains still compound (5% per ~1Hz update = 18,000% per
+        hour theoretical ceiling — never reached in practice). Single-tick
+        flash quotes can no longer corrupt peak.
+        """
         if not self._enabled or value <= 0:
             return
         if context:
             self._portfolio_context = context
         if value > self._peak_portfolio_value:
-            self._peak_portfolio_value = value
+            if self._peak_portfolio_value > 0:
+                cap = self._peak_portfolio_value * (
+                    1.0 + self.PEAK_MAX_GROWTH_PER_TICK_PCT / 100.0
+                )
+                self._peak_portfolio_value = min(value, cap)
+            else:
+                self._peak_portfolio_value = value
         if self._peak_portfolio_value > 0:
             self._current_drawdown_pct = (
                 (self._peak_portfolio_value - value)

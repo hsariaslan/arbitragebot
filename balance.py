@@ -1531,14 +1531,30 @@ class BalanceTracker:
 
         return adjustment
 
-    def get_portfolio_value(self, prices: dict[str, float]) -> float:
-        """Calculate total portfolio value in USD (counts ALL held crypto, not just active symbols)."""
+    def get_portfolio_value(
+        self,
+        prices: dict[str, float],
+        hedge_pnl_usd: float = 0.0,
+    ) -> float:
+        """Calculate total portfolio value in USD.
+
+        Includes spot USDT + spot crypto value + optional futures hedge
+        unrealized PnL. When hedging is active (testnet/live), passing the
+        hedge PnL keeps the metric representing real economic exposure —
+        spot price moves are offset by opposing futures PnL, so peak/drawdown
+        tracking reflects net portfolio risk instead of single-side noise.
+
+        In shadow mode, hedge_pnl_usd is the simulated unrealized PnL on
+        the would-be short. Passing it makes the drawdown signal a useful
+        preview of what real-mode behavior would look like.
+        """
         total = sum(self.usdt.values())
         for ex in self._exchanges:
             for sym, qty in self.crypto[ex].items():
                 if qty > 0:
                     p = prices.get(sym, 0.0)
                     total += qty * p
+        total += hedge_pnl_usd
         return total
 
     def get_balance_lines(self, prices: dict[str, float]) -> list[str]:

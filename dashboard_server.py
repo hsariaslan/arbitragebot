@@ -2705,9 +2705,23 @@ class DashboardServer:
             if f._ws_connected and f.exchange_name in active_set
         )
 
-        # Portfolio
+        # Portfolio — include hedge unrealized PnL so the metric represents
+        # net spot+futures exposure (drawdown becomes economic, not single-
+        # side noise). In shadow mode this is the simulated PnL preview;
+        # in testnet/live it's the real position PnL.
+        hedge_pnl_usd = 0.0
+        hm = getattr(self._monitor, "_hedge_manager", None)
+        if hm is not None and self._balance and self._balance.initialized:
+            try:
+                hedge_state = hm.get_debug_state()
+                hedge_pnl_usd = float(hedge_state.get("total_unrealized_pnl_usd", 0.0))
+            except Exception:
+                hedge_pnl_usd = 0.0
         initial = self._balance._initial_investment
-        portfolio_value = self._balance.get_portfolio_value(prices) if self._balance.initialized else initial
+        portfolio_value = (
+            self._balance.get_portfolio_value(prices, hedge_pnl_usd=hedge_pnl_usd)
+            if self._balance.initialized else initial
+        )
         trading_pnl = sum(t.profit_usd for t in self._monitor._trades)
         transfer_fees = self._balance.total_transfer_fees
 
