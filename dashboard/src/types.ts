@@ -147,6 +147,9 @@ export interface Settings {
   one_leg_failure_rate?: number;
   one_leg_unwind_slippage_mult?: number;
   max_position_multiplier?: number;
+  // Diversification floor (S21 follow-up)
+  diversification_floor_enabled?: boolean;
+  diversification_floor_multiplier?: number;
   // Funding-aware scoring (Phase A)
   funding_aware_scoring_enabled?: boolean;
   funding_skip_threshold_4h_pct?: number;

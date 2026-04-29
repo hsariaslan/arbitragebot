@@ -74,6 +74,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [oneLegUnwindSlippageMult, setOneLegUnwindSlippageMult] = useState(currentSettings.one_leg_unwind_slippage_mult ?? 1.5);
   const [maxPositionMultiplier, setMaxPositionMultiplier] = useState(currentSettings.max_position_multiplier ?? 5.0);
   // Funding-aware scoring (Phase A)
+  const [diversificationFloorEnabled, setDiversificationFloorEnabled] = useState(currentSettings.diversification_floor_enabled ?? true);
+  const [diversificationFloorMultiplier, setDiversificationFloorMultiplier] = useState(currentSettings.diversification_floor_multiplier ?? 0.7);
   const [fundingAwareEnabled, setFundingAwareEnabled] = useState(currentSettings.funding_aware_scoring_enabled ?? true);
   const [fundingSkip4h, setFundingSkip4h] = useState(currentSettings.funding_skip_threshold_4h_pct ?? -0.05);
   const [fundingSkip8h, setFundingSkip8h] = useState(currentSettings.funding_skip_threshold_8h_pct ?? -0.05);
@@ -155,6 +157,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setOneLegFailureRate(currentSettings.one_leg_failure_rate ?? 0.02);
       setOneLegUnwindSlippageMult(currentSettings.one_leg_unwind_slippage_mult ?? 1.5);
       setMaxPositionMultiplier(currentSettings.max_position_multiplier ?? 5.0);
+      setDiversificationFloorEnabled(currentSettings.diversification_floor_enabled ?? true);
+      setDiversificationFloorMultiplier(currentSettings.diversification_floor_multiplier ?? 0.7);
       setFundingAwareEnabled(currentSettings.funding_aware_scoring_enabled ?? true);
       setFundingSkip4h(currentSettings.funding_skip_threshold_4h_pct ?? -0.05);
       setFundingSkip8h(currentSettings.funding_skip_threshold_8h_pct ?? -0.05);
@@ -227,6 +231,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     one_leg_failure_rate: oneLegFailureRate,
     one_leg_unwind_slippage_mult: oneLegUnwindSlippageMult,
     max_position_multiplier: maxPositionMultiplier,
+    diversification_floor_enabled: diversificationFloorEnabled,
+    diversification_floor_multiplier: diversificationFloorMultiplier,
     funding_aware_scoring_enabled: fundingAwareEnabled,
     funding_skip_threshold_4h_pct: fundingSkip4h,
     funding_skip_threshold_8h_pct: fundingSkip8h,
@@ -756,6 +762,34 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             </label>
             <input type="number" value={maxPositionMultiplier} min={0} max={50} step={0.5}
               onChange={d(setMaxPositionMultiplier, 5.0)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+        </div>
+      </div>
+
+      {/* Diversification Floor (S21 follow-up — relax activation when understaffed) */}
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Diversification Floor</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          When the bot is understaffed (active symbols below the configured minimum), multiply the activation threshold by this multiplier so a 2nd or 3rd marginal candidate can clear the gate. Pair with the momentum filter to avoid activating bleeders. Session #21 produced 187 unsuccessful auto-expand attempts — this addresses that.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="flex items-center gap-2">
+            <label className="flex items-center cursor-pointer">
+              <input type="checkbox" checked={diversificationFloorEnabled}
+                onChange={e => setDiversificationFloorEnabled(e.target.checked)}
+                className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
+              <span className="text-sm text-slate-300">Enable Diversification Floor</span>
+            </label>
+            <Tooltip text="When active < num_active_symbols, the activation threshold is multiplied by the floor multiplier (default 0.7×). Default: enabled. Config key: diversification_floor_enabled" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Floor Multiplier
+              <Tooltip text="Multiplier applied to the activation threshold when active count is below minimum. Default: 0.7 (= 30% easier to clear). Lower = more aggressive activation. Range: 0.1-1.0. Config key: diversification_floor_multiplier" />
+            </label>
+            <input type="number" value={diversificationFloorMultiplier} min={0.1} max={1.0} step={0.05}
+              onChange={d(setDiversificationFloorMultiplier, 0.7)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
         </div>

@@ -6,7 +6,7 @@ All symbols, exchange settings, and operational parameters.
 
 import os
 
-__version__ = "0.28.0-beta"
+__version__ = "0.28.1-beta"
 
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
@@ -360,6 +360,14 @@ BITFINEX_OVER_TARGET_MULTIPLIER: float = 1.5  # Trigger when BFX USDT > reserve_
 
 # Auto-expand on understaff (Feature 6 — bypass eval interval when active symbols < min)
 AUTO_EXPAND_ON_UNDERSTAFF: bool = True
+
+# Diversification floor (S21 follow-up — relax activation threshold when understaffed)
+# When `len(active_symbols) < num_active_symbols`, multiply the activation
+# threshold by this multiplier so a 2nd or 3rd marginal candidate can activate
+# rather than the bot sitting idle. Pair with the momentum filter to avoid
+# activating bleeders. See SESSIONS_2.md Session #21 for rationale.
+DIVERSIFICATION_FLOOR_ENABLED: bool = True
+DIVERSIFICATION_FLOOR_MULTIPLIER: float = 0.7  # 30% easier to clear when understaffed
 
 # Funding-aware scoring (Phase A — read-only foundation for spot-futures hedging)
 # Multiplier is applied to symbol score: positive funding boosts, negative penalizes.

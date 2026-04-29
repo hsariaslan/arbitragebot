@@ -350,6 +350,13 @@ class SymbolOptimizer:
         self._auto_expand_on_understaff: bool = AUTO_EXPAND_ON_UNDERSTAFF
         self._last_auto_expand_attempt: float = 0.0
 
+        # Diversification floor (S21 follow-up). When understaffed, multiply
+        # activation threshold by `_diversification_floor_multiplier` so
+        # marginal candidates can clear the gate. Hot-applied via dashboard.
+        from config import DIVERSIFICATION_FLOOR_ENABLED, DIVERSIFICATION_FLOOR_MULTIPLIER
+        self._diversification_floor_enabled: bool = DIVERSIFICATION_FLOOR_ENABLED
+        self._diversification_floor_multiplier: float = DIVERSIFICATION_FLOOR_MULTIPLIER
+
         # Funding-aware scoring (Phase A — set externally via set_funding_monitor)
         self._funding_monitor: "FundingMonitor | None" = None
         # Per-symbol throttle for [Optimizer] funding-applied summary log
@@ -2022,6 +2029,13 @@ class SymbolOptimizer:
         scores to justify the setup/transfer overhead.
 
         Formula: threshold = base + (pair_fee_pct - cheapest_possible_fee) * fee_threshold_mult
+
+        Diversification floor (S21 follow-up): when active symbol count is
+        below `num_active_symbols`, multiply the final threshold by
+        `_diversification_floor_multiplier` (default 0.7 → 30% easier to
+        clear). Encourages reaching minimum diversity even at marginal symbol
+        quality. Momentum filter still penalizes bleeders, so this won't
+        activate clearly bad symbols.
         """
         base = self._trading_threshold
 
@@ -2035,8 +2049,17 @@ class SymbolOptimizer:
             threshold += base * stats.times_demoted * 0.5
 
         # Cap at strong threshold
-        result = min(threshold, self._strong_threshold)
-        return result
+        threshold = min(threshold, self._strong_threshold)
+
+        # Diversification floor — relax when understaffed
+        if (
+            self._diversification_floor_enabled
+            and self._discovery_complete
+            and len(self._active_symbols) < self._min_active_symbols
+        ):
+            threshold *= self._diversification_floor_multiplier
+
+        return threshold
 
     def _compute_fee_threshold_adjustment(self, symbol: str) -> float:
         """Compute threshold adjustment based on dominant pair's combined fees.

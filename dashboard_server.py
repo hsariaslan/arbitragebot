@@ -997,6 +997,9 @@ class DashboardServer:
         "bitfinex_over_target_multiplier": (float, 1.0, 5.0),
         # Auto-expand on understaff (Feature 6)
         "auto_expand_on_understaff": (bool, None, None),
+        # Diversification floor (S21 follow-up)
+        "diversification_floor_enabled": (bool, None, None),
+        "diversification_floor_multiplier": (float, 0.1, 1.0),
         # Funding-aware scoring (Phase A)
         "funding_aware_scoring_enabled": (bool, None, None),
         "funding_skip_threshold_4h_pct": (float, -1.0, 1.0),
@@ -1992,6 +1995,10 @@ class DashboardServer:
                 self._optimizer._bitfinex_over_target_multiplier = float(settings["bitfinex_over_target_multiplier"])
             if "auto_expand_on_understaff" in settings:
                 self._optimizer._auto_expand_on_understaff = bool(settings["auto_expand_on_understaff"])
+            if "diversification_floor_enabled" in settings:
+                self._optimizer._diversification_floor_enabled = bool(settings["diversification_floor_enabled"])
+            if "diversification_floor_multiplier" in settings:
+                self._optimizer._diversification_floor_multiplier = float(settings["diversification_floor_multiplier"])
 
         # Funding-aware scoring (Phase A)
         if self._funding_monitor:
@@ -2203,6 +2210,10 @@ class DashboardServer:
                 self._optimizer._bitfinex_over_target_multiplier = float(settings["bitfinex_over_target_multiplier"])
             if "auto_expand_on_understaff" in settings:
                 self._optimizer._auto_expand_on_understaff = bool(settings["auto_expand_on_understaff"])
+            if "diversification_floor_enabled" in settings:
+                self._optimizer._diversification_floor_enabled = bool(settings["diversification_floor_enabled"])
+            if "diversification_floor_multiplier" in settings:
+                self._optimizer._diversification_floor_multiplier = float(settings["diversification_floor_multiplier"])
 
         # Funding-aware scoring (Phase A) — startup sync
         if self._funding_monitor:
@@ -2375,12 +2386,13 @@ class DashboardServer:
 
         # Phase F: hard stop also closes all open futures hedges (fire-and-forget;
         # operator sees result via the dashboard's hedges panel within 1s).
+        # Use _safe_task so any close failure is logged (Phase F follow-up to S21
+        # silent-task-exception issue).
         hm = getattr(self._monitor, "_hedge_manager", None)
         hedge_close_scheduled = False
         if hm is not None:
             try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(hm.close_all_for_emergency(reason="hard_stop"))
+                _safe_task(hm.close_all_for_emergency(reason="hard_stop"), "hard_stop_hedge_close")
                 hedge_close_scheduled = True
             except RuntimeError:
                 logger.warning("[Monitor] HARD_STOP: cannot schedule hedge close (no event loop)")
@@ -2547,6 +2559,8 @@ class DashboardServer:
             f"inventory_rebalance: enabled={s.get('inventory_rebalance_enabled', True)}, interval={s.get('inventory_rebalance_interval_hours', 6.0)}h, drift_threshold={s.get('inventory_drift_threshold', 0.3)*100:.0f}%",
             f"bfx_over_target: enabled={s.get('bitfinex_over_target_enabled', True)}, multiplier={s.get('bitfinex_over_target_multiplier', 1.5)}x",
             f"auto_expand_on_understaff={s.get('auto_expand_on_understaff', True)}",
+            f"diversification_floor: enabled={s.get('diversification_floor_enabled', True)}, "
+            f"multiplier={s.get('diversification_floor_multiplier', 0.7)}x (relaxes activation threshold when understaffed)",
             f"funding_aware: enabled={s.get('funding_aware_scoring_enabled', True)}, "
             f"skip_4h={s.get('funding_skip_threshold_4h_pct', -0.05):+.4f}%, "
             f"skip_8h={s.get('funding_skip_threshold_8h_pct', -0.05):+.4f}%, "
@@ -2597,6 +2611,8 @@ class DashboardServer:
                 "bitfinex_over_target_enabled",
                 "bitfinex_over_target_multiplier",
                 "auto_expand_on_understaff",
+                "diversification_floor_enabled",
+                "diversification_floor_multiplier",
                 "funding_aware_scoring_enabled",
                 "funding_skip_threshold_4h_pct",
                 "funding_skip_threshold_8h_pct",
