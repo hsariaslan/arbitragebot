@@ -604,11 +604,13 @@ These were identified as Session #20 mitigations but deferred until proven neces
 
 **When to implement**: only if a session shows >10 SYMBOL_BLOCK events on the same symbol while drawdown stays >15% for >30 min.
 
-### ~~Diversification-Biased Activation~~ — IMPLEMENTED in v0.28.1-beta
+### ~~Diversification-Biased Activation~~ — IMPLEMENTED in v0.28.1-beta, fixed in v0.28.2-beta
 
-**Status**: Implemented after Session #21 confirmed Auto-Expand alone wasn't enough — 187 unsuccessful auto-expand attempts during the session because RENDER/EIGEN-class candidates couldn't clear the fee-adjusted threshold.
+**Status**: Implemented after Session #21 confirmed Auto-Expand alone wasn't enough — 187 unsuccessful auto-expand attempts because RENDER/EIGEN-class candidates couldn't clear the fee-adjusted threshold.
 
-`SymbolOptimizer._get_activation_threshold()` now multiplies the final threshold by `_diversification_floor_multiplier` (default 0.7) when `len(active_symbols) < min_active_symbols` AND discovery is complete. Settings: `diversification_floor_enabled` (bool, default true), `diversification_floor_multiplier` (float, default 0.7).
+`SymbolOptimizer._get_activation_threshold()` multiplies the final threshold by `_diversification_floor_multiplier` (default 0.7) when `len(active_symbols) < min_active_symbols`. Settings: `diversification_floor_enabled` (bool, default true), `diversification_floor_multiplier` (float, default 0.7).
+
+**Bug fix (v0.28.2-beta)**: the original v0.28.1-beta gate also required `_discovery_complete=True`, which silently disabled the floor during the most-needed scenario — fresh re-discovery after total demotion (when the bot resets `_discovery_complete=False`). Session #22 reproduced this with WIFUSDT (score 0.022, freq 44.5%) sitting in extended discovery for 45+ min instead of activating. The `_discovery_complete` gate was removed; floor now applies whenever active count is below minimum, regardless of discovery phase.
 
 Safety nets that still apply: momentum filter (penalizes bleeders), funding-rate skip threshold (still floors APE/COMP/TRUMP/WLD at factor=0.3), demotion penalty (repeat offenders need higher scores), strong-threshold cap.
 

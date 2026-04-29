@@ -145,3 +145,101 @@ Crypto liquidation at demotion freed sequentially **$216.40 / $351.65 / $169.02 
   2. **Flip `hedge_execution_mode=testnet`** to exercise Phase D (`_open` / `_adjust` / `_close` against the live testnet API, plus `reconcile_with_executor` after restart).
   3. **Add the missing task-exception logger** before the next deploy to surface what's currently silent (Issue #1).
   4. **Tune the activation gates** for the understaff / fee-aware-threshold problem (Issue #2) — possibly add a "diversification floor" that lowers the threshold by 0.7× when `active < min_active_symbols`. This was already noted in CLAUDE.md "Pending Improvements" before v0.27 but deferred. Session #21 confirms it's still relevant.
+
+### Session #22 — 2026-04-29 (v0.28.1-beta, Diversification-Floor Bug)
+
+**Date**: 2026-04-29 04:07 UTC → 11:39 UTC (~7h 32m elapsed; **6h 46m of active accounting** before the bot drifted into extended discovery rejecting WIFUSDT for the final ~45 min)
+**Capital**: $1,000 ($40 per trade, 4%)
+**Version**: v0.28.1-beta — first session running the silent-task-exception fixes + diversification floor (S21 follow-ups)
+**Execution Mode**: Demo
+**Hedge Execution Mode**: `simulation` (shadow only)
+**Active Exchanges**: 6
+
+#### Settings (from `[Settings] SESSION_START`)
+
+Notable changes vs S21 (operator tuning):
+- `fee_threshold_multiplier=0.3` (was 0.5) — relaxes per-symbol fee penalty
+- `num_active_symbols=3` (was 2)
+- `diversification_floor: enabled=True, multiplier=0.7x`
+- All other settings unchanged from S21
+
+#### Final Aggregate (last `[Session]` line at 10:54:02, 6h46m active)
+
+| Metric | Value |
+|---|---|
+| Trades | 81 |
+| Trading PnL | +$3.49 |
+| Transfer fees | $0.57 |
+| Cashback (credited / pending) | $0.05 / $0.24 |
+| **Net** | **+$2.97** |
+| **$/hr** | **$0.44** (9× S21's $0.05/hr) |
+| Portfolio | $1,000 → $1,006 (+$6) |
+| sz0 | 1,304 |
+| pos_cap skips | 743 |
+| EVD seller penalties / demoted | 22,514 / 393 |
+| Anomaly | 0p / 0w / 0sb |
+| AUTO_EXPAND triggered | 230 |
+
+After 10:54:02 the bot demoted the last 2 active symbols (DOGE, PEPE) at 10:50/10:57 and entered extended discovery — never activated again before log cutoff at 11:39 despite WIFUSDT scoring 0.022-0.024 (well above the 0.005 base trading threshold).
+
+#### Phase A & C — Continued working as designed
+
+- 6 hedge cycles: STRK, AR, DOGE×2, APT, PEPE. Cumulative shadow funding **+$0.0099** (positive). Zero hedge errors over 6h46m.
+- Funding monitor: identified 4-5 toxic-funding symbols and floored them at 0.3 (same set as S21).
+- Symbols traded: STRK, AR, DOGE (×2 cycles), APT, PEPE — all activated cleanly.
+
+#### THE BUG — Diversification floor disabled during re-discovery
+
+After PEPE+DOGE both demoted at 10:57, bot dropped to 0/3 active symbols. Re-entered discovery (per `optimizer.py:1827-1836` when "All symbols demoted"). During the next 45 minutes:
+
+| Time | WIF Score | WIF Threshold (logged) | Active | Discovery? |
+|---|---|---|---|---|
+| 11:02:27 | 0.008 | 0.0320 (fee_adj=+0.0270) | 0 | extending |
+| 11:12:27 | 0.014 | 0.0320 | 0 | extending |
+| 11:32:28 | 0.024 | 0.0320 | 0 | extending |
+| 11:39 (cutoff) | 0.022 | 0.0320 | 0 | extending |
+
+WIFUSDT had **freq=44.5%, avg_net=0.049%** — clearly profitable spread with high frequency. But it was being rejected because:
+
+1. **WIFUSDT is not on Bitfinex** (`Subscribe failed: WIFUSDT — symbol: invalid`). Cheapest pair must use other exchanges.
+2. **Fee-aware threshold**: cheapest pair (Bitfinex+MEXC = ~0.04%) vs WIF's pair (~0.13%) → `fee_adj = (0.13 - 0.04) × 0.3 = +0.0270`
+3. Total threshold: `0.005 base + 0.027 fee_adj = 0.032`
+4. WIF score 0.022 < threshold 0.032 → REJECTED
+
+**The diversification floor SHOULD have relaxed the threshold to `0.032 × 0.7 = 0.0224`**, which would have activated WIF (0.022 ≈ 0.0224, eligible by 11:32 at score 0.024).
+
+**Root cause** (in `_get_activation_threshold()`):
+```python
+if (
+    self._diversification_floor_enabled
+    and self._discovery_complete            # ← THIS BLOCKED IT
+    and len(self._active_symbols) < self._min_active_symbols
+):
+    threshold *= self._diversification_floor_multiplier
+```
+
+When all symbols demote, the bot resets `_discovery_complete = False` (per `optimizer.py:1832`) and re-enters discovery. The `_discovery_complete=True` gate I added in v0.28.1-beta intended to skip the floor during initial bootstrap, but it also silently disabled it during the most-needed scenario: **0 active symbols + fresh re-discovery after total demotion**.
+
+**Fix shipped in v0.28.2-beta**: removed the `_discovery_complete` gate. Floor now applies whenever `len(active_symbols) < min_active_symbols`, regardless of discovery phase.
+
+#### Capital Flow
+
+| Stage | Binance | Bitfinex | Bitget | Bybit | MEXC | OKX | Total |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| End 10:54 | $120 | $715 | $0 | $0 | $171 | $0 | **$1,006** |
+
+Bitfinex held $715 (71% of capital) at end after PEPE/DOGE demotions — the BFX over-target redistribution was prevented from running because the bot had no active symbols (loop guard correctly prevented sending USDT to "active" exchanges that didn't exist).
+
+#### Issues Identified
+
+| # | Severity | Issue |
+|---|---|---|
+| 1 | **HIGH** | **Diversification floor silently disabled after total demotion** — the `_discovery_complete=True` gate prevented relaxation during fresh re-discovery, the exact scenario the floor was designed for. WIFUSDT (0.022 score, 44.5% freq) sat in extended discovery for 45+ min instead of activating. **FIXED in v0.28.2-beta**. |
+| 2 | LOW | **Bitfinex over-concentration during 0-active-symbol periods** — $715/71% of capital sat on Bitfinex after demotions because the redistribution logic targets active-symbol exchanges. With no active symbols, no redistribution. Acceptable behavior (capital is safe), but worth noting for future eval. |
+
+#### Lessons / Conclusions
+
+- **Profit improved 9× vs S21** ($0.05/hr → $0.44/hr) due to the operator's settings tuning (`fee_threshold_mult=0.3`, `num_active=3`) and the diversification floor working in MOST scenarios. 81 trades in 6.7h of active accounting, vs 92 trades in 9.7h for S21.
+- **Hedge math validated again**: shadow funding +$0.0099 over 6 hedges, all in lock-step with spot inventory.
+- **The bug is a one-line fix** — pure logic error in the gate condition, not a design flaw. Floor logic itself is correct; gate was too restrictive.
+- **Pre-fix workaround during a session**: operator could manually demote the bot to single-symbol or below by lowering `num_active_symbols` to 1, which would force `_discovery_complete=True` to remain set on a non-zero-active state. Not needed post-fix.
