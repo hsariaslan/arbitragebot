@@ -604,17 +604,13 @@ These were identified as Session #20 mitigations but deferred until proven neces
 
 **When to implement**: only if a session shows >10 SYMBOL_BLOCK events on the same symbol while drawdown stays >15% for >30 min.
 
-### Diversification-Biased Activation
+### ~~Diversification-Biased Activation~~ — IMPLEMENTED in v0.28.1-beta
 
-**Problem (S20)**: Discovery activated only WIFUSDT (1 symbol of 60 candidates). HYPE expansion was blocked by `pair_fee_exceeds_net` for 24 minutes (10:22 → 10:46) before clearing. Combined with the auto-expand fix (Feature 6), there's still risk that no candidate passes the fee-aware activation threshold when only one cheap symbol is profitable.
+**Status**: Implemented after Session #21 confirmed Auto-Expand alone wasn't enough — 187 unsuccessful auto-expand attempts during the session because RENDER/EIGEN-class candidates couldn't clear the fee-adjusted threshold.
 
-**Proposed fix**: Add a "diversification floor" to `_get_activation_threshold()`. When `len(active_symbols) < num_active_symbols`, multiply the activation threshold by `diversification_floor_multiplier` (default 0.7) — making it 30% easier to activate a 2nd or 3rd symbol. Encourages diversification when the bot is concentrated, even at the cost of marginal symbol quality. Pair with momentum filter (Feature 3) to avoid activating bleeders.
+`SymbolOptimizer._get_activation_threshold()` now multiplies the final threshold by `_diversification_floor_multiplier` (default 0.7) when `len(active_symbols) < min_active_symbols` AND discovery is complete. Settings: `diversification_floor_enabled` (bool, default true), `diversification_floor_multiplier` (float, default 0.7).
 
-**Settings**: add `diversification_floor_enabled` (bool, default true), `diversification_floor_multiplier` (float, default 0.7).
-
-**Expected impact**: Faster restoration of 2-3 symbol portfolios after demotions. Higher symbol diversity. Tradeoff: increased risk of marginal-quality activations that may demote within 1-2 cycles, increasing churn.
-
-**When to implement**: only if Feature 6 (Auto-Expand) doesn't restore active count within 5 min after >50% of demotions across multiple sessions.
+Safety nets that still apply: momentum filter (penalizes bleeders), funding-rate skip threshold (still floors APE/COMP/TRUMP/WLD at factor=0.3), demotion penalty (repeat offenders need higher scores), strong-threshold cap.
 
 ## Spot-Futures Delta-Neutral Hedging (v0.28.0-beta)
 
