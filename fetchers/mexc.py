@@ -427,6 +427,13 @@ class _MEXCSubFetcher:
                     await t
                 except asyncio.CancelledError:
                     pass
+            # Surface listener/keepalive/staleness crashes — without this the
+            # exception goes silent at GC time (S21 silent-task-exception fix).
+            for t in done:
+                try:
+                    t.result()
+                except Exception as e:
+                    logger.warning(f"[MEXC] task crashed: {type(e).__name__}: {e}")
 
     async def _listen(self, ws: Any) -> None:
         """Listen for binary protobuf messages and update parent state."""
@@ -576,6 +583,13 @@ class _MEXCDepthSubFetcher:
                     await t
                 except asyncio.CancelledError:
                     pass
+            # Surface listener/keepalive/staleness crashes — without this the
+            # exception goes silent at GC time (S21 silent-task-exception fix).
+            for t in done:
+                try:
+                    t.result()
+                except Exception as e:
+                    logger.warning(f"[MEXC] task crashed: {type(e).__name__}: {e}")
 
     async def _listen(self, ws: Any) -> None:
         async for raw in ws:

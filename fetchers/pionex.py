@@ -327,6 +327,14 @@ class _PionexSubConnection:
                     await t
                 except asyncio.CancelledError:
                     pass
+            # Surface listener/keepalive crashes — without this the exception
+            # goes silent as "Task exception was never retrieved" at GC time
+            # (S21 produced 6 such warnings during OKX reconnect / Pionex cycling).
+            for t in done:
+                try:
+                    t.result()
+                except Exception as e:
+                    logger.warning(f"[Pionex] task crashed: {type(e).__name__}: {e}")
 
     async def _listen(self, ws: Any) -> None:
         async for raw in ws:

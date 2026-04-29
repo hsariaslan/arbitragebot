@@ -337,6 +337,13 @@ class _BitfinexSubFetcher:
                         await t
                     except asyncio.CancelledError:
                         pass
+                # Surface listener/keepalive/staleness crashes — without this
+                # the exception goes silent at GC time (S21 fix).
+                for t in done:
+                    try:
+                        t.result()
+                    except Exception as e:
+                        logger.warning(f"[Bitfinex] task crashed: {type(e).__name__}: {e}")
             finally:
                 self._parent._connected_subs.discard(self._id)
                 self._parent._ws_connected = len(self._parent._connected_subs) > 0
@@ -537,6 +544,13 @@ class _BitfinexBookSubFetcher:
                         await t
                     except asyncio.CancelledError:
                         pass
+                # Surface listener/keepalive/staleness crashes — without this
+                # the exception goes silent at GC time (S21 fix).
+                for t in done:
+                    try:
+                        t.result()
+                    except Exception as e:
+                        logger.warning(f"[Bitfinex] task crashed: {type(e).__name__}: {e}")
             finally:
                 self._parent._connected_subs.discard(self._id)
                 self._parent._ws_connected = len(self._parent._connected_subs) > 0

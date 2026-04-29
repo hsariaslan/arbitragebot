@@ -42,6 +42,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _log_task_exception(name: str):
+    """Build a done-callback that logs exceptions from fire-and-forget tasks.
+
+    Used at sites that can't return a Task to a caller (e.g. sync→async
+    bridges via loop.create_task). Without this wrapper Python emits a
+    bare 'Task exception was never retrieved' warning at GC time with
+    no context — observed in S21 during OKX reconnect / Pionex cycling.
+    """
+    def _cb(task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(f"[Hedge] task '{name}' failed: {exc!r}", exc_info=exc)
+    return _cb
+
+
 def _futures_to_spot(futures_symbol: str) -> str | None:
     """Reverse-lookup spot symbol for a 1000X futures contract.
 
@@ -190,7 +207,8 @@ class HedgeManager:
         except RuntimeError:
             logger.warning(f"[Hedge] request_close({spot_symbol}, {reason}) — no event loop")
             return
-        loop.create_task(self._close_for_request(spot_symbol, reason))
+        task = loop.create_task(self._close_for_request(spot_symbol, reason))
+        task.add_done_callback(_log_task_exception(f"hedge_request_close_{spot_symbol}"))
 
     async def _close_for_request(self, spot_symbol: str, reason: str) -> None:
         async with self._lock_for(spot_symbol):
