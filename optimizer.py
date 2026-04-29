@@ -2051,10 +2051,15 @@ class SymbolOptimizer:
         # Cap at strong threshold
         threshold = min(threshold, self._strong_threshold)
 
-        # Diversification floor — relax when understaffed
+        # Diversification floor — relax when understaffed.
+        # Applies whenever the bot is below min_active_symbols, including
+        # discovery re-extensions after total demotion (the gate previously
+        # required _discovery_complete=True, which silently disabled the
+        # floor during the most-needed scenario: 0 active symbols + fresh
+        # discovery — observed in S22 with WIFUSDT score=0.022 vs threshold
+        # 0.032 sitting in extended discovery for 30+ min).
         if (
             self._diversification_floor_enabled
-            and self._discovery_complete
             and len(self._active_symbols) < self._min_active_symbols
         ):
             threshold *= self._diversification_floor_multiplier
