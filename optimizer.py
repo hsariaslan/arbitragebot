@@ -357,6 +357,17 @@ class SymbolOptimizer:
         self._diversification_floor_enabled: bool = DIVERSIFICATION_FLOOR_ENABLED
         self._diversification_floor_multiplier: float = DIVERSIFICATION_FLOOR_MULTIPLIER
 
+        # Boost-aware activation gate (S26 follow-up). Symbols whose dominant
+        # pair does NOT include a boost-preferred exchange (default
+        # Bitfinex-as-buyer or MEXC-as-seller) need a much higher score to
+        # activate — only exceptional spreads should override the route
+        # preference. Hot-applied via dashboard.
+        from config import BOOST_AWARE_ACTIVATION_ENABLED, NON_PREFERRED_SCORE_MULTIPLIER
+        self._boost_aware_activation_enabled: bool = BOOST_AWARE_ACTIVATION_ENABLED
+        self._non_preferred_score_multiplier: float = NON_PREFERRED_SCORE_MULTIPLIER
+        # Throttle for [Optimizer] NON_PREFERRED_BLOCK log lines (per symbol)
+        self._last_non_preferred_log: dict[str, float] = {}
+
         # Funding-aware scoring (Phase A — set externally via set_funding_monitor)
         self._funding_monitor: "FundingMonitor | None" = None
         # Per-symbol throttle for [Optimizer] funding-applied summary log
@@ -777,6 +788,12 @@ class SymbolOptimizer:
             status = "NEW" if is_new else "WATCH"
             act_thresh = self._get_activation_threshold(s.symbol)
             fee_adj = self._compute_fee_threshold_adjustment(s.symbol)
+            route = (
+                "preferred"
+                if (not self._boost_aware_activation_enabled
+                    or self._is_boost_preferred_route(s.symbol))
+                else "non_preferred"
+            )
             logger.info(
                 f"[Candidate] {status} {s.symbol}: "
                 f"score={s.score:.6f} peak={wl.peak_score:.6f} "
@@ -784,7 +801,8 @@ class SymbolOptimizer:
                 f"avg_net={s.avg_profitable_net:.4f}% freq={s.frequency:.1%} "
                 f"ticks={s.profitable_ticks}/{s.total_ticks} "
                 f"trend={trend} phase=discovery "
-                f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f})"
+                f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f}) "
+                f"route={route}"
             )
 
         # Drop watchlist entries that fell below threshold
@@ -1580,13 +1598,20 @@ class SymbolOptimizer:
                     status = "NEW" if is_new else "WATCH"
                     act_thresh = self._get_activation_threshold(sym)
                     fee_adj = self._compute_fee_threshold_adjustment(sym)
+                    route = (
+                        "preferred"
+                        if (not self._boost_aware_activation_enabled
+                            or self._is_boost_preferred_route(sym))
+                        else "non_preferred"
+                    )
                     logger.info(
                         f"[Candidate] {status} {sym}: "
                         f"score={score_val:.6f} peak={entry.peak_score:.6f} "
                         f"avg_net={score_obj.avg_profitable_net:.4f}% freq={score_obj.frequency:.1%} "
                         f"ticks={score_obj.profitable_ticks}/{score_obj.total_ticks} "
                         f"trend={trend} block={block} "
-                        f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f})"
+                        f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f}) "
+                        f"route={route}"
                     )
             else:
                 # Score dropped below threshold — remove from watchlist
@@ -2029,7 +2054,78 @@ class SymbolOptimizer:
         ):
             threshold *= self._diversification_floor_multiplier
 
+        # Boost-aware activation floor (S26 follow-up). If the dominant pair
+        # does NOT include a boost-preferred exchange (e.g., neither
+        # Bitfinex-as-buyer nor MEXC-as-seller), require a high score floor
+        # so only exceptional opportunities (AR-style spikes) can override
+        # the route preference. Routine 0.1-0.3 candidates on non-preferred
+        # routes get blocked from activation. The floor is computed from
+        # `very_strong_threshold × non_preferred_score_multiplier` and only
+        # raises (never lowers) the threshold.
+        if self._boost_aware_activation_enabled and not self._is_boost_preferred_route(symbol):
+            non_preferred_floor = self._very_strong_threshold * self._non_preferred_score_multiplier
+            if non_preferred_floor > threshold:
+                threshold = non_preferred_floor
+
         return threshold
+
+    def _is_boost_preferred_route(self, symbol: str) -> bool:
+        """Return True if the symbol's dominant pair includes at least one
+        boost-preferred exchange role (buyer_boost > 1.0 on the top buyer,
+        OR seller_boost > 1.0 on the top seller).
+
+        With default config (Bitfinex.buyer_boost=5.0, MEXC.seller_boost=5.0),
+        any pair that has Bitfinex as dominant buyer OR MEXC as dominant
+        seller is "preferred". Symbols whose dominant pair lives elsewhere
+        (e.g., JUPUSDT routing through OKX→KuCoin) are non-preferred.
+
+        Uses cached `_dominant_pairs` when available (post-discovery), falls
+        back to recent profitable-tick analysis (same source as
+        `_get_symbol_pair_fee`) for pre-activation candidates.
+        """
+        if not self._fee_manager:
+            return True  # No fee manager → don't gate
+
+        top_buyer, top_seller = self._get_dominant_buyer_seller(symbol)
+        if not top_buyer or not top_seller:
+            # Insufficient data — treat as preferred (don't block on noise)
+            return True
+
+        buyer_boosted = self._fee_manager.get_buyer_boost(top_buyer) > 1.0
+        seller_boosted = self._fee_manager.get_seller_boost(top_seller) > 1.0
+        return buyer_boosted or seller_boosted
+
+    def _get_dominant_buyer_seller(self, symbol: str) -> tuple[str, str]:
+        """Return (top_buyer, top_seller) for a symbol.
+
+        Prefers the cached dominant pair (set by `_compute_dominant_pairs`
+        for active symbols); falls back to last 100 profitable ticks for
+        candidates that haven't been activated yet.
+        """
+        # Active symbols: use cached dominant pair (top entry per direction)
+        dom = self._dominant_pairs.get(symbol)
+        if dom:
+            buyers = dom.get("buyers", [])
+            sellers = dom.get("sellers", [])
+            top_buyer = buyers[0][0] if buyers else ""
+            top_seller = sellers[0][0] if sellers else ""
+            if top_buyer and top_seller:
+                return top_buyer, top_seller
+
+        # Candidate path: derive from recent profitable ticks
+        ticks = self._ticks.get(symbol, deque())
+        profitable = [t for t in ticks if t.best_net_pct > 0]
+        if not profitable:
+            return "", ""
+
+        buy_counts: dict[str, int] = defaultdict(int)
+        sell_counts: dict[str, int] = defaultdict(int)
+        for t in profitable[-100:]:
+            buy_counts[t.buy_exchange] += 1
+            sell_counts[t.sell_exchange] += 1
+        top_buyer = max(buy_counts, key=buy_counts.get) if buy_counts else ""
+        top_seller = max(sell_counts, key=sell_counts.get) if sell_counts else ""
+        return top_buyer, top_seller
 
     def _compute_fee_threshold_adjustment(self, symbol: str) -> float:
         """Compute threshold adjustment based on dominant pair's combined fees.
@@ -2715,6 +2811,12 @@ class SymbolOptimizer:
                                 f"({buyers[0][0]}→{sellers[0][0]}) — pair_fee_exceeds_net"
                             )
                             continue
+                route = (
+                    "preferred"
+                    if (not self._boost_aware_activation_enabled
+                        or self._is_boost_preferred_route(candidate.symbol))
+                    else "non_preferred"
+                )
                 logger.info(
                     f"[Candidate] EXPAND_READY {candidate.symbol}: "
                     f"score={candidate.score:.6f} peak={wl_entry.peak_score:.6f} "
@@ -2724,6 +2826,7 @@ class SymbolOptimizer:
                     f"est_hourly=${candidate.est_hourly_profit:.4f} "
                     f"setup_cost=${est_cost:.2f} "
                     f"bfx={'yes' if self._is_symbol_on_bitfinex(candidate.symbol) else 'no'} "
+                    f"route={route} "
                     f"— activating"
                 )
                 self._expand_active(candidate.symbol, candidate)

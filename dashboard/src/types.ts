@@ -157,6 +157,9 @@ export interface Settings {
   // Diversification floor (S21 follow-up)
   diversification_floor_enabled?: boolean;
   diversification_floor_multiplier?: number;
+  // Boost-aware activation gate (S26 follow-up)
+  boost_aware_activation_enabled?: boolean;
+  non_preferred_score_multiplier?: number;
   auto_disable_volume_enabled?: boolean;
   auto_disable_volume_threshold_usd?: number;
   // Funding-aware scoring (Phase A)

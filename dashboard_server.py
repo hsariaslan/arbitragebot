@@ -1038,6 +1038,9 @@ class DashboardServer:
         # Diversification floor (S21 follow-up)
         "diversification_floor_enabled": (bool, None, None),
         "diversification_floor_multiplier": (float, 0.1, 1.0),
+        # Boost-aware activation gate (S26 follow-up)
+        "boost_aware_activation_enabled": (bool, None, None),
+        "non_preferred_score_multiplier": (float, 1.0, 5.0),
         "auto_disable_volume_enabled": (bool, None, None),
         "auto_disable_volume_threshold_usd": (float, 0.0, 10_000_000.0),
         # Funding-aware scoring (Phase A)
@@ -2393,6 +2396,10 @@ class DashboardServer:
                 self._optimizer._diversification_floor_enabled = bool(settings["diversification_floor_enabled"])
             if "diversification_floor_multiplier" in settings:
                 self._optimizer._diversification_floor_multiplier = float(settings["diversification_floor_multiplier"])
+            if "boost_aware_activation_enabled" in settings:
+                self._optimizer._boost_aware_activation_enabled = bool(settings["boost_aware_activation_enabled"])
+            if "non_preferred_score_multiplier" in settings:
+                self._optimizer._non_preferred_score_multiplier = float(settings["non_preferred_score_multiplier"])
 
         # Funding-aware scoring (Phase A)
         if self._funding_monitor:
@@ -2627,6 +2634,10 @@ class DashboardServer:
                 self._optimizer._diversification_floor_enabled = bool(settings["diversification_floor_enabled"])
             if "diversification_floor_multiplier" in settings:
                 self._optimizer._diversification_floor_multiplier = float(settings["diversification_floor_multiplier"])
+            if "boost_aware_activation_enabled" in settings:
+                self._optimizer._boost_aware_activation_enabled = bool(settings["boost_aware_activation_enabled"])
+            if "non_preferred_score_multiplier" in settings:
+                self._optimizer._non_preferred_score_multiplier = float(settings["non_preferred_score_multiplier"])
 
         # Funding-aware scoring (Phase A) — startup sync
         if self._funding_monitor:
@@ -3020,6 +3031,9 @@ class DashboardServer:
             f"auto_expand_on_understaff={s.get('auto_expand_on_understaff', True)}",
             f"diversification_floor: enabled={s.get('diversification_floor_enabled', True)}, "
             f"multiplier={s.get('diversification_floor_multiplier', 0.7)}x (relaxes activation threshold when understaffed)",
+            f"boost_aware_activation: enabled={s.get('boost_aware_activation_enabled', True)}, "
+            f"non_preferred_mult={s.get('non_preferred_score_multiplier', 2.0)}x "
+            f"(non-preferred routes need score >= very_strong × mult)",
             f"funding_aware: enabled={s.get('funding_aware_scoring_enabled', True)}, "
             f"skip_4h={s.get('funding_skip_threshold_4h_pct', -0.05):+.4f}%, "
             f"skip_8h={s.get('funding_skip_threshold_8h_pct', -0.05):+.4f}%, "

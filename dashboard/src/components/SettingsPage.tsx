@@ -81,6 +81,9 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   // Funding-aware scoring (Phase A)
   const [diversificationFloorEnabled, setDiversificationFloorEnabled] = useState(currentSettings.diversification_floor_enabled ?? true);
   const [diversificationFloorMultiplier, setDiversificationFloorMultiplier] = useState(currentSettings.diversification_floor_multiplier ?? 0.7);
+  // Boost-aware activation gate (S26 follow-up)
+  const [boostAwareActivationEnabled, setBoostAwareActivationEnabled] = useState(currentSettings.boost_aware_activation_enabled ?? true);
+  const [nonPreferredScoreMultiplier, setNonPreferredScoreMultiplier] = useState(currentSettings.non_preferred_score_multiplier ?? 2.0);
   const [autoDisableVolumeEnabled, setAutoDisableVolumeEnabled] = useState(currentSettings.auto_disable_volume_enabled ?? true);
   const [autoDisableVolumeThreshold, setAutoDisableVolumeThreshold] = useState(currentSettings.auto_disable_volume_threshold_usd ?? 10000);
   const [fundingAwareEnabled, setFundingAwareEnabled] = useState(currentSettings.funding_aware_scoring_enabled ?? true);
@@ -169,6 +172,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setMaxPositionMultiplier(currentSettings.max_position_multiplier ?? 5.0);
       setDiversificationFloorEnabled(currentSettings.diversification_floor_enabled ?? true);
       setDiversificationFloorMultiplier(currentSettings.diversification_floor_multiplier ?? 0.7);
+      setBoostAwareActivationEnabled(currentSettings.boost_aware_activation_enabled ?? true);
+      setNonPreferredScoreMultiplier(currentSettings.non_preferred_score_multiplier ?? 2.0);
       setAutoDisableVolumeEnabled(currentSettings.auto_disable_volume_enabled ?? true);
       setAutoDisableVolumeThreshold(currentSettings.auto_disable_volume_threshold_usd ?? 10000);
       setFundingAwareEnabled(currentSettings.funding_aware_scoring_enabled ?? true);
@@ -248,6 +253,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     max_position_multiplier: maxPositionMultiplier,
     diversification_floor_enabled: diversificationFloorEnabled,
     diversification_floor_multiplier: diversificationFloorMultiplier,
+    boost_aware_activation_enabled: boostAwareActivationEnabled,
+    non_preferred_score_multiplier: nonPreferredScoreMultiplier,
     auto_disable_volume_enabled: autoDisableVolumeEnabled,
     auto_disable_volume_threshold_usd: autoDisableVolumeThreshold,
     funding_aware_scoring_enabled: fundingAwareEnabled,
@@ -850,6 +857,34 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             </label>
             <input type="number" value={diversificationFloorMultiplier} min={0.1} max={1.0} step={0.05}
               onChange={d(setDiversificationFloorMultiplier, 0.7)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+        </div>
+      </div>
+
+      {/* Boost-Aware Activation Gate (S26 follow-up — block routine candidates on non-preferred routes) */}
+      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Boost-Aware Activation Gate</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          With Bitfinex.buyer_boost and MEXC.seller_boost set, the bot already prefers that route during execution — but the activation logic was route-blind, so it would still activate symbols whose dominant pair lives elsewhere (e.g., JUPUSDT routing through OKX→KuCoin) at routine 0.1-0.3 scores. This gate raises the activation bar for those non-preferred routes so only exceptional spreads (AR-style 12% spikes → score &gt;&gt; 0.6) can override the route preference. Symbols with at least one boost-preferred role in their dominant pair use the standard fee-aware threshold.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="flex items-center gap-2">
+            <label className="flex items-center cursor-pointer">
+              <input type="checkbox" checked={boostAwareActivationEnabled}
+                onChange={e => setBoostAwareActivationEnabled(e.target.checked)}
+                className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
+              <span className="text-sm text-slate-300">Enable Boost-Aware Activation</span>
+            </label>
+            <Tooltip text="When enabled, candidates whose dominant pair does NOT include a boost-preferred exchange (buyer_boost > 1.0 on top buyer OR seller_boost > 1.0 on top seller) need a much higher score to activate. Default: enabled. Config key: boost_aware_activation_enabled" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Non-Preferred Score Multiplier
+              <Tooltip text="Floor for non-preferred routes is computed as very_strong_threshold × this multiplier (e.g., 0.3 × 2.0 = 0.6). Higher = stricter (only true spikes can activate). Lower = more permissive. Range: 1.0-5.0. Default: 2.0. Config key: non_preferred_score_multiplier" />
+            </label>
+            <input type="number" value={nonPreferredScoreMultiplier} min={1.0} max={5.0} step={0.1}
+              onChange={d(setNonPreferredScoreMultiplier, 2.0)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
         </div>
