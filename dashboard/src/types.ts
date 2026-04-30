@@ -234,6 +234,10 @@ export interface SymbolRanking {
   focus_tier: string;
   dominant_buyers: string[];
   dominant_sellers: string[];
+  exchange_view?: {
+    buyers: { exchange: string; weight: number; blocked: boolean }[];
+    sellers: { exchange: string; weight: number; blocked: boolean }[];
+  };
   current_net_pct: number;
 }
 

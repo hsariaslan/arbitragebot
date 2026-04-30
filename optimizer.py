@@ -602,6 +602,18 @@ class SymbolOptimizer:
                 for j, (ex_sell, bid_j, _, bids_j, _asks_j) in enumerate(exchange_prices):
                     if i == j:
                         continue
+                    # Skip pairs where either leg is blocked for this symbol
+                    # (per-role flags or symbol blocklists). Without this filter,
+                    # the score reflects opportunities through blocked exchanges
+                    # that allocation can't actually use — observed in S28 with
+                    # JUPUSDT scoring 0.27 on MEXC→Bitfinex while Bitfinex was
+                    # auto-disabled for JUP, leaving the bot allocated to a
+                    # zero-edge Bybit↔MEXC pair.
+                    if self._fee_manager and (
+                        not self._fee_manager.can_buy(ex_buy, symbol)
+                        or not self._fee_manager.can_sell(ex_sell, symbol)
+                    ):
+                        continue
                     spread_pct = (bid_j - ask_i) / ask_i * 100
                     buy_fee = self._fee_manager.get_scoring_fee(ex_buy, symbol) if self._fee_manager else 0.001
                     sell_fee = self._fee_manager.get_scoring_fee(ex_sell, symbol) if self._fee_manager else 0.001
@@ -3117,6 +3129,109 @@ class SymbolOptimizer:
             "num_exchanges": len(all_exchanges),
         }
 
+    def get_symbol_exchange_view(self, symbol: str) -> dict:
+        """Return ranked exchange weights for a symbol (dashboard display).
+
+        Unlike `_compute_dominant_pairs`, this:
+        - Returns ALL active exchanges (not top-N), so the dashboard can show
+          a full ranked list per direction.
+        - Includes blocked exchanges marked with `blocked=True` so the operator
+          can see WHY a particular exchange isn't being used.
+        - Computes weights via the same fee/role-boost/withdrawal-penalty math
+          as dominant pair detection — so the order matches what allocation
+          would actually pick.
+
+        Output shape:
+            {
+                "buyers":  [{"exchange": ex, "weight": w, "blocked": bool}, ...],
+                "sellers": [{"exchange": ex, "weight": w, "blocked": bool}, ...],
+            }
+        Both lists sorted by weight desc within each subset (allowed first,
+        then blocked at the end ordered by what their weight WOULD be).
+        """
+        buy_scores: dict[str, float] = defaultdict(float)
+        sell_scores: dict[str, float] = defaultdict(float)
+
+        ticks = self._ticks.get(symbol, deque())
+        profitable = [t for t in ticks if t.best_net_pct > 0]
+
+        # Note: post option-1, profitable ticks already exclude blocked pairs,
+        # so we DON'T have ranking weight for blocked exchanges from live data.
+        # Fall back to historical counts (which include pre-block data) so the
+        # operator can still see the rough ordering of blocked exchanges.
+        for t in profitable:
+            buy_scores[t.buy_exchange] += t.best_net_pct
+            sell_scores[t.sell_exchange] += t.best_net_pct
+
+        stats = self._historical_stats.get(symbol)
+        if stats:
+            for ex, count in stats.buy_exchange_counts.items():
+                if ex not in buy_scores:
+                    buy_scores[ex] += count * 0.001  # tiny weight, just for ordering
+            for ex, count in stats.sell_exchange_counts.items():
+                if ex not in sell_scores:
+                    sell_scores[ex] += count * 0.001
+
+        def _build_ranked(
+            scores: dict[str, float], direction: str
+        ) -> list[dict]:
+            # Apply same weighting math as _select_top, but no trim.
+            allowed_scores = {ex: s for ex, s in scores.items() if (
+                self._fee_manager is None or
+                (self._fee_manager.can_buy(ex, symbol) if direction == "buy"
+                 else self._fee_manager.can_sell(ex, symbol))
+            )}
+
+            # Normalize allowed
+            ranked: list[dict] = []
+            total = sum(allowed_scores.values())
+            if total > 0 and self._fee_manager:
+                weighted = [(ex, s / total) for ex, s in allowed_scores.items()]
+                fees = {ex: self._fee_manager.get_scoring_fee(ex) for ex, _ in weighted}
+                max_fee = max(fees.values(), default=0.001) or 0.001
+                weighted = [
+                    (ex, w * (1 + (max_fee - fees.get(ex, max_fee)) / max_fee))
+                    for ex, w in weighted
+                ]
+                if direction == "buy":
+                    weighted = [(ex, w * self._fee_manager.get_buyer_boost(ex)) for ex, w in weighted]
+                else:
+                    weighted = [(ex, w * self._fee_manager.get_seller_boost(ex)) for ex, w in weighted]
+                if direction == "sell" and self._balance:
+                    out = []
+                    for ex, w in weighted:
+                        wfee = self._balance._get_withdrawal_fee(ex, 100.0)
+                        if wfee > 0.05:
+                            w = w * (1 - min(0.5, wfee))
+                        out.append((ex, w))
+                    weighted = out
+                weighted.sort(key=lambda x: x[1], reverse=True)
+                ranked.extend({"exchange": ex, "weight": round(w, 4), "blocked": False}
+                              for ex, w in weighted)
+            elif allowed_scores:
+                # No fee_manager — just sort by raw scores
+                eq = sorted(allowed_scores.items(), key=lambda x: x[1], reverse=True)
+                ranked.extend({"exchange": ex, "weight": 0.0, "blocked": False}
+                              for ex, _ in eq)
+
+            # Append blocked exchanges (with their raw historical weight as "would-be")
+            blocked_scores = {ex: s for ex, s in scores.items() if ex not in allowed_scores}
+            if blocked_scores:
+                blocked_total = sum(blocked_scores.values()) or 1.0
+                blocked_sorted = sorted(blocked_scores.items(), key=lambda x: x[1], reverse=True)
+                ranked.extend({
+                    "exchange": ex,
+                    "weight": round(s / blocked_total, 4),
+                    "blocked": True,
+                } for ex, s in blocked_sorted)
+
+            return ranked
+
+        return {
+            "buyers": _build_ranked(buy_scores, "buy"),
+            "sellers": _build_ranked(sell_scores, "sell"),
+        }
+
     def _get_symbol_exchanges(self, symbol: str) -> set[str]:
         """Return the set of exchanges relevant for this symbol."""
         pairs = self._dominant_pairs.get(symbol)
@@ -3352,6 +3467,7 @@ class SymbolOptimizer:
                 "focus_tier": s.focus_tier,
                 "dominant_buyers": [ex for ex, _ in self._dominant_pairs[s.symbol]["buyers"]] if s.symbol in self._dominant_pairs else [],
                 "dominant_sellers": [ex for ex, _ in self._dominant_pairs[s.symbol]["sellers"]] if s.symbol in self._dominant_pairs else [],
+                "exchange_view": self.get_symbol_exchange_view(s.symbol),
                 "current_net_pct": round(self._ticks[s.symbol][-1].best_net_pct, 4) if s.symbol in self._ticks and self._ticks[s.symbol] else 0.0,
             }
             for i, s in enumerate(ranked)

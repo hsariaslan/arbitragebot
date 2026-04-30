@@ -113,8 +113,44 @@ export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, 
                       return <span className={cls} title={tooltip}>{label}{fr.skip && ' ⚠'}</span>;
                     })()}
                   </td>
-                  <td className="px-2 py-1.5 text-center font-mono text-xs">
-                    {r.dominant_buyers?.length > 0 ? (
+                  <td className="px-2 py-1.5 text-center font-mono text-xs whitespace-nowrap">
+                    {r.exchange_view && (r.exchange_view.buyers.length > 0 || r.exchange_view.sellers.length > 0) ? (
+                      <span>
+                        {r.exchange_view.buyers.length === 0 ? <span className="text-slate-600">—</span> : r.exchange_view.buyers.map((b, idx) => (
+                          <span
+                            key={`b-${b.exchange}`}
+                            className={
+                              b.blocked
+                                ? 'text-rose-500/70 line-through'
+                                : idx === 0
+                                  ? 'text-cyan-300 font-semibold'
+                                  : 'text-cyan-500/70'
+                            }
+                            title={`${b.exchange} weight=${b.weight.toFixed(3)}${b.blocked ? ' (BLOCKED)' : ''}`}
+                          >
+                            {idx > 0 && <span className="text-slate-600">,</span>}
+                            {shortEx(b.exchange)}
+                          </span>
+                        ))}
+                        <span className="text-slate-500 mx-1">→</span>
+                        {r.exchange_view.sellers.length === 0 ? <span className="text-slate-600">—</span> : r.exchange_view.sellers.map((s, idx) => (
+                          <span
+                            key={`s-${s.exchange}`}
+                            className={
+                              s.blocked
+                                ? 'text-rose-500/70 line-through'
+                                : idx === 0
+                                  ? 'text-fuchsia-300 font-semibold'
+                                  : 'text-fuchsia-500/70'
+                            }
+                            title={`${s.exchange} weight=${s.weight.toFixed(3)}${s.blocked ? ' (BLOCKED)' : ''}`}
+                          >
+                            {idx > 0 && <span className="text-slate-600">,</span>}
+                            {shortEx(s.exchange)}
+                          </span>
+                        ))}
+                      </span>
+                    ) : r.dominant_buyers?.length > 0 ? (
                       <span className="text-cyan-400">
                         {r.dominant_buyers.map(shortEx).join(',')}
                         <span className="text-slate-500">→</span>
