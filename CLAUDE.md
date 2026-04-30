@@ -423,43 +423,78 @@ The Fee Management tab shows two freshness indicators side-by-side: "Last manual
 ```
 Only non-default values appear (compact). Filterable by component `Settings`.
 
-## Bitfinex Capital Hub
+## Capital Architecture: Custody Hub + Trading Float (v0.30.0-beta)
 
-Bitfinex has $0 withdrawal fees on 14/15 networks and 0% taker fees, making it the ideal capital hub. The system prevents "death spirals" where the net P&L gate blocks rebalancing, capital gets stuck on wrong exchanges, and trading stalls.
+The capital model splits two distinct jobs across two exchanges:
 
-### Configuration
+- **Custody hub (default Bybit)** — holds bulk idle USDT. Bybit is third-party PoR audited (Hacken), demonstrated $1.5B stress resilience after the Feb 2025 Lazarus hack. This is where capital lives.
+- **Trading float (Bitfinex)** — small working balance for the 0%-taker buy leg of the preferred Bitfinex+MEXC route. Sized by `trade_amount × multiplier` — bounded in dollars, not capital. Capital exposure to Bitfinex stays roughly flat as the account grows.
 
-- `BITFINEX_RESERVE_PCT` (default 0.15 = 15%) in `config.py`, configurable via Settings
-- `BITFINEX_RESERVE_HARD_FLOOR` (default 0.05 = 5%) — emergency draws cannot drain below this. For $3000 capital: hard floor = $150.
-- Reserve target = `total_capital × reserve_pct` (e.g., $270 for $1800 capital)
+Why split: Bitfinex has unique 0% taker fees that no other exchange matches, so it remains essential for the active trading leg. But its self-attested PoR (no third-party audit) makes it a poor parking destination at scale. v0.30 keeps Bitfinex's fee advantage while moving the bulk-USDT custody risk to a safer venue.
+
+### Configuration (Settings UI: Capital Hub & Trading Float)
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `custody_hub_exchange` | `Bybit` | Where bulk idle USDT lives (must be enabled with free network out) |
+| `custody_hub_network` | `Aptos` | Network for replenish/overflow ($0 universal across 6 active exchanges) |
+| `trading_float_multiplier` | `8.0` | Bitfinex float target = `trade_amount × this`. Lower = less BFX exposure, more replenish round-trips. Higher = better for fast strategies. |
+| `trading_float_replenish_trigger` | `3.0` | Replenish from custody hub when float < `trade_amount × this` |
+| `trading_float_overflow_multiplier` | `1.5` | Sweep excess back to custody when float > `target × this` |
+
+All settings hot-applied — no restart needed.
+
+### Migration from v0.29
+
+`settings.py:_migrate_capital_architecture()` runs once on first v0.30 startup. Detects old `bitfinex_reserve_pct` and converts: `(reserve_pct × total_capital) / trade_amount → trading_float_multiplier` (clamped to 2-50). Drops `bitfinex_reserve_hard_floor` (replaced by replenish trigger). Renames `bitfinex_over_target_multiplier → trading_float_overflow_multiplier`. Idempotent — runs once, no-op thereafter. Logged as `[Migration] v0.30 capital architecture: ...`.
 
 ### How It Works
 
-1. **Carve-out at discovery**: Before allocating capital to symbols, `reserve_amount` is set aside as USDT on Bitfinex
-2. **Protection during rebalancing**: Normal rebalance source selection uses `_available_usdt_for_rebalance()` which excludes the reserve from Bitfinex's available balance
-3. **Protection during trading**: `available_usdt_for_trading()` prevents trades from spending Bitfinex USDT below the reserve target. Used in both `_compute_trade_size()` and `can_execute()`. Without this, Bitfinex as a buyer exchange drains the reserve through normal trading, triggering expensive replenishment cycles.
-4. **Emergency draw**: When net P&L gate blocks rebalancing AND miss streak ≥ 2× threshold, `emergency_reserve_draw()` transfers USDT from Bitfinex to the starved exchange — **bypasses all gates** (net P&L, hourly cap, transfer worthiness). Fee = $0. Hard floor enforced: draw cannot reduce Bitfinex below `total_capital × hard_floor`.
-5. **Periodic replenishment**: Every evaluation cycle, `replenish_reserve()` tops up from ALL exchanges sorted by withdrawal fee (cheapest first). **Net-negative fee cap**: when rotation gate is closed (net deficit), `max_fee_per_source=0.02` limits replenishment to free/near-free sources only — prevents expensive KuCoin ($0.40) or Gate.io ($0.50) transfers from deepening deficit. Minimum transfer `max($20, trade_amount × 2)`. 10-minute cooldown per source. Respects hourly budget.
-6. **USDT consolidation**: `consolidate_to_bitfinex()` moves idle capital to Bitfinex hub. Active buyer exchanges keep a buffer unless idle for 30+ minutes (based on `last_trade_time`, updated by both trades and rebalance operations). Non-active exchanges are fully consolidated. **Net-negative fee cap**: when rotation gate is closed, `max_fee_per_source=0.02` limits consolidation to free/near-free sources (MEXC $0, Bitget $0.001, Binance $0.01) — blocks expensive consolidation from KuCoin/Gate.io/OKX that deepens deficit. Runs during eval cycles and discovery. **Bitfinex availability gate**: Post-discovery consolidation is skipped when no active symbol is tradeable on Bitfinex (`_any_active_on_bitfinex()` check) — prevents circular waste of paying withdrawal fees to park USDT on Bitfinex when it can't be used. Discovery consolidation is ungated (no symbols active yet). Logged as `[Optimizer] ... consolidation SKIPPED` (throttled to every 5 min on regular eval cycle).
-7. **Idle exchange crypto consolidation**: `_consolidate_idle_exchange_crypto()` transfers crypto from any idle exchange (30+ minutes without a trade) directly to Bitfinex, selling at 0% taker. With symmetric allocation, all dominant exchanges hold crypto. Only for symbols available on Bitfinex (~40-50 of 60). Uses USDT withdrawal fees as proxy for crypto transfer fees.
-8. **Demotion sell via Bitfinex**: On demotion, crypto is transferred directly to Bitfinex and sold at 0% taker (saves source exchange taker fee). Falls back to local sell for symbols not available on Bitfinex. Post-demotion USDT consolidation runs automatically.
-9. **Withdrawal fee preference**: `_rebalance_usdt()` prefers cheap rebalance sources (fee ≤ $0.10) before falling back to expensive ones. Avoids KuCoin ($0.40) and Gate.io ($0.50) when cheaper alternatives exist.
+1. **Carve-out at discovery**: `reserve_amount = trade_amount × trading_float_multiplier` is set aside on Bitfinex (not capital%). The remainder flows to custody hub + active symbol allocations.
+2. **Protection during trading**: `available_usdt_for_trading(Bitfinex)` returns USDT minus float target — same as before, just sized differently.
+3. **Replenish (Bybit → Bitfinex via Aptos $0)**: When `bitfinex_usdt < trade_amount × replenish_trigger`, `replenish_trading_float()` pulls from custody hub via the configured network. Single source, single network — no more polling all 8 exchanges sorted by fee.
+4. **Overflow (Bitfinex → Bybit via Aptos $0)**: When `bitfinex_usdt > target × overflow_multiplier`, `_consolidate_trading_float_overflow()` sweeps excess back to the custody hub. Single destination — replaces the old `_redistribute_bitfinex_over_target` that pushed to multiple active exchanges.
+5. **Custody consolidation**: `consolidate_to_custody_hub()` moves idle USDT from non-essential exchanges to the custody hub (was Bitfinex). Excludes Bitfinex as source — its overflow has its own dedicated path.
+6. **Demotion sell flow** (preserves Bitfinex's 0% advantage):
+   - Crypto transferred from buyer exchange → **Bitfinex** (still — for the 0% taker sell)
+   - USDT proceeds → **Bybit** via Aptos $0 (new in v0.30)
+   - Logged as `[Capital] Idle crypto sold via Bitfinex 0%` then `[Capital] Idle-sell sweep`
+7. **Post-demotion redistribution**: Source is custody hub (was Bitfinex). USDT pushed to starved active exchanges via Aptos $0.
+8. **Emergency draws**: `emergency_draw_from_custody()` (was `emergency_reserve_draw`) pulls from custody hub when net-P&L-gated rebalancing fails. Bypasses all gates. Routes via Aptos $0 (Bybit→target).
+9. **Anomaly emergency consolidation**: `emergency_consolidate_to_custody_hub()` (was `..._to_bitfinex`) sweeps all USDT to custody hub after emergency sell-all. Sweeps Bitfinex too — float is empty during anomaly pause.
 
-### Key Methods
+### Key Methods (renamed from v0.29; backward-compat aliases preserved)
 
-| Method | File | Purpose |
-|--------|------|---------|
-| `available_usdt_for_trading(ex)` | `balance.py` | Returns USDT minus reserve if Bitfinex (for trade sizing/execution) |
-| `_available_usdt_for_rebalance(ex)` | `balance.py` | Returns USDT minus reserve if Bitfinex (for rebalance source selection) |
-| `emergency_reserve_draw(target, amount)` | `balance.py` | Emergency $0-fee transfer from reserve (hard floor enforced) |
-| `replenish_reserve()` | `balance.py` | Top up reserve from all exchanges (sorted by fee) |
-| `consolidate_to_bitfinex(active_buyers, idle_threshold)` | `balance.py` | Move idle USDT to Bitfinex hub |
-| `sell_crypto_via_bitfinex(source, symbol, qty, bid)` | `balance.py` | Transfer crypto to Bitfinex + sell at 0% |
-| `_consolidate_idle_exchange_crypto(idle_threshold)` | `optimizer.py` | Consolidate crypto from idle exchanges |
-| `_execute_demotion()` | `optimizer.py` | Demotion with Bitfinex-first crypto transfer |
-| `_redistribute_post_demotion()` | `optimizer.py` | Push freed Bitfinex USDT to starved active exchanges after demotion |
-| `_is_symbol_on_bitfinex(symbol)` | `optimizer.py` | Check if symbol has live Bitfinex price (used for expansion preference) |
-| `_any_active_on_bitfinex()` | `optimizer.py` | Check if any active symbol is tradeable on Bitfinex (gates consolidation) |
+| New name (v0.30+) | Old name (alias) | Purpose |
+|---|---|---|
+| `consolidate_to_custody_hub()` | `consolidate_to_bitfinex` | Idle USDT → custody hub (excludes Bitfinex as source) |
+| `replenish_trading_float()` | `replenish_reserve` | Custody hub → Bitfinex when float low |
+| `emergency_draw_from_custody()` | `emergency_reserve_draw` | Custody hub → starved exchange (bypasses gates) |
+| `transfer_excess_to_custody(amount)` | (new) | Single Bitfinex → custody hub overflow transfer |
+| `transfer_to_custody_hub(source, amount)` | (new) | Generic sweep from any source → custody hub |
+| `emergency_consolidate_to_custody_hub()` | `emergency_consolidate_to_bitfinex` | Anomaly: all USDT → custody hub |
+| `sell_crypto_via_bitfinex(...)` | (unchanged) | Still routes via Bitfinex for 0% taker — now followed by USDT sweep to custody hub |
+| `_consolidate_trading_float_overflow()` | `_redistribute_bitfinex_over_target` | Bitfinex overflow → custody hub (single dest) |
+| `is_custody_hub(ex)` / `is_trading_float(ex)` | (new) | Predicate helpers |
+
+### Distribute USDT (Danger Zone)
+
+The "Distribute USDT from Bitfinex" button is now **"Distribute USDT from {custody_hub}"** with dynamic label (shows "Distribute USDT from Bybit" by default, would show "Distribute USDT from Binance" if hub setting changes). Backend method `_distribute_from_custody_hub()` distributes from the custody hub via the configured network with score-weighted allocation to active exchanges. Backward-compat WebSocket message types accepted: both `distribute_from_custody_hub` (new) and `distribute_from_bitfinex` (legacy).
+
+### Logging
+
+All capital flows now use `[Capital]` component prefix (was `[Balance]` / `[Optimizer]`):
+```
+[Capital] Trading float: $320 on Bitfinex (trade_amount $40 × 8.0x), custody hub = Bybit
+[Capital] Replenished trading float: Bybit→Bitfinex $200.00 via Aptos (fee=$0.0000, float now $320.00/$320.00, trigger=$120.00)
+[Capital] Trading float overflow: Bitfinex→Bybit $150.00 via Aptos (fee=$0.0000)
+[Capital] Custody consolidation: MEXC→Bybit $80.00 via Aptos (fee=$0.0000)
+[Capital] Custody sweep: Bitfinex→Bybit $50.00 via Aptos (fee=$0.0000)
+[Capital] EMERGENCY draw from custody: Bybit→OKX $120.00 via Aptos (custody now $850.00)
+[Capital] Post-demotion redistribute: Bybit→Binance $120.00 via Aptos (shortfall=$120.00)
+[Capital] DISTRIBUTE Bybit→OKX: $80.00 via Aptos (fee=$0.0000)
+```
+Filterable in Bot Logs by component `Capital`.
 
 ## Adaptive Trading System
 

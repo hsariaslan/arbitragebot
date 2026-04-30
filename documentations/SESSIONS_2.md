@@ -512,3 +512,185 @@ The session was heavily analyzed mid-flight (the user observed the AR opportunit
 6. **Comprehensive `[Settings]` logging** of role boosts, role restrictions, symbol blocklists per exchange — for post-session diagnostics
 
 These were not active during the live session — they will be exercised in Session #25 onward.
+
+### Session #25 — 2026-04-29 → 2026-04-30 (v0.29.0-beta, First Live Run with v0.29 Features)
+
+**Date**: 2026-04-29 20:58 UTC → 2026-04-30 06:48 UTC (~9h 49m active accounting)
+**Capital**: $1,000 ($40 per trade, 4%)
+**Version**: v0.29.0-beta — first session running the new feature stack: role boosts (Bitfinex.buyer=5x + MEXC.seller=5x), per-symbol blocklist + daily auto-disable scheduler, on-demand volume fetcher, hourly trade_amount auto-rescale. v0.29.0-beta committed locally but **never pushed/deployed** — same as v0.28.3 in S24.
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+**Hedge mode**: testnet (real testnet futures)
+**Active exchanges**: 6 (Binance, OKX, Bybit, MEXC, Bitget, Bitfinex)
+**Disabled exchanges**: 3 (Gate.io, KuCoin, Pionex)
+
+#### Headline Result — Quiet Grind, No Spike
+
+| Metric | Value |
+|---|---:|
+| Trades | 110 |
+| Trading P&L | +$2.61 |
+| Transfer fees | $0.44 |
+| Cashback (credited / pending) | $0.11 / $0.30 |
+| **Net** | **+$2.27** |
+| **$/hr** | **+$0.23** |
+| Final portfolio | $1,005 (started $1,000, +0.5% raw) |
+| sz0 (capital exhaustion) | 1,901 |
+| Phantom spreads filtered | 175 |
+| Pos-cap throttles | 308 |
+| Rebalance blocked | 36 |
+| EVD seller penalties / demoted | 22,655 / **71** |
+| One-leg sims | 1 / $0.00 |
+| Anomaly | 0 pauses / 0 warnings / **2 symbol-blocks** |
+
+A "back to normal" session compared to S24's $52.72/hr AR-spike capture. No structural dislocation, no fat spreads — just slow accumulation on tight Bitfinex+MEXC majors.
+
+#### Settings (logged at session start)
+
+Same aggressive settings as S24 plus the new v0.29 features:
+
+| Category | Value |
+|---|---|
+| Sizing | `trade_amount=$40 (4%)`, `adaptive=on`, `net_pct_sizing=on cap=2.5` |
+| Symbols | `max=6 min=4`, `scoring_window=1800s`, `eval_interval=120s`, `min_net_pct=0.01%` |
+| Thresholds | `trading=0.003`, `strong=0.1`, `very_strong=0.3`, `fee_threshold_mult=0.2` |
+| Demotion | `period=1800s`, `cooldown_mult=7` (12,600s = 3.5h), `realloc_horizon=4h` |
+| **Role boosts (NEW v0.29)** | `BFX(buy=5.0x,sell=1.0x) MEX(buy=1.0x,sell=5.0x)` |
+| **Auto-disable (NEW v0.29)** | `enabled=true, threshold=$10,000/24h` |
+| **Trade-amount auto-rescale (NEW v0.29)** | `pct=4%`, hourly + on-discovery |
+| Bitfinex reserve | 20% ($200), hard floor 5% ($50) |
+| Hedging | `enabled=true, mode=testnet` |
+| Anomaly | `dd_threshold=15%, dd_emergency=2.0×` (carryover settings, drawdown bug NOT fixed in v0.29) |
+
+#### Timeline
+
+| Time (UTC) | Event |
+|---|---|
+| 20:58:56 | Session start. Discovery begins. |
+| 23:35 | Discovery completes; **DOGEUSDT activated** (only candidate clearing threshold). |
+| 00:01:01 | **`[AutoDisable]` daily run** — fetched 24h volumes for all 6 enabled exchanges. Bitfinex got 5 symbols auto-blocked (EIGEN, ENA, HYPE, JUP, LDO — all <$10K/24h). Other exchanges: zero adds. **Settings persisted automatically.** |
+| 00:41:13 | First Bitfinex over-target redistribute attempt (BFX=$440 > target $300, but no non-BFX active exchange needs USDT yet → skip log) |
+| 00:41:14 | Hedge **OPEN DOGEUSDT** short on testnet, $400 notional, funding -3.88%/yr |
+| 00:41:26 | First trade: DOGE Bitfinex→MEXC, +0.016% net |
+| 01:05:57 | First successful BFX over-target redistribute: Bitfinex→MEXC $79.77 (free) |
+| 02:15:20 | DOGEUSDT demoted (1.6h held, score below threshold). Hedge CLOSE. Re-discovery. |
+| 03:00:23 | DOGEUSDT re-activated. Hedge OPEN #2. |
+| 03:16:04 | DOGEUSDT demoted again (0.3h held — couldn't sustain even after re-activation). |
+| 04:21:42 | **CHZUSDT activated**. Hedge OPEN. |
+| 04:43:43 | CHZUSDT demoted (0.4h held). Hedge CLOSE. |
+| 04:58:46 | **GRTUSDT activated**. Hedge OPEN. |
+| **04:59:09** | **DRAWDOWN_BLOCK on GRTUSDT @ 21.99%** drawdown — 1st false-positive event |
+| 05:20:46 | SYMBOL_UNBLOCKED GRTUSDT (5-min cooldown expired) |
+| **05:26:16** | **DRAWDOWN_BLOCK on GRTUSDT @ 22.93%** — 2nd false-positive event |
+| 05:31:32 | SYMBOL_UNBLOCKED GRTUSDT |
+| 06:03:54 | Hedge ADJUST GRTUSDT -4937 qty (spot drift) |
+| 06:08:13 | GRTUSDT demoted (1.2h held). Hedge CLOSE. |
+| 06:38:17 | **FETUSDT activated**. Hedge OPEN. |
+| 06:48:24 | Final session line. FETUSDT still active, hedged. |
+
+#### Per-Symbol Performance
+
+| Symbol | Trades | Gross profit | Notes |
+|---|---:|---:|---|
+| DOGEUSDT | 86 | +$2.01 | Bitfinex+MEXC pair (boost-driven). 78% of all session trades. ~$0.024 avg/trade. |
+| GRTUSDT | 19 | +$0.48 | MEXC→Bitget mostly (Bitfinex doesn't have GRT). ~$0.025 avg/trade. |
+| FETUSDT | 5 | +$0.12 | MEXC→Binance. Just activated. |
+
+#### v0.29 Feature Validation
+
+##### 1. Role Boosts Working (Bitfinex+MEXC dominance)
+
+**86 of 110 trades (78%)** routed through Bitfinex↔MEXC for DOGEUSDT — the most concentrated single-pair session yet. This is the boost succeeding at concentration:
+
+| Pair | Trades | Symbol coverage |
+|---|---:|---|
+| **DOGEUSDT Bitfinex→MEXC** | 62 | Boosted route, 0% buy + 0.04% sell = 0.04% total |
+| **DOGEUSDT MEXC→Bitfinex** | 24 | Boosted reverse — also 0% on the buy leg (Bitfinex sell at 0%) |
+| GRTUSDT MEXC→Bitget | 15 | GRT not on Bitfinex; MEXC.seller_boost=5 still wins seller |
+| FETUSDT MEXC→Binance | 5 | FET not on Bitfinex |
+| GRTUSDT Binance→Bitget | 4 | One non-MEXC seller pair |
+
+**~96% of all session trades** had MEXC on one side, validating the seller boost. **86% had Bitfinex on the other side**, validating the buyer boost. The 25× preference factor concentrated capital on the structurally cheapest route.
+
+##### 2. Daily Auto-Disable Scheduler Ran Cleanly
+
+`[AutoDisable] Daily run @ 2026-04-30 00:01:00 UTC`:
+- Threshold: $10,000/24h
+- Total auto-blocked: 5 pairs across 6 exchanges
+- **Bitfinex: blocked 5 ([EIGEN, ENA, HYPE, JUP, LDO])** — exactly matched the analysis we did before deploy
+- All other 5 exchanges: 0 added (all bot symbols had >$10K/24h)
+- State file persisted; settings.json updated automatically
+- Single fetch cycle, 0 errors, 0 retries
+
+##### 3. Trade-Amount Hourly Auto-Rescale Working
+
+8 rescale events fired (6 hourly_tick + 2 discovery transitions):
+
+| Time | Reason | Trade amount | Capital |
+|---|---|---:|---:|
+| 00:43:42 | hourly_tick | $40.00 → $40.00 | $1000.00 → $1000.02 |
+| 01:43:42 | hourly_tick | $40.00 → $40.07 | $1000.02 → $1001.85 |
+| 02:15:21 | discovery_started | $40.07 → $40.06 | $1001.85 → $1001.55 |
+| 03:16:05 | hourly_tick | $40.06 → $40.15 | $1001.55 → $1003.74 |
+| 04:30:21 | hourly_tick | $40.15 → $40.14 | $1003.74 → $1003.61 |
+| 04:43:44 | discovery_started | $40.14 → $40.12 | $1003.61 → $1003.07 |
+| 05:43:45 | hourly_tick | $40.12 → $40.18 | $1003.07 → $1004.42 |
+| 06:08:14 | discovery_started | $40.18 → $40.22 | $1004.42 → $1005.43 |
+
+Trade amount tracked capital growth correctly. Discovery transitions fired as designed. Total trade-size growth across the session: 0.55% — matching capital growth almost exactly.
+
+##### 4. Phase D Hedge Testnet — Continued Clean Operation
+
+| Counter | Value |
+|---|---:|
+| Opens | 4 (DOGE × 2, CHZ, GRT, FET) |
+| Adjusts | 1 (GRT spot drift) |
+| Closes | 4 (all on demote) |
+| Errors | **0** |
+| Cumulative funding | -$0.005 (DOGE -$0.005, others slightly positive) |
+
+All four hedge cycles closed cleanly on demotion. RECONCILE_DONE on startup verified. Funding accrual tracked correctly.
+
+#### Issues Identified
+
+| # | Severity | Issue |
+|---|---|---|
+| 1 | **HIGH** | **Drawdown still triggers at 21.99% / 22.93% during GRTUSDT activity** — same insufficient-cap bug noted pre-deploy in S24. v0.29.0-beta didn't ship a fix. The 1%/tick cap allows compound growth over many ticks; peak ratchets up during minor wins, then a small dip reads as 22% drawdown. **Must be addressed in v0.30.** |
+| 2 | MEDIUM | **`[Optimizer] BFX over-target ... but no non-Bitfinex active exchange needs USDT` log spam** — 3,955 events in one session, mostly the no-recipient skip path. Throttling exists for active redistribute paths but not the skip path. Same issue noted in S20/S21/S23 — still not fixed. |
+| 3 | MEDIUM | **`AUTO_EXPAND triggered: active=1/4` fired hundreds of times** — only 1 active symbol for long stretches because the fee-adjusted threshold is too high for non-Bitfinex+MEXC pairs even with the diversification floor (0.5×). Activations clustered around DOGE/GRT/CHZ/FET — all with very tight margins. |
+| 4 | LOW | **demoted=71 EVD seller demotions** — high count of EVD penalty flips. Suggests the EVD penalty (0.02) may be too aggressive given how often Bitfinex's event-driven feed competes with streaming exchanges as seller in the boost-preferred pair. Worth reviewing. |
+| 5 | LOW | **Multiple DOGE re-activate→demote cycles** in 3 hours (DOGE active twice, demoted twice). The score barely clears the activation threshold then sags below — churn-prone behavior. Demotion cooldown of 12,600s (3.5h) prevented further immediate re-activations. |
+
+#### Capital Flow
+
+Final balances:
+| Exchange | USDT | Notes |
+|---|---:|---|
+| Binance | $368 | Accumulated from BFX over-target redistributes |
+| **Bitfinex** | **$201** | Settled near reserve target ($200) — boost worked |
+| Bitget | $0 | All routed out via demotion sweeps |
+| Bybit | $0 | Boost flag disabled? — 0 trades on Bybit (but enabled in fee_configs). All trades flowed through other 5 exchanges. |
+| MEXC | $436 | Accumulating from sell side (boost driving MEXC as seller) |
+| OKX | $0 | All routed out |
+| **Total** | **$1,005** | ~Flat (slight positive) |
+
+**Bitfinex over-target redistributes successful**: ~10 redistribute events sent ~$925 of excess Bitfinex USDT to MEXC/Binance/Bitget/OKX over the session, all at $0 fee. The boost-driven concentration on Bitfinex+MEXC kept the trading float utilized.
+
+#### Lessons / Conclusions
+
+- **v0.29 role boosts work as designed**. 78% of trades routed through the preferred Bitfinex+MEXC pair (DOGE) when symbol availability + boost combined. The 25× preference factor concentrated capital correctly without blocking diversification entirely.
+- **Auto-disable scheduler ran cleanly on its first live execution**. Five Bitfinex symbols (EIGEN/ENA/HYPE/JUP/LDO) correctly auto-blocked at 00:01 UTC matching pre-deploy analysis.
+- **Trade-amount auto-rescale tracked capital growth accurately** with 8 firings (hourly + discovery transitions). No anomalies.
+- **Hedge testnet remains rock-solid** — 4 cycles, 0 errors. Demotion-driven closes work consistently.
+- **Drawdown false-positive bug still ships** in v0.29 — caught in S24 pre-deploy testing, not fixed for v0.29. Must be the headline fix in v0.30.
+- **DOGEUSDT/GRTUSDT/FETUSDT/CHZUSDT cycle pattern is the new normal** when there's no AR-style spike. Quiet sessions average ~$0.20-0.30/hr at this capital scale. The v0.29 features stabilize the routing but can't manufacture spread that doesn't exist in the market.
+- **Bybit had zero trades despite being enabled** — all routes preferred Bitfinex/MEXC due to boost OR routed to Binance/Bitget/OKX as second-tier alternatives. Bybit's role as buyer/seller never fired. Worth checking if Bybit's `as_buyer`/`as_seller` flags are correctly enabled in fee_configs.
+
+#### Set-Up for v0.30.0-beta (Capital Architecture Refactor)
+
+The architecture refactor implemented after S25 directly addresses three observations from this session:
+
+1. **Bitfinex still grew to $440+ multiple times** during the session before redistributing (target was $200, threshold was $300). At $1k capital this is fine; at $10k it would be $4,400+ on a self-attested PoR exchange. v0.30 caps the trading float by `trade_amount × 8 = $320` regardless of capital.
+2. **Bitfinex over-target redistributions went to whichever active exchange needed USDT** (8 events total, $925 distributed). v0.30 routes overflow to a single custody hub (Bybit) — single destination, simpler, and the bulk-USDT custody risk moves to the third-party PoR audited exchange.
+3. **Demotion sweeps stayed on Bitfinex** (visible in the post-demotion balances). v0.30 explicitly sweeps demotion proceeds to Bybit via Aptos $0.
+
+These changes don't fix the drawdown bug (#1 above) — that's still a separate v0.30 priority.
