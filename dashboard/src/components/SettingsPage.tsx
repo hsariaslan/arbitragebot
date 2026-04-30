@@ -54,8 +54,12 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [reallocationCostHorizon, setReallocationCostHorizon] = useState(currentSettings.reallocation_cost_horizon ?? 2.0);
   const [demotionCooldownMultiplier, setDemotionCooldownMultiplier] = useState(currentSettings.demotion_cooldown_multiplier ?? 5.0);
   const [hourlyExternalTransferCap, setHourlyExternalTransferCap] = useState(currentSettings.hourly_external_transfer_cap ?? 2.0);
-  const [bitfinexReservePct, setBitfinexReservePct] = useState(currentSettings.bitfinex_reserve_pct ?? 0.15);
-  const [bitfinexReserveHardFloor, setBitfinexReserveHardFloor] = useState(currentSettings.bitfinex_reserve_hard_floor ?? 0.05);
+  // v0.30+: capital architecture
+  const [custodyHubExchange, setCustodyHubExchange] = useState(currentSettings.custody_hub_exchange ?? 'Bybit');
+  const [custodyHubNetwork, setCustodyHubNetwork] = useState(currentSettings.custody_hub_network ?? 'Aptos');
+  const [tradingFloatMultiplier, setTradingFloatMultiplier] = useState(currentSettings.trading_float_multiplier ?? 8.0);
+  const [tradingFloatReplenishTrigger, setTradingFloatReplenishTrigger] = useState(currentSettings.trading_float_replenish_trigger ?? 3.0);
+  const [tradingFloatOverflowMultiplier, setTradingFloatOverflowMultiplier] = useState(currentSettings.trading_float_overflow_multiplier ?? 1.5);
   const [netPctSizingEnabled, setNetPctSizingEnabled] = useState(currentSettings.net_pct_sizing_enabled ?? true);
   const [netPctMultiplierCap, setNetPctMultiplierCap] = useState(currentSettings.net_pct_multiplier_cap ?? 2.5);
   const [tradingScoreThreshold, setTradingScoreThreshold] = useState(currentSettings.trading_score_threshold ?? 0.01);
@@ -142,8 +146,11 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setReallocationCostHorizon(currentSettings.reallocation_cost_horizon ?? 2.0);
       setDemotionCooldownMultiplier(currentSettings.demotion_cooldown_multiplier ?? 5.0);
       setHourlyExternalTransferCap(currentSettings.hourly_external_transfer_cap ?? 2.0);
-      setBitfinexReservePct(currentSettings.bitfinex_reserve_pct ?? 0.15);
-      setBitfinexReserveHardFloor(currentSettings.bitfinex_reserve_hard_floor ?? 0.05);
+      setCustodyHubExchange(currentSettings.custody_hub_exchange ?? 'Bybit');
+      setCustodyHubNetwork(currentSettings.custody_hub_network ?? 'Aptos');
+      setTradingFloatMultiplier(currentSettings.trading_float_multiplier ?? 8.0);
+      setTradingFloatReplenishTrigger(currentSettings.trading_float_replenish_trigger ?? 3.0);
+      setTradingFloatOverflowMultiplier(currentSettings.trading_float_overflow_multiplier ?? 1.5);
       setNetPctSizingEnabled(currentSettings.net_pct_sizing_enabled ?? true);
       setNetPctMultiplierCap(currentSettings.net_pct_multiplier_cap ?? 2.5);
       setTradingScoreThreshold(currentSettings.trading_score_threshold ?? 0.01);
@@ -225,8 +232,11 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     reallocation_cost_horizon: reallocationCostHorizon,
     demotion_cooldown_multiplier: demotionCooldownMultiplier,
     hourly_external_transfer_cap: hourlyExternalTransferCap,
-    bitfinex_reserve_pct: bitfinexReservePct,
-    bitfinex_reserve_hard_floor: bitfinexReserveHardFloor,
+    custody_hub_exchange: custodyHubExchange,
+    custody_hub_network: custodyHubNetwork,
+    trading_float_multiplier: tradingFloatMultiplier,
+    trading_float_replenish_trigger: tradingFloatReplenishTrigger,
+    trading_float_overflow_multiplier: tradingFloatOverflowMultiplier,
     net_pct_sizing_enabled: netPctSizingEnabled,
     net_pct_multiplier_cap: netPctMultiplierCap,
     adaptive_mode: adaptiveMode,
@@ -700,25 +710,66 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           </div>
         </div>
 
-        {/* Bitfinex Hub */}
-        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-3">Bitfinex Capital Hub</h3>
+        {/* Capital Hub & Trading Float (v0.30+) */}
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-1">Capital Hub & Trading Float</h3>
+        <p className="text-[11px] text-slate-500 mb-3">
+          Bulk USDT lives on the custody hub (third-party PoR audited). A small trading float is kept on Bitfinex for the 0%-taker buy leg. Float is bounded by trade size, not capital — Bitfinex exposure stays flat as capital grows.
+        </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
-              Bitfinex Reserve %
-              <Tooltip text="Percentage of total capital to keep as USDT on Bitfinex. Bitfinex has $0 withdrawal fees, making it ideal as a capital hub. Capital is consolidated here during idle time and distributed for free. Set to 0 to disable. Default: 15%. Config key: bitfinex_reserve_pct" />
+              Custody Hub Exchange
+              <Tooltip text="Where bulk idle USDT lives. Default: Bybit (third-party PoR audited, $1.5B stress-tested in 2025). Must be an enabled exchange with free or near-free withdrawals on the configured custody network. Config key: custody_hub_exchange" />
             </label>
-            <input type="number" value={bitfinexReservePct} min={0} max={0.5} step={0.01}
-              onChange={d(setBitfinexReservePct, 0.15)}
+            <select value={custodyHubExchange}
+              onChange={e => setCustodyHubExchange(e.target.value)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
+              <option value="Bybit">Bybit</option>
+              <option value="Binance">Binance</option>
+              <option value="OKX">OKX</option>
+              <option value="MEXC">MEXC</option>
+              <option value="Bitget">Bitget</option>
+            </select>
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Custody → Trading Float Network
+              <Tooltip text="Network used to route USDT from custody hub to Bitfinex trading float (and back for overflow). Default: Aptos ($0 on Bybit, supported by all 6 active exchanges with the same canonical Tether contract). Config key: custody_hub_network" />
+            </label>
+            <select value={custodyHubNetwork}
+              onChange={e => setCustodyHubNetwork(e.target.value)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
+              <option value="Aptos">Aptos</option>
+              <option value="Plasma">Plasma</option>
+              <option value="Arbitrum">Arbitrum</option>
+              <option value="BEP20">BEP20</option>
+            </select>
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Trading Float Multiplier (× trade_amount)
+              <Tooltip text="Bitfinex trading float target = trade_amount × this. Default: 8 (covers 8 trades at full size before depleting). Lower (3-5) = minimal Bitfinex exposure but more replenish round-trips. Higher (12-20) = better for fast strategies but more Bitfinex custody exposure. Hot-applied — change anytime. Config key: trading_float_multiplier" />
+            </label>
+            <input type="number" value={tradingFloatMultiplier} min={2} max={50} step={0.5}
+              onChange={d(setTradingFloatMultiplier, 8.0)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
-              Reserve Hard Floor %
-              <Tooltip text="Minimum Bitfinex reserve that emergency draws cannot drain below. For $3000 capital with 5% floor = $150 minimum remaining. Prevents complete depletion during capital death spirals. Default: 5%. Config key: bitfinex_reserve_hard_floor" />
+              Replenish Trigger (× trade_amount)
+              <Tooltip text="Replenish trading float from custody hub when balance falls below trade_amount × this. Default: 3.0 (refill when 3 trades' worth remains). Must be less than the multiplier. Config key: trading_float_replenish_trigger" />
             </label>
-            <input type="number" value={bitfinexReserveHardFloor} min={0} max={0.20} step={0.01}
-              onChange={d(setBitfinexReserveHardFloor, 0.05)}
+            <input type="number" value={tradingFloatReplenishTrigger} min={0.5} max={50} step={0.5}
+              onChange={d(setTradingFloatReplenishTrigger, 3.0)}
+              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
+          </div>
+          <div>
+            <label className="flex items-center text-xs text-slate-500 mb-1">
+              Overflow Multiplier (× target)
+              <Tooltip text="Sweep excess back to custody hub when Bitfinex USDT > target × this. Default: 1.5 (overflow when float reaches 150% of target). Config key: trading_float_overflow_multiplier" />
+            </label>
+            <input type="number" value={tradingFloatOverflowMultiplier} min={1.1} max={5} step={0.1}
+              onChange={d(setTradingFloatOverflowMultiplier, 1.5)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
         </div>
@@ -1254,13 +1305,13 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             </button>
           </div>
           <div className="border-t border-red-900/30" />
-          {/* Distribute from Bitfinex */}
+          {/* Distribute from custody hub (v0.30+: dynamic label) */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <p className="text-sm text-slate-300">Distribute USDT from Bitfinex</p>
+              <p className="text-sm text-slate-300">Distribute USDT from {currentSettings.custody_hub_exchange ?? 'Bybit'}</p>
               <p className="text-xs text-slate-500 mt-0.5">
                 {distributeEnabled
-                  ? 'Distribute Bitfinex USDT to exchanges based on symbol profitability.'
+                  ? `Distribute ${currentSettings.custody_hub_exchange ?? 'Bybit'} USDT to exchanges based on symbol profitability.`
                   : 'Enabled after Hard Stop with Transfer to Bitfinex, or switching to live mode.'}
               </p>
             </div>
@@ -1520,12 +1571,16 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         </div>
       )}
 
-      {/* Distribute USDT from Bitfinex Modal */}
-      {showDistribute && (
+      {/* Distribute USDT from custody hub Modal (v0.30+: dynamic label) */}
+      {showDistribute && (() => {
+        const hub = currentSettings.custody_hub_exchange ?? 'Bybit';
+        const network = currentSettings.custody_hub_network ?? 'Aptos';
+        const hubBalance = balances?.[hub];
+        return (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-slate-800 rounded-xl max-w-lg w-full mx-4 border border-red-900/50 overflow-hidden">
             <div className="bg-red-900/60 px-6 py-3">
-              <h3 className="text-lg font-semibold text-red-200">Distribute USDT from Bitfinex</h3>
+              <h3 className="text-lg font-semibold text-red-200">Distribute USDT from {hub}</h3>
             </div>
             <div className="p-6">
               {distributeResult ? (
@@ -1534,7 +1589,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
                   <div className="text-sm text-slate-300 space-y-1">
                     <div>Total distributed: <span className="text-white font-mono">${distributeResult.distributed.toFixed(2)}</span></div>
                     {distributeResult.transfers.map((t, i) => (
-                      <div key={i} className="text-xs text-slate-400">Bitfinex → {t.exchange}: <span className="font-mono text-white">${t.amount.toFixed(2)}</span></div>
+                      <div key={i} className="text-xs text-slate-400">{hub} → {t.exchange}: <span className="font-mono text-white">${t.amount.toFixed(2)}</span></div>
                     ))}
                   </div>
                   <div className="flex gap-3 justify-end mt-4">
@@ -1546,15 +1601,14 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
                 </div>
               ) : (
                 <>
-                  {balances?.Bitfinex && (
+                  {hubBalance && (
                     <div className="bg-slate-900/50 rounded-lg p-3 mb-4 text-xs">
-                      <div className="text-slate-500 font-medium mb-2">Bitfinex Balance</div>
+                      <div className="text-slate-500 font-medium mb-2">{hub} Balance</div>
                       <div className="space-y-1 text-slate-300">
-                        <div>USDT: <span className="text-white font-mono">${balances.Bitfinex.usdt.toFixed(2)}</span></div>
-                        <div>Reserve: <span className="text-amber-400 font-mono">~${(Number(currentSettings.total_capital ?? 1800) * Number(currentSettings.bitfinex_reserve_pct ?? 0.15)).toFixed(2)}</span></div>
-                        <div>Available: <span className="text-emerald-400 font-mono">${Math.max(0, balances.Bitfinex.usdt - Number(currentSettings.total_capital ?? 1800) * Number(currentSettings.bitfinex_reserve_pct ?? 0.15)).toFixed(2)}</span></div>
+                        <div>USDT: <span className="text-white font-mono">${hubBalance.usdt.toFixed(2)}</span></div>
+                        <div>Distributable (95%): <span className="text-emerald-400 font-mono">${(hubBalance.usdt * 0.95).toFixed(2)}</span></div>
                       </div>
-                      <div className="mt-2 text-slate-500">Distribution: score-weighted to profitable exchanges (free transfer)</div>
+                      <div className="mt-2 text-slate-500">Distribution via {network} (score-weighted to profitable exchanges)</div>
                     </div>
                   )}
                   <div className="mb-4">
@@ -1572,7 +1626,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
                       disabled={distributeConfirmText !== 'distribute usdt'}
                       onClick={() => {
                         onSendWithCallback(
-                          { type: 'distribute_from_bitfinex' },
+                          { type: 'distribute_from_custody_hub' },
                           (data) => {
                             if (data.type === 'distribute_error') {
                               setDistributeResult({ distributed: 0, transfers: [], strategy: data.error ?? 'Error' });
@@ -1596,7 +1650,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Confirmation Modal */}
       {showConfirm && (

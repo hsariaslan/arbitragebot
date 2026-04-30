@@ -128,6 +128,13 @@ export interface Settings {
   reallocation_cost_horizon?: number;
   demotion_cooldown_multiplier?: number;
   hourly_external_transfer_cap?: number;
+  // v0.30+: capital architecture (custody hub + trading float)
+  custody_hub_exchange?: string;
+  custody_hub_network?: string;
+  trading_float_multiplier?: number;
+  trading_float_replenish_trigger?: number;
+  trading_float_overflow_multiplier?: number;
+  // Deprecated v0.30 (kept for migration / type compat)
   bitfinex_reserve_pct?: number;
   bitfinex_reserve_hard_floor?: number;
   net_pct_sizing_enabled?: boolean;
@@ -645,4 +652,6 @@ export interface DashboardState {
   manual_stopped?: boolean;
   manual_stop_timestamp?: number;
   distribute_enabled?: boolean;
+  custody_hub_exchange?: string;
+  custody_hub_network?: string;
 }

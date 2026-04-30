@@ -470,7 +470,7 @@ class SymbolOptimizer:
                         and self._balance
                         and "Bitfinex" in self._balance._exchanges
                     ):
-                        transfers = self._balance.consolidate_to_bitfinex(
+                        transfers = self._balance.consolidate_to_custody_hub(
                             None, max_fee_per_source=0.02,
                         )
                         if transfers:
@@ -481,7 +481,7 @@ class SymbolOptimizer:
                                 f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
                                 f"(fees: ${hub_fee:.4f}, max_fee=$0.02)"
                             )
-                        self._balance.replenish_reserve(max_fee_per_source=0.02)
+                        self._balance.replenish_trading_float(max_fee_per_source=0.02)
                         self._last_evaluation = now
 
             elif (
@@ -515,10 +515,10 @@ class SymbolOptimizer:
                 self._run_inventory_rebalance(now)
                 self._last_inventory_rebalance = now
 
-            # Bitfinex over-target redistribution (Feature 5)
+            # Trading float overflow → custody hub (v0.30+, was Feature 5)
             # Same initialized-gate as above: pre-init Bitfinex USDT
             # transiently includes the about-to-be-crypto allocation, so a
-            # premature redistribute would drain the planned crypto pool.
+            # premature sweep would drain the planned crypto pool.
             if (
                 self._bitfinex_over_target_enabled
                 and not self._discovery_mode
@@ -527,7 +527,7 @@ class SymbolOptimizer:
                 and self._balance.initialized
                 and "Bitfinex" in self._balance._exchanges
             ):
-                self._redistribute_bitfinex_over_target()
+                self._consolidate_trading_float_overflow()
 
             # Auto-expand on understaff (Feature 6) — fire ASAP when active count < min
             if (
@@ -1298,14 +1298,26 @@ class SymbolOptimizer:
                 f"({pairs['num_exchanges']} exchanges)"
             )
 
-        # Carve out Bitfinex reserve before allocating to symbols
-        reserve_pct = self._balance._bitfinex_reserve_pct if self._balance else 0.15
+        # v0.30: capital architecture
+        #   - Trading float (Bitfinex): bounded by trade_amount × multiplier
+        #   - Custody hub (Bybit by default): receives the rest
+        #   - Symbol allocations come out of "allocatable_capital" = remainder
+        # The reserve_amount variable name is preserved for downstream compat
+        # but its value now reflects trading float, not capital%.
+        trade_amount = self._balance._trade_amount if self._balance else 40.0
+        float_mult = (
+            self._balance._trading_float_multiplier if self._balance else 8.0
+        )
+        custody_hub = (
+            self._balance._custody_hub_exchange if self._balance else "Bybit"
+        )
         reserve_amount = 0.0
-        if reserve_pct > 0 and "Bitfinex" in all_exchanges:
-            reserve_amount = total_capital * reserve_pct
+        if "Bitfinex" in all_exchanges and float_mult > 0:
+            reserve_amount = trade_amount * float_mult
             logger.info(
-                f"[Optimizer] Bitfinex reserve: ${reserve_amount:.0f} "
-                f"({reserve_pct:.0%} of ${total_capital:.0f} capital)"
+                f"[Capital] Trading float: ${reserve_amount:.0f} on Bitfinex "
+                f"(trade_amount ${trade_amount:.0f} × {float_mult:.1f}x), "
+                f"custody hub = {custody_hub}"
             )
         allocatable_capital = total_capital - reserve_amount
 
@@ -1759,13 +1771,12 @@ class SymbolOptimizer:
         if hm is not None:
             hm.request_close(symbol, reason=f"demoted({symbol})")
 
-        # Consolidate freed USDT from local sells to Bitfinex hub
-        # Skip if no active symbol is tradeable on Bitfinex (avoids circular waste)
-        if (
-            self._balance
-            and "Bitfinex" in self._balance._exchanges
-            and self._any_active_on_bitfinex()
-        ):
+        # v0.30: post-demotion sweep — freed USDT flows to custody hub (Bybit),
+        # not Bitfinex. This includes:
+        #   (1) Local-sell proceeds on the original buyer exchange → custody hub
+        #   (2) Via-Bitfinex sell proceeds (now sitting on Bitfinex) → custody hub
+        #       only if the float is above its overflow threshold
+        if self._balance:
             # Symmetric: all dominant exchanges are active for both buy and sell
             active_exchanges = set()
             for sym in self._active_symbols:
@@ -1775,27 +1786,23 @@ class SymbolOptimizer:
                 for ex_name, _ in pairs.get("sellers", []):
                     active_exchanges.add(ex_name)
             # When net-negative, only consolidate from free/near-free sources
-            # to avoid deepening the deficit (KuCoin $0.40, Gate.io $0.50 kill profit)
             fee_cap = 0.02 if not self._rotation_budget_ok else None
-            transfers = self._balance.consolidate_to_bitfinex(
+            transfers = self._balance.consolidate_to_custody_hub(
                 active_exchanges, idle_threshold=1800.0,
                 active_seller_exchanges=active_exchanges,
                 max_fee_per_source=fee_cap,
             )
             if transfers:
+                hub = self._balance._custody_hub_exchange
                 hub_fee = sum(t.fee_usd for t in transfers)
                 hub_amt = sum(t.amount_usd for t in transfers)
                 logger.info(
-                    f"[Optimizer] Post-demotion consolidation: "
-                    f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
+                    f"[Capital] Post-demotion sweep: "
+                    f"{len(transfers)} transfers, ${hub_amt:.2f} → {hub} "
                     f"(fees: ${hub_fee:.4f})"
                 )
-        elif self._balance and "Bitfinex" in self._balance._exchanges:
-            logger.info(
-                f"[Optimizer] Post-demotion consolidation SKIPPED: "
-                f"no active symbol tradeable on Bitfinex "
-                f"(active={list(self._active_symbols)})"
-            )
+            # Also sweep Bitfinex trading float overflow if any
+            self._consolidate_trading_float_overflow()
 
         # Update historical stats
         stats = self._historical_stats.get(symbol)
@@ -1847,9 +1854,14 @@ class SymbolOptimizer:
         """
         from balance import Transfer
 
-        if "Bitfinex" not in self._balance._exchanges:
+        if not self._balance:
             return
-        available = self._balance._available_usdt_for_rebalance("Bitfinex")
+        # v0.30: source is the custody hub (Bybit), not Bitfinex.
+        # Bitfinex is the trading float, not the redistribution source.
+        hub = self._balance._custody_hub_exchange
+        if hub not in self._balance._exchanges:
+            return
+        available = self._balance._available_usdt_for_rebalance(hub)
         if available < self._trade_amount * 2:
             return  # Nothing meaningful to redistribute
 
@@ -1861,7 +1873,7 @@ class SymbolOptimizer:
                 continue
             all_sym_exchanges = {ex for ex, _ in pairs.get("buyers", [])} | {ex for ex, _ in pairs.get("sellers", [])}
             for ex in all_sym_exchanges:
-                if ex == "Bitfinex":
+                if ex == hub:
                     continue
                 bal = self._balance.usdt.get(ex, 0.0)
                 if bal < self._trade_amount * 2:
@@ -1879,12 +1891,12 @@ class SymbolOptimizer:
             amount = min(need, available - total_sent)
             if amount < self._trade_amount:
                 continue
-            fee = self._balance._get_withdrawal_fee("Bitfinex", amount)
+            fee = self._balance._get_withdrawal_fee(hub, amount)
             if not self._balance._check_hourly_transfer_budget(fee):
                 continue
             self._balance._record_external_fee(fee)
-            self._balance.usdt["Bitfinex"] -= amount
-            self._balance.usdt[ex] = self._balance.usdt.get(ex, 0.0) + amount
+            self._balance.usdt[hub] -= amount
+            self._balance.usdt[ex] = self._balance.usdt.get(ex, 0.0) + (amount - fee)
             self._balance.total_transfer_fees += fee
             self._balance.total_external_transfer_fees += fee
             total_sent += amount
@@ -1892,7 +1904,7 @@ class SymbolOptimizer:
                 Transfer(
                     timestamp=now,
                     transfer_type="post_demotion_redistribute",
-                    from_exchange="Bitfinex",
+                    from_exchange=hub,
                     to_exchange=ex,
                     symbol="USDT",
                     amount_usd=amount,
@@ -1900,104 +1912,57 @@ class SymbolOptimizer:
                 )
             )
             logger.info(
-                f"[Balance] Post-demotion redistribute: Bitfinex→{ex} "
-                f"${amount:.2f} (fee=${fee:.2f})"
+                f"[Capital] Post-demotion redistribute: {hub}→{ex} "
+                f"${amount:.2f} via {self._balance._custody_hub_network} "
+                f"(fee=${fee:.4f}, shortfall=${need:.2f})"
             )
             if total_sent >= available * 0.8:
-                break  # Keep 20% buffer on Bitfinex
+                break  # Keep 20% buffer on custody hub
 
-    def _redistribute_bitfinex_over_target(self) -> None:
-        """Push excess Bitfinex USDT to active buyer exchanges (Feature 5).
+    def _consolidate_trading_float_overflow(self) -> None:
+        """Move excess Bitfinex trading-float USDT back to the custody hub.
 
-        Triggers when Bitfinex USDT > reserve_target × bitfinex_over_target_multiplier
-        (default 1.5×). Sends excess to active exchanges that need USDT, using
-        $0-fee Bitfinex withdrawals. Prevents capital from getting trapped on
-        Bitfinex when only Bitfinex-dominant symbols are active (S20 issue).
+        v0.30+: previously redistributed excess to active buyer exchanges
+        (legacy `_redistribute_bitfinex_over_target`). Now flows back to
+        the custody hub (default Bybit) via Aptos $0 — the custody hub
+        handles further redistribution to active exchanges on demand.
+        Single destination, single network.
+
+        Triggers when Bitfinex USDT > target × overflow_multiplier
+        (default 1.5×). Excess = bitfinex - target.
         """
-        from balance import Transfer
-
+        if not self._balance:
+            return
         bfx_usdt = self._balance.usdt.get("Bitfinex", 0.0)
-        reserve_target = self._balance._bitfinex_reserve_target
-        if reserve_target <= 0:
-            return  # Reserve disabled
+        target = self._balance._bitfinex_reserve_target  # = trade_amount × multiplier
+        if target <= 0:
+            return  # Trading float disabled
 
-        threshold = reserve_target * self._bitfinex_over_target_multiplier
+        threshold = target * self._balance._trading_float_overflow_multiplier
         if bfx_usdt <= threshold:
             return  # Within target band
 
-        excess = bfx_usdt - reserve_target
+        excess = bfx_usdt - target
         if excess < self._trade_amount:
             return  # Too small to bother
 
-        # Collect active non-Bitfinex exchanges
-        exchange_needs: dict[str, float] = {}
-        for sym in self._active_symbols:
-            pairs = self._dominant_pairs.get(sym)
-            if not pairs:
-                continue
-            all_sym_exchanges = {ex for ex, _ in pairs.get("buyers", [])} | {ex for ex, _ in pairs.get("sellers", [])}
-            for ex in all_sym_exchanges:
-                if ex == "Bitfinex":
-                    continue
-                bal = self._balance.usdt.get(ex, 0.0)
-                # Target each active exchange to receive trade_amount × 3
-                target_bal = self._trade_amount * 3
-                if bal < target_bal:
-                    shortfall = target_bal - bal
-                    exchange_needs[ex] = max(exchange_needs.get(ex, 0.0), shortfall)
-
-        if not exchange_needs:
+        # Single destination: the configured custody hub (default Bybit)
+        transfer = self._balance.transfer_excess_to_custody(excess)
+        if transfer is None:
             logger.info(
-                f"[Optimizer] BFX over-target ${bfx_usdt:.2f} > "
-                f"${threshold:.2f}, but no non-Bitfinex active exchange needs USDT"
+                f"[Capital] Trading float overflow blocked: "
+                f"bfx=${bfx_usdt:.2f} target=${target:.2f} excess=${excess:.2f} "
+                f"(custody hub={self._balance._custody_hub_exchange} unreachable)"
             )
             return
+        logger.info(
+            f"[Capital] Trading float overflow: Bitfinex ${bfx_usdt:.2f} > "
+            f"threshold ${threshold:.2f}, swept ${transfer.amount_usd:.2f} to "
+            f"{transfer.to_exchange}, Bitfinex now ${self._balance.usdt.get('Bitfinex', 0.0):.2f}"
+        )
 
-        # Sort by largest shortfall first
-        sorted_needs = sorted(exchange_needs.items(), key=lambda x: x[1], reverse=True)
-        total_sent = 0.0
-        sent_to: list[str] = []
-        now = time.time()
-        for ex, need in sorted_needs:
-            amount = min(need, excess - total_sent)
-            if amount < self._trade_amount:
-                continue
-            fee = self._balance._get_withdrawal_fee("Bitfinex", amount)
-            if not self._balance._check_hourly_transfer_budget(fee):
-                logger.info(f"[Optimizer] BFX over-target redistribute SKIPPED {ex}: hourly budget exhausted")
-                continue
-            self._balance._record_external_fee(fee)
-            self._balance.usdt["Bitfinex"] -= amount
-            self._balance.usdt[ex] = self._balance.usdt.get(ex, 0.0) + amount
-            self._balance.total_transfer_fees += fee
-            self._balance.total_external_transfer_fees += fee
-            total_sent += amount
-            sent_to.append(f"{ex}=${amount:.2f}")
-            self._balance.transfers.append(
-                Transfer(
-                    timestamp=now,
-                    transfer_type="bfx_over_target_redistribute",
-                    from_exchange="Bitfinex",
-                    to_exchange=ex,
-                    symbol="USDT",
-                    amount_usd=amount,
-                    fee_usd=fee,
-                )
-            )
-            logger.info(
-                f"[Optimizer] BFX over-target redistribute: Bitfinex→{ex} "
-                f"${amount:.2f} (fee=${fee:.4f}, shortfall=${need:.2f})"
-            )
-            if total_sent >= excess:
-                break
-
-        if total_sent > 0:
-            logger.info(
-                f"[Optimizer] BFX over-target SUMMARY: ${bfx_usdt:.2f} BFX "
-                f"(target=${reserve_target:.2f}, threshold=${threshold:.2f}), "
-                f"sent ${total_sent:.2f} to {len(sent_to)} exchange(s) [{', '.join(sent_to)}], "
-                f"BFX now=${self._balance.usdt.get('Bitfinex', 0.0):.2f}"
-            )
+    # Backward-compat alias
+    _redistribute_bitfinex_over_target = _consolidate_trading_float_overflow
 
     def _auto_expand_on_understaff_tick(self, now: float) -> None:
         """Fire expansion immediately when active symbol count is below minimum (Feature 6).
@@ -2258,11 +2223,19 @@ class SymbolOptimizer:
                     bitfinex_bid=bitfinex_bids[symbol],
                 )
                 if transfer:
+                    proceeds = transfer.amount_usd
                     logger.info(
-                        f"[Optimizer] Idle seller consolidation: "
+                        f"[Capital] Idle crypto sold via Bitfinex 0%: "
                         f"{symbol} on {ex} idle {idle_seconds:.0f}s, "
-                        f"${transfer.amount_usd:.2f} to Bitfinex"
+                        f"${proceeds:.2f} USDT credited to Bitfinex"
                     )
+                    # v0.30: sweep proceeds to custody hub instead of leaving on Bitfinex
+                    sweep = self._balance.transfer_to_custody_hub("Bitfinex", proceeds)
+                    if sweep:
+                        logger.info(
+                            f"[Capital] Idle-sell sweep: ${sweep.amount_usd:.2f} "
+                            f"Bitfinex→{sweep.to_exchange}"
+                        )
 
     # ── Expansion ────────────────────────────────────────────────────────
 
@@ -2463,14 +2436,14 @@ class SymbolOptimizer:
                         active_exchanges.add(ex_name)
                 exchange_set = active_exchanges if self._active_symbols else None
                 fee_cap = 0.02 if not self._rotation_budget_ok else None
-                self._balance.consolidate_to_bitfinex(
+                self._balance.consolidate_to_custody_hub(
                     exchange_set, idle_threshold=1800.0,
                     active_seller_exchanges=exchange_set,
                     max_fee_per_source=fee_cap,
                 )
                 self._consolidate_idle_exchange_crypto(idle_threshold=1800.0)
                 fee_cap_r = 0.02 if not self._rotation_budget_ok else None
-                self._balance.replenish_reserve(max_fee_per_source=fee_cap_r)
+                self._balance.replenish_trading_float(max_fee_per_source=fee_cap_r)
             elif self._balance and "Bitfinex" in self._balance._exchanges:
                 logger.info(
                     "[Optimizer] Consolidation SKIPPED (deficit path): "
@@ -2497,7 +2470,7 @@ class SymbolOptimizer:
         # When net-negative, only replenish from free/near-free sources
         if self._balance:
             fee_cap = 0.02 if not self._rotation_budget_ok else None
-            self._balance.replenish_reserve(max_fee_per_source=fee_cap)
+            self._balance.replenish_trading_float(max_fee_per_source=fee_cap)
 
         # Phase 4: Evaluate demotions first
         self._evaluate_demotions()
@@ -2521,7 +2494,7 @@ class SymbolOptimizer:
             # When net-negative, only consolidate from free/near-free sources
             exchange_set = active_exchanges if self._active_symbols else None
             fee_cap = 0.02 if not self._rotation_budget_ok else None
-            transfers = self._balance.consolidate_to_bitfinex(
+            transfers = self._balance.consolidate_to_custody_hub(
                 exchange_set, idle_threshold=1800.0,
                 active_seller_exchanges=exchange_set,
                 max_fee_per_source=fee_cap,

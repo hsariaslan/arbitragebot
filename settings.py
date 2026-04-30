@@ -52,6 +52,11 @@ from config import (
     DIVERSIFICATION_FLOOR_MULTIPLIER,
     AUTO_DISABLE_VOLUME_ENABLED,
     AUTO_DISABLE_VOLUME_THRESHOLD_USD,
+    CUSTODY_HUB_EXCHANGE,
+    CUSTODY_HUB_NETWORK,
+    TRADING_FLOAT_MULTIPLIER,
+    TRADING_FLOAT_REPLENISH_TRIGGER,
+    TRADING_FLOAT_OVERFLOW_MULTIPLIER,
     FUNDING_AWARE_SCORING_ENABLED,
     FUNDING_SKIP_THRESHOLD_4H_PCT,
     FUNDING_SKIP_THRESHOLD_8H_PCT,
@@ -128,6 +133,13 @@ DEFAULT_SETTINGS: dict = {
     "reallocation_cost_horizon": REALLOCATION_COST_HORIZON,
     "demotion_cooldown_multiplier": DEMOTION_COOLDOWN_MULTIPLIER,
     "hourly_external_transfer_cap": HOURLY_EXTERNAL_TRANSFER_CAP,
+    # v0.30+: capital architecture (Bybit custody / Bitfinex trading float)
+    "custody_hub_exchange": CUSTODY_HUB_EXCHANGE,
+    "custody_hub_network": CUSTODY_HUB_NETWORK,
+    "trading_float_multiplier": TRADING_FLOAT_MULTIPLIER,
+    "trading_float_replenish_trigger": TRADING_FLOAT_REPLENISH_TRIGGER,
+    "trading_float_overflow_multiplier": TRADING_FLOAT_OVERFLOW_MULTIPLIER,
+    # Deprecated (kept for migration; removed on first save in v0.30)
     "bitfinex_reserve_pct": BITFINEX_RESERVE_PCT,
     "bitfinex_reserve_hard_floor": BITFINEX_RESERVE_HARD_FLOOR,
     "net_pct_sizing_enabled": NET_PCT_SIZING_ENABLED,
@@ -183,6 +195,66 @@ DEFAULT_SETTINGS: dict = {
 }
 
 
+def _migrate_capital_architecture(settings: dict) -> dict:
+    """v0.30 migration: switch from `bitfinex_reserve_pct` (% of capital) to
+    `trading_float_multiplier` (× trade_amount).
+
+    Idempotent: only runs if old key is present. Logs the conversion once.
+    Safe to leave in place indefinitely — the function is a no-op once the
+    old key is cleared.
+    """
+    if "bitfinex_reserve_pct" not in settings:
+        return settings  # already migrated
+
+    old_pct = float(settings.pop("bitfinex_reserve_pct", BITFINEX_RESERVE_PCT))
+    capital = float(settings.get("total_capital", 1000.0))
+    trade_amount = float(settings.get("trade_amount_usd", 40.0))
+    if trade_amount <= 0:
+        trade_amount = 40.0
+
+    # Reverse-engineer multiplier from old reserve dollars
+    old_reserve_dollar = capital * old_pct
+    new_multiplier = old_reserve_dollar / trade_amount
+    new_multiplier = max(2.0, min(50.0, new_multiplier))
+
+    # Only override if user hasn't already explicitly set the new key
+    if "trading_float_multiplier" not in settings or settings.get(
+        "trading_float_multiplier"
+    ) == TRADING_FLOAT_MULTIPLIER:
+        settings["trading_float_multiplier"] = round(new_multiplier, 1)
+
+    # Drop other deprecated keys
+    settings.pop("bitfinex_reserve_hard_floor", None)
+    settings.pop("bitfinex_over_target_enabled", None)
+    if "bitfinex_over_target_multiplier" in settings:
+        # Rename — same semantics, new name
+        settings.setdefault(
+            "trading_float_overflow_multiplier",
+            settings.pop("bitfinex_over_target_multiplier"),
+        )
+    else:
+        settings.pop("bitfinex_over_target_multiplier", None)
+
+    # Ensure new keys exist with sane defaults
+    settings.setdefault("custody_hub_exchange", CUSTODY_HUB_EXCHANGE)
+    settings.setdefault("custody_hub_network", CUSTODY_HUB_NETWORK)
+    settings.setdefault(
+        "trading_float_replenish_trigger", TRADING_FLOAT_REPLENISH_TRIGGER
+    )
+    settings.setdefault(
+        "trading_float_overflow_multiplier", TRADING_FLOAT_OVERFLOW_MULTIPLIER
+    )
+
+    logger.warning(
+        f"[Migration] v0.30 capital architecture: "
+        f"bitfinex_reserve_pct={old_pct} (capital ${capital:.0f} × {old_pct} = ${old_reserve_dollar:.0f}) "
+        f"→ trading_float_multiplier={settings['trading_float_multiplier']} "
+        f"(× trade_amount ${trade_amount:.0f}). "
+        f"Custody hub = {settings['custody_hub_exchange']} via {settings['custody_hub_network']}."
+    )
+    return settings
+
+
 def load_settings() -> dict:
     """Load settings from JSON file, creating defaults if missing."""
     path = Path(SETTINGS_FILE)
@@ -224,6 +296,8 @@ def load_settings() -> dict:
                     if not isinstance(val, bool):
                         settings[key] = default
                         logger.warning(f"[Settings] Reset {key} to default (was {type(val).__name__})")
+            # v0.30 migration: bitfinex_reserve_pct → trading_float_multiplier
+            settings = _migrate_capital_architecture(settings)
             return settings
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"[Settings] Failed to load {SETTINGS_FILE}: {e}, using defaults")

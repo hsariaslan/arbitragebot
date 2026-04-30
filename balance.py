@@ -90,8 +90,13 @@ class BalanceTracker:
         fee_manager: "FeeManager | None" = None,
         transfer_fee_manager: "TransferFeeManager | None" = None,
         hourly_external_transfer_cap: float = 2.0,
-        bitfinex_reserve_pct: float = 0.15,
-        bitfinex_reserve_hard_floor: float = 0.05,
+        bitfinex_reserve_pct: float = 0.15,           # DEPRECATED — used only for migration of old state files
+        bitfinex_reserve_hard_floor: float = 0.05,    # DEPRECATED
+        custody_hub_exchange: str = "Bybit",
+        custody_hub_network: str = "Aptos",
+        trading_float_multiplier: float = 8.0,
+        trading_float_replenish_trigger: float = 3.0,
+        trading_float_overflow_multiplier: float = 1.5,
     ) -> None:
         self._fee_manager = fee_manager
         self._transfer_fee_mgr = transfer_fee_manager
@@ -159,11 +164,28 @@ class BalanceTracker:
         self._external_fee_log: deque[tuple[float, float]] = deque()  # (timestamp, fee_amount)
         self._hourly_external_transfer_cap: float = hourly_external_transfer_cap
 
-        # Bitfinex USDT reserve: keep a % of capital as emergency liquidity
+        # Capital architecture (v0.30+):
+        #   - Custody hub (default Bybit): bulk USDT lives here. Third-party PoR
+        #     audited, stress-tested. Replaces Bitfinex as parking location.
+        #   - Trading float (Bitfinex): small working balance for the 0%-taker
+        #     buy leg of the preferred Bitfinex+MEXC route. Sized by
+        #     trade_amount × multiplier — bounded in dollars regardless of
+        #     capital growth.
+        #   - Replenish: custody → Bitfinex via Aptos $0 when float < trigger.
+        #   - Overflow: Bitfinex → custody via Aptos $0 when float > target × overflow.
+        self._custody_hub_exchange: str = custody_hub_exchange
+        self._custody_hub_network: str = custody_hub_network
+        self._trading_float_multiplier: float = trading_float_multiplier
+        self._trading_float_replenish_trigger: float = trading_float_replenish_trigger
+        self._trading_float_overflow_multiplier: float = trading_float_overflow_multiplier
+        # `_bitfinex_reserve_target` field name kept for backward state-dict
+        # compatibility, but its semantics are now: dollar amount of USDT to
+        # keep on Bitfinex as a working trading float (= trade_amount × multiplier).
+        self._bitfinex_reserve_target: float = trade_amount * trading_float_multiplier
+        # Legacy fields kept only for state-dict round-trip compatibility
         self._bitfinex_reserve_pct: float = bitfinex_reserve_pct
-        self._bitfinex_reserve_target: float = self._initial_investment * bitfinex_reserve_pct
         self._bitfinex_reserve_hard_floor: float = bitfinex_reserve_hard_floor
-        self._bitfinex_reserve_hard_floor_amount: float = self._initial_investment * bitfinex_reserve_hard_floor
+        self._bitfinex_reserve_hard_floor_amount: float = 0.0  # No longer used; replaced by replenish trigger
 
         # Emergency draw log throttle (avoid 60+ identical messages)
         self._emergency_draw_log_time: float = 0.0
@@ -217,7 +239,7 @@ class BalanceTracker:
     def _available_usdt_for_rebalance(self, exchange: str) -> float:
         """USDT available for rebalance on an exchange, protecting Bitfinex reserve."""
         usdt = self.usdt.get(exchange, 0.0)
-        if exchange == "Bitfinex" and self._bitfinex_reserve_pct > 0:
+        if exchange == "Bitfinex" and self._bitfinex_reserve_target > 0:
             return max(0.0, usdt - self._bitfinex_reserve_target)
         return usdt
 
@@ -228,7 +250,7 @@ class BalanceTracker:
         this protects the reserve from being spent by normal trade execution.
         """
         usdt = self.usdt.get(exchange, 0.0)
-        if exchange == "Bitfinex" and self._bitfinex_reserve_pct > 0:
+        if exchange == "Bitfinex" and self._bitfinex_reserve_target > 0:
             return max(0.0, usdt - self._bitfinex_reserve_target)
         return usdt
 
@@ -286,10 +308,10 @@ class BalanceTracker:
         self._last_rebalance.clear()
         self._max_rebalance = self._trade_amount * 4
 
-        # Update Bitfinex reserve targets
-        self._bitfinex_reserve_target = self._initial_investment * self._bitfinex_reserve_pct
-        self._bitfinex_reserve_hard_floor_amount = (
-            self._initial_investment * self._bitfinex_reserve_hard_floor
+        # Recompute trading float target from the new trade_amount (v0.30+).
+        # Float = trade_amount × multiplier — bounded in dollars, not capital%.
+        self._bitfinex_reserve_target = (
+            self._trade_amount * self._trading_float_multiplier
         )
 
         # Preserve: transfers, total_transfer_fees, total_external_transfer_fees,
@@ -853,51 +875,50 @@ class BalanceTracker:
         )
         return None
 
-    # ── Bitfinex Reserve ─────────────────────────────────────────────────
+    # ── Capital Architecture (custody hub + trading float) ──────────────
 
-    def emergency_reserve_draw(
+    def is_custody_hub(self, exchange: str) -> bool:
+        """Whether this exchange is the configured bulk-USDT custody hub."""
+        return exchange == self._custody_hub_exchange
+
+    def is_trading_float(self, exchange: str) -> bool:
+        """Whether this exchange is the trading float (Bitfinex for the 0% leg)."""
+        return exchange == "Bitfinex"
+
+    def emergency_draw_from_custody(
         self, target_exchange: str, needed_amount: float
     ) -> list[Transfer]:
-        """Draw USDT from Bitfinex reserve to break a capital death spiral.
+        """Pull USDT from the custody hub to break a capital death spiral.
 
-        Bypasses all gates (net P&L, hourly cap, transfer worthiness).
-        Only called when normal rebalancing is blocked and trading is stalled.
+        v0.30+: this used to draw from Bitfinex's reserve. Now it draws from
+        the custody hub (default Bybit) — Bitfinex is the trading float and
+        shouldn't be tapped for emergencies. Bypasses gates (net P&L, hourly
+        cap, transfer worthiness). Routes via the configured custody-hub
+        network (default Aptos $0).
         """
-        if self._bitfinex_reserve_pct <= 0:
-            return []
-        if "Bitfinex" not in self._exchanges or target_exchange == "Bitfinex":
+        hub = self._custody_hub_exchange
+        if hub not in self._exchanges or target_exchange == hub:
             return []
 
-        bitfinex_usdt = self.usdt.get("Bitfinex", 0.0)
-        hard_floor = max(5.0, self._bitfinex_reserve_hard_floor_amount)
-        available = bitfinex_usdt - hard_floor
-        now_t = time.time()
-        if available <= 0:
+        hub_usdt = self.usdt.get(hub, 0.0)
+        if hub_usdt <= 0:
+            now_t = time.time()
             if now_t - self._emergency_draw_log_time >= 30.0:
                 logger.info(
-                    f"[Balance] Emergency draw blocked by hard floor: "
-                    f"Bitfinex=${bitfinex_usdt:.2f}, floor=${hard_floor:.2f}"
+                    f"[Capital] Emergency draw blocked: {hub}=${hub_usdt:.2f} (empty)"
                 )
                 self._emergency_draw_log_time = now_t
             return []
 
-        amount = min(needed_amount, available)
-        if amount < needed_amount:
-            if now_t - self._emergency_draw_log_time >= 30.0:
-                logger.info(
-                    f"[Balance] Emergency draw limited by hard floor: "
-                    f"requested=${needed_amount:.2f}, available=${amount:.2f} "
-                    f"(floor=${hard_floor:.2f})"
-                )
-                self._emergency_draw_log_time = now_t
+        amount = min(needed_amount, hub_usdt)
         if amount < self._trade_amount:
             return []  # Not enough for even one trade
 
-        # Withdrawal fee is $0 for Bitfinex (14/15 networks are free)
-        fee = self._get_withdrawal_fee("Bitfinex", amount)
+        # Withdrawal fee on the configured custody-hub network (Bybit→Aptos = $0)
+        fee = self._get_withdrawal_fee(hub, amount)
 
         now = time.time()
-        self.usdt["Bitfinex"] -= amount
+        self.usdt[hub] -= amount
         self.usdt[target_exchange] = self.usdt.get(target_exchange, 0.0) + (amount - fee)
         if fee > 0:
             self.total_transfer_fees += fee
@@ -906,8 +927,8 @@ class BalanceTracker:
 
         transfer = Transfer(
             timestamp=now,
-            transfer_type="reserve_draw",
-            from_exchange="Bitfinex",
+            transfer_type="custody_emergency_draw",
+            from_exchange=hub,
             to_exchange=target_exchange,
             symbol="USDT",
             amount_usd=amount,
@@ -915,147 +936,131 @@ class BalanceTracker:
         )
         self.transfers.append(transfer)
         logger.info(
-            f"[Balance] EMERGENCY reserve draw: Bitfinex→{target_exchange} "
-            f"${amount:.2f} (fee=${fee:.4f}, reserve_remaining="
-            f"${self.usdt.get('Bitfinex', 0.0):.2f})"
+            f"[Capital] EMERGENCY draw from custody: {hub}→{target_exchange} "
+            f"${amount:.2f} via {self._custody_hub_network} (fee=${fee:.4f}, "
+            f"custody now ${self.usdt.get(hub, 0.0):.2f})"
         )
         return [transfer]
 
-    def replenish_reserve(
+    # Backward-compat alias — old callers still use this name
+    emergency_reserve_draw = emergency_draw_from_custody
+
+    def replenish_trading_float(
         self,
         prices: dict[str, float] | None = None,
         max_fee_per_source: float | None = None,
     ) -> list[Transfer]:
-        """Top up Bitfinex USDT reserve from all exchanges, sorted by withdrawal fee.
+        """Top up Bitfinex trading float from the custody hub via Aptos $0.
 
-        Not gated by net profit — reserve replenishment is always beneficial.
-        Respects hourly cap and per-source cooldown.
+        v0.30+: replaces the old multi-source replenish logic. Single source
+        (custody hub), single network (default Aptos), single trigger
+        (`bitfinex_usdt < trade_amount × replenish_trigger`). Float target
+        is `trade_amount × trading_float_multiplier` — bounded by trade size,
+        not capital.
 
-        Args:
-            max_fee_per_source: If set, skip sources with fee above this amount.
-                Used when net-negative to avoid expensive replenishment.
+        max_fee_per_source is accepted for backward compat but largely
+        irrelevant when routing via Aptos $0.
         """
-        if self._bitfinex_reserve_pct <= 0:
-            return []
         if "Bitfinex" not in self._exchanges:
+            return []
+        hub = self._custody_hub_exchange
+        if hub == "Bitfinex" or hub not in self._exchanges:
             return []
 
         current = self.usdt.get("Bitfinex", 0.0)
-        if current >= self._bitfinex_reserve_target:
-            return []
+        target = self._bitfinex_reserve_target  # = trade_amount × multiplier
+        trigger = self._trade_amount * self._trading_float_replenish_trigger
+        if current >= trigger:
+            return []  # Float still healthy
 
-        deficit = self._bitfinex_reserve_target - current
-        min_replenish = max(20.0, self._trade_amount * 2)
+        deficit = target - current
+        min_replenish = max(10.0, self._trade_amount)
         if deficit < min_replenish:
-            return []  # Not worth replenishing small amounts
-
-        # Find all senders with surplus USDT, sorted by withdrawal fee (cheapest first)
-        buf = self._rebalance_buffer
-        candidates = []
-        for ex in self._exchanges:
-            if ex == "Bitfinex":
-                continue
-            avail = self.usdt.get(ex, 0.0) - buf
-            if avail < min_replenish:
-                continue
-            fee = self._get_withdrawal_fee(ex, min(deficit, avail))
-            candidates.append((ex, avail, fee))
-
-        if not candidates:
             return []
 
-        # Sort by fee (cheapest first)
-        candidates.sort(key=lambda x: x[2])
+        hub_avail = self.usdt.get(hub, 0.0) - self._rebalance_buffer
+        if hub_avail < min_replenish:
+            return []
 
+        amount = min(deficit, hub_avail)
+        fee = self._get_withdrawal_fee(hub, amount)
+
+        if max_fee_per_source is not None and fee > max_fee_per_source:
+            return []
+        if not self._check_hourly_transfer_budget(fee):
+            return []
+
+        # Cooldown to avoid micro-replenishes
         now = time.time()
-        reserve_cooldown = max(self._rebalance_cooldown, 600)
-        transfers = []
-        remaining_deficit = deficit
+        cooldown_key = f"trading_float_replenish:{hub}"
+        if now - self._last_rebalance.get(cooldown_key, 0) < max(self._rebalance_cooldown, 60):
+            return []
 
-        for sender, avail, fee in candidates:
-            if remaining_deficit < min_replenish:
-                break
+        self.usdt[hub] -= amount
+        self.usdt["Bitfinex"] += amount - fee
+        if fee > 0:
+            self.total_transfer_fees += fee
+            self.total_external_transfer_fees += fee
+            self._record_external_fee(fee)
+        self._last_rebalance[cooldown_key] = now
 
-            # Skip expensive sources when net-negative
-            if max_fee_per_source is not None and fee > max_fee_per_source:
-                continue
+        transfer = Transfer(
+            timestamp=now,
+            transfer_type="trading_float_replenish",
+            from_exchange=hub,
+            to_exchange="Bitfinex",
+            symbol="USDT",
+            amount_usd=amount,
+            fee_usd=fee,
+        )
+        self.transfers.append(transfer)
+        logger.info(
+            f"[Capital] Replenished trading float: {hub}→Bitfinex "
+            f"${amount:.2f} via {self._custody_hub_network} (fee=${fee:.4f}, "
+            f"float now ${self.usdt.get('Bitfinex', 0.0):.2f}/${target:.2f}, "
+            f"trigger=${trigger:.2f})"
+        )
+        return [transfer]
 
-            # Check cooldown (10 min per source to avoid fee churn)
-            cooldown_key = f"reserve_replenish:{sender}"
-            if now - self._last_rebalance.get(cooldown_key, 0) < reserve_cooldown:
-                continue
+    # Backward-compat alias
+    replenish_reserve = replenish_trading_float
 
-            # Check hourly budget
-            if not self._check_hourly_transfer_budget(fee):
-                continue
-
-            amount = min(remaining_deficit, avail)
-            self.usdt[sender] -= amount
-            self.usdt["Bitfinex"] += amount - fee
-            if fee > 0:
-                self.total_transfer_fees += fee
-                self.total_external_transfer_fees += fee
-                self._record_external_fee(fee)
-            self._last_rebalance[cooldown_key] = now
-
-            transfer = Transfer(
-                timestamp=now,
-                transfer_type="reserve_replenish",
-                from_exchange=sender,
-                to_exchange="Bitfinex",
-                symbol="USDT",
-                amount_usd=amount,
-                fee_usd=fee,
-            )
-            self.transfers.append(transfer)
-            transfers.append(transfer)
-            remaining_deficit -= amount
-            logger.info(
-                f"[Balance] Reserve replenish: {sender}→Bitfinex "
-                f"${amount:.2f} (fee=${fee:.4f}, reserve="
-                f"${self.usdt.get('Bitfinex', 0.0):.2f}/"
-                f"${self._bitfinex_reserve_target:.2f})"
-            )
-
-        return transfers
-
-    def consolidate_to_bitfinex(
+    def consolidate_to_custody_hub(
         self,
         active_buyer_exchanges: set[str] | None = None,
         idle_threshold: float = 600.0,
         active_seller_exchanges: set[str] | None = None,
         max_fee_per_source: float | None = None,
     ) -> list[Transfer]:
-        """Consolidate USDT from non-essential exchanges to Bitfinex hub.
+        """Consolidate USDT from non-essential exchanges to the custody hub.
 
-        Bitfinex has $0 withdrawal fees, making it the ideal capital hub.
-        Capital on Bitfinex can be redistributed to any exchange for free.
+        v0.30+: previously consolidated to Bitfinex (the trading float).
+        Now flows to the configured custody hub (default Bybit) which has
+        third-party PoR audit and is the bulk-USDT parking layer.
 
-        Active buyer/seller exchanges that have been idle (no trades) for longer
-        than idle_threshold are treated as non-essential and consolidated too.
+        The trading float on Bitfinex itself is excluded as a source —
+        excess Bitfinex USDT flows back to custody via the separate
+        overflow path in optimizer (`_consolidate_trading_float_overflow`).
 
-        When net-negative, callers pass max_fee_per_source=0.02 to limit
-        consolidation to free/near-free sources and avoid deepening deficit.
-        Respects hourly budget cap and per-source cooldown.
+        Active buyer/seller exchanges idle for longer than idle_threshold
+        are treated as non-essential and consolidated too. When net-negative,
+        callers pass max_fee_per_source=0.02 to limit consolidation to
+        free/near-free sources.
 
         Args:
             active_buyer_exchanges: Exchanges still needed as buyers.
                 Keep trade_amount×3 buffer on recently-active ones.
                 None = consolidate everything.
             idle_threshold: Seconds since last trade before an active exchange
-                is considered idle and its capital consolidated. Default 600s (10 min).
+                is considered idle. Default 600s (10 min).
             active_seller_exchanges: Exchanges still needed as sellers.
-                Keep trade_amount×3 buffer on recently-active ones so USDT
-                accumulated from sells isn't immediately pulled back to Bitfinex
-                (which would cause expensive crypto rebalance cycles).
+                Keep trade_amount×3 buffer on recently-active ones.
                 None = no seller protection.
-            max_fee_per_source: If set, skip sources with withdrawal fee above
-                this amount. Used during discovery to avoid expensive consolidation
-                when the next symbol's exchanges are unknown.
+            max_fee_per_source: Skip sources with withdrawal fee above this
+                amount.
         """
-        if self._bitfinex_reserve_pct <= 0:
-            return []
-        if "Bitfinex" not in self._exchanges:
+        hub = self._custody_hub_exchange
+        if hub not in self._exchanges:
             return []
 
         now = time.time()
@@ -1063,9 +1068,10 @@ class BalanceTracker:
         min_transfer = max(20.0, self._trade_amount * 2)
         transfers = []
 
-        # Sort non-Bitfinex exchanges by withdrawal fee (cheapest first)
+        # Sort non-hub, non-trading-float exchanges by withdrawal fee
+        # (Bitfinex excluded — its overflow has a separate dedicated path)
         sources = sorted(
-            (ex for ex in self._exchanges if ex != "Bitfinex"),
+            (ex for ex in self._exchanges if ex != hub and ex != "Bitfinex"),
             key=lambda ex: self._get_withdrawal_fee(ex),
         )
 
@@ -1075,40 +1081,31 @@ class BalanceTracker:
             is_active_buyer = active_buyer_exchanges and ex in active_buyer_exchanges
             is_active_seller = active_seller_exchanges and ex in active_seller_exchanges
             if is_active_buyer or is_active_seller:
-                # Check if this active exchange is actually idle
                 last_trade = self.last_trade_time.get(ex, 0.0)
                 idle_seconds = now - last_trade if last_trade > 0 else float("inf")
                 if idle_seconds < idle_threshold:
-                    # Recently active — keep buffer for upcoming trades
                     keep = self._trade_amount * 3
                 else:
-                    # Active but idle for too long — consolidate
                     keep = 0.0
             else:
-                # Not an active exchange — transfer everything
                 keep = 0.0
             available = usdt - keep
             if available < min_transfer:
                 continue
 
-            # Check cooldown
-            cooldown_key = f"{ex}:consolidate"
+            cooldown_key = f"{ex}:custody_consolidate"
             if now - self._last_rebalance.get(cooldown_key, 0) < consolidation_cooldown:
                 continue
 
             fee = self._get_withdrawal_fee(ex, available)
 
-            # Skip expensive sources during discovery
             if max_fee_per_source is not None and fee > max_fee_per_source:
                 continue
-
-            # Check hourly budget
             if not self._check_hourly_transfer_budget(fee):
                 continue
 
-            # Execute consolidation
             self.usdt[ex] -= available
-            self.usdt["Bitfinex"] += available - fee
+            self.usdt[hub] += available - fee
             if fee > 0:
                 self.total_transfer_fees += fee
                 self.total_external_transfer_fees += fee
@@ -1117,9 +1114,9 @@ class BalanceTracker:
 
             transfer = Transfer(
                 timestamp=now,
-                transfer_type="hub_consolidation",
+                transfer_type="custody_consolidation",
                 from_exchange=ex,
-                to_exchange="Bitfinex",
+                to_exchange=hub,
                 symbol="USDT",
                 amount_usd=available,
                 fee_usd=fee,
@@ -1127,11 +1124,108 @@ class BalanceTracker:
             self.transfers.append(transfer)
             transfers.append(transfer)
             logger.info(
-                f"[Balance] Hub consolidation: {ex}→Bitfinex "
-                f"${available:.2f} (fee=${fee:.4f})"
+                f"[Capital] Custody consolidation: {ex}→{hub} "
+                f"${available:.2f} via {self._custody_hub_network} (fee=${fee:.4f})"
             )
 
         return transfers
+
+    # Backward-compat alias
+    consolidate_to_bitfinex = consolidate_to_custody_hub
+
+    def transfer_excess_to_custody(self, amount: float) -> Transfer | None:
+        """Move excess Bitfinex trading-float USDT back to the custody hub.
+
+        Called by optimizer's `_consolidate_trading_float_overflow` when
+        Bitfinex USDT > target × overflow_multiplier. Routes via configured
+        custody-hub network ($0 on Aptos for Bybit).
+        """
+        hub = self._custody_hub_exchange
+        if hub == "Bitfinex" or hub not in self._exchanges:
+            return None
+        if amount < max(10.0, self._trade_amount):
+            return None
+
+        bitfinex_usdt = self.usdt.get("Bitfinex", 0.0)
+        if amount > bitfinex_usdt:
+            amount = bitfinex_usdt
+        if amount <= 0:
+            return None
+
+        fee = self._get_withdrawal_fee("Bitfinex", amount)
+        if not self._check_hourly_transfer_budget(fee):
+            return None
+
+        now = time.time()
+        self.usdt["Bitfinex"] -= amount
+        self.usdt[hub] = self.usdt.get(hub, 0.0) + (amount - fee)
+        if fee > 0:
+            self.total_transfer_fees += fee
+            self.total_external_transfer_fees += fee
+            self._record_external_fee(fee)
+
+        transfer = Transfer(
+            timestamp=now,
+            transfer_type="trading_float_overflow",
+            from_exchange="Bitfinex",
+            to_exchange=hub,
+            symbol="USDT",
+            amount_usd=amount,
+            fee_usd=fee,
+        )
+        self.transfers.append(transfer)
+        logger.info(
+            f"[Capital] Trading float overflow: Bitfinex→{hub} "
+            f"${amount:.2f} via {self._custody_hub_network} (fee=${fee:.4f})"
+        )
+        return transfer
+
+    def transfer_to_custody_hub(self, source_exchange: str, amount: float) -> Transfer | None:
+        """Sweep USDT from any source exchange to the custody hub.
+
+        Used by demotion/idle-consolidation flows: after crypto sells via
+        Bitfinex at 0% taker, the resulting USDT is swept to the custody hub
+        via the configured network ($0 on Aptos).
+        """
+        hub = self._custody_hub_exchange
+        if source_exchange == hub or hub not in self._exchanges:
+            return None
+        if amount < max(10.0, self._trade_amount):
+            return None
+
+        avail = self.usdt.get(source_exchange, 0.0)
+        if amount > avail:
+            amount = avail
+        if amount <= 0:
+            return None
+
+        fee = self._get_withdrawal_fee(source_exchange, amount)
+        if not self._check_hourly_transfer_budget(fee):
+            return None
+
+        now = time.time()
+        self.usdt[source_exchange] -= amount
+        self.usdt[hub] = self.usdt.get(hub, 0.0) + (amount - fee)
+        if fee > 0:
+            self.total_transfer_fees += fee
+            self.total_external_transfer_fees += fee
+            self._record_external_fee(fee)
+
+        transfer = Transfer(
+            timestamp=now,
+            transfer_type="custody_sweep",
+            from_exchange=source_exchange,
+            to_exchange=hub,
+            symbol="USDT",
+            amount_usd=amount,
+            fee_usd=fee,
+        )
+        self.transfers.append(transfer)
+        logger.info(
+            f"[Capital] Custody sweep: {source_exchange}→{hub} "
+            f"${amount:.2f} via {self._custody_hub_network} (fee=${fee:.4f})"
+        )
+        return transfer
 
     def sell_crypto_via_bitfinex(
         self,
@@ -1193,39 +1287,38 @@ class BalanceTracker:
         )
         return transfer
 
-    def emergency_consolidate_to_bitfinex(self) -> list[Transfer]:
-        """Emergency consolidation — moves all non-Bitfinex USDT to Bitfinex.
+    def emergency_consolidate_to_custody_hub(self) -> list[Transfer]:
+        """Emergency consolidation — moves all USDT to the custody hub.
 
-        Walks every exchange except Bitfinex sorted by withdrawal fee
-        (cheapest first), transferring the full USDT balance regardless of
-        cooldowns or hourly budget caps. Used after `_emergency_sell_all`
-        when anomaly protection has paused trading and operator needs the
-        capital safe on the Bitfinex hub.
+        v0.30+: previously sent to Bitfinex. Now sends to the configured
+        custody hub (default Bybit) which has third-party PoR audit and is
+        the safer parking destination after an anomaly emergency. Walks
+        every other exchange (including Bitfinex's trading float) sorted
+        by withdrawal fee (cheapest first), transferring full USDT balances
+        regardless of cooldowns or hourly budget caps. Used after
+        `_emergency_sell_all` when anomaly protection has paused trading.
 
-        Returns the list of Transfer records executed (also appended to
-        self.transfers and counted in total_external_transfer_fees).
+        Returns the list of Transfer records executed.
         """
-        if "Bitfinex" not in self._exchanges:
+        hub = self._custody_hub_exchange
+        if hub not in self._exchanges:
             return []
 
         transfers: list[Transfer] = []
         now = time.time()
-        # Sort non-Bitfinex exchanges by withdrawal fee (cheapest first)
         sources = sorted(
-            (ex for ex in self._exchanges if ex != "Bitfinex"),
+            (ex for ex in self._exchanges if ex != hub),
             key=lambda ex: self._get_withdrawal_fee(ex),
         )
         for ex in sources:
             usdt = self.usdt.get(ex, 0.0)
-            # Skip dust (smaller than withdrawal fee or $1, whichever is larger)
             fee = self._get_withdrawal_fee(ex, usdt)
             min_amount = max(1.0, fee * 1.5)
             if usdt < min_amount:
                 continue
-            # Move everything (fee paid from source side — net arrives on Bitfinex)
             self.usdt[ex] -= usdt
             net = max(0.0, usdt - fee)
-            self.usdt["Bitfinex"] += net
+            self.usdt[hub] += net
             self.total_transfer_fees += fee
             self.total_external_transfer_fees += fee
             self._record_external_fee(fee)
@@ -1233,7 +1326,7 @@ class BalanceTracker:
                 timestamp=now,
                 transfer_type="emergency_consolidate",
                 from_exchange=ex,
-                to_exchange="Bitfinex",
+                to_exchange=hub,
                 symbol="USDT",
                 amount_usd=usdt,
                 fee_usd=fee,
@@ -1241,10 +1334,13 @@ class BalanceTracker:
             self.transfers.append(transfer)
             transfers.append(transfer)
             logger.warning(
-                f"[Anomaly] EMERGENCY_CONSOLIDATE {ex}→Bitfinex: "
+                f"[Anomaly] EMERGENCY_CONSOLIDATE {ex}→{hub}: "
                 f"${usdt:.2f} (fee=${fee:.4f}, net=${net:.2f})"
             )
         return transfers
+
+    # Backward-compat alias
+    emergency_consolidate_to_bitfinex = emergency_consolidate_to_custody_hub
 
     def force_sell_crypto_via_bitfinex(
         self,
@@ -1596,7 +1692,12 @@ class BalanceTracker:
             "_in_transit": [asdict(f) for f in self._in_transit],
             "_execution_mode": self._execution_mode,
             "_external_fee_log": list(self._external_fee_log),
-            "_bitfinex_reserve_hard_floor": self._bitfinex_reserve_hard_floor,
+            "_bitfinex_reserve_hard_floor": self._bitfinex_reserve_hard_floor,  # legacy
+            "_custody_hub_exchange": self._custody_hub_exchange,
+            "_custody_hub_network": self._custody_hub_network,
+            "_trading_float_multiplier": self._trading_float_multiplier,
+            "_trading_float_replenish_trigger": self._trading_float_replenish_trigger,
+            "_trading_float_overflow_multiplier": self._trading_float_overflow_multiplier,
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -1641,6 +1742,22 @@ class BalanceTracker:
         )
         if "_bitfinex_reserve_hard_floor" in data:
             self._bitfinex_reserve_hard_floor = data["_bitfinex_reserve_hard_floor"]
-            self._bitfinex_reserve_hard_floor_amount = (
-                self._initial_investment * self._bitfinex_reserve_hard_floor
+            self._bitfinex_reserve_hard_floor_amount = 0.0  # No longer used in v0.30
+        # v0.30 capital architecture state
+        if "_custody_hub_exchange" in data:
+            self._custody_hub_exchange = data["_custody_hub_exchange"]
+        if "_custody_hub_network" in data:
+            self._custody_hub_network = data["_custody_hub_network"]
+        if "_trading_float_multiplier" in data:
+            self._trading_float_multiplier = float(data["_trading_float_multiplier"])
+            self._bitfinex_reserve_target = (
+                self._trade_amount * self._trading_float_multiplier
+            )
+        if "_trading_float_replenish_trigger" in data:
+            self._trading_float_replenish_trigger = float(
+                data["_trading_float_replenish_trigger"]
+            )
+        if "_trading_float_overflow_multiplier" in data:
+            self._trading_float_overflow_multiplier = float(
+                data["_trading_float_overflow_multiplier"]
             )

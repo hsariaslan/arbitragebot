@@ -383,9 +383,10 @@ class ArbitrageMonitor:
             f"total=${total_sold:.2f}"
         )
 
-        # Emergency consolidation: move all USDT to Bitfinex hub for safety.
-        # Cheapest withdrawal route per exchange (function sorts by fee).
-        consolidation_transfers = self._balance.emergency_consolidate_to_bitfinex()
+        # Emergency consolidation: move all USDT to the custody hub (Bybit by
+        # default) for safety. Cheapest withdrawal route per exchange (function
+        # sorts by fee).
+        consolidation_transfers = self._balance.emergency_consolidate_to_custody_hub()
         consolidation_summary = {
             "transfers": [
                 {
@@ -1792,14 +1793,15 @@ class ArbitrageMonitor:
                                             f"streak={streak}: {rebal_reason}"
                                         )
 
-                                    # Emergency Bitfinex reserve draw when net_pnl_gate blocks
+                                    # Emergency draw from custody hub when net_pnl_gate blocks
+                                    # (v0.30+: was Bitfinex reserve, now Bybit custody)
                                     miss_thresh = self._get_miss_threshold(buy_ex, sell_ex)
                                     if (
                                         rebal_reason.startswith("net_pnl_gate")
                                         and streak >= miss_thresh * 2
                                         and self._balance
                                     ):
-                                        reserve_transfers = self._balance.emergency_reserve_draw(
+                                        reserve_transfers = self._balance.emergency_draw_from_custody(
                                             buy_ex, self._trade_amount * 3
                                         )
                                         if reserve_transfers:

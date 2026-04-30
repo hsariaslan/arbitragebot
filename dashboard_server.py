@@ -1004,6 +1004,13 @@ class DashboardServer:
         "reallocation_cost_horizon": (float, 0.5, 24.0),
         "demotion_cooldown_multiplier": (float, 1.0, 20.0),
         "hourly_external_transfer_cap": (float, 0, 100.0),
+        # v0.30+: capital architecture
+        "custody_hub_exchange": (str, None, None),
+        "custody_hub_network": (str, None, None),
+        "trading_float_multiplier": (float, 2.0, 50.0),
+        "trading_float_replenish_trigger": (float, 0.5, 50.0),
+        "trading_float_overflow_multiplier": (float, 1.1, 5.0),
+        # Deprecated v0.30 (kept for backward-compat — operator can ignore)
         "bitfinex_reserve_pct": (float, 0.0, 0.5),
         "bitfinex_reserve_hard_floor": (float, 0.0, 0.20),
         "net_pct_sizing_enabled": (bool, None, None),
@@ -1419,14 +1426,16 @@ class DashboardServer:
                 self._distribute_enabled = True
             await ws.send(json.dumps({"type": "hard_stop_result", **result}))
 
-        elif msg_type == "distribute_from_bitfinex":
+        elif msg_type in ("distribute_from_custody_hub", "distribute_from_bitfinex"):
+            # v0.30+: accepts new message type, keeps old one as alias for
+            # forward compatibility with cached frontends after deploy
             if not self._distribute_enabled:
                 await ws.send(json.dumps({
                     "type": "distribute_error",
                     "error": "Distribution not enabled",
                 }))
                 return
-            result = self._distribute_from_bitfinex()
+            result = self._distribute_from_custody_hub()
             self._distribute_enabled = False
             await ws.send(json.dumps({"type": "distribute_result", **result}))
 
@@ -2315,15 +2324,25 @@ class DashboardServer:
             self._optimizer._demotion_cooldown = self._optimizer._demotion_period * self._optimizer._demotion_cooldown_multiplier
         if "hourly_external_transfer_cap" in settings:
             self._balance._hourly_external_transfer_cap = float(settings["hourly_external_transfer_cap"])
-        if "bitfinex_reserve_pct" in settings:
-            self._balance._bitfinex_reserve_pct = float(settings["bitfinex_reserve_pct"])
+        # v0.30+: capital architecture (custody hub + trading float)
+        if "custody_hub_exchange" in settings:
+            self._balance._custody_hub_exchange = str(settings["custody_hub_exchange"])
+        if "custody_hub_network" in settings:
+            self._balance._custody_hub_network = str(settings["custody_hub_network"])
+        if "trading_float_multiplier" in settings:
+            self._balance._trading_float_multiplier = float(settings["trading_float_multiplier"])
+            # Recompute the float target — bounded by trade size, not capital
             self._balance._bitfinex_reserve_target = (
-                self._balance._initial_investment * self._balance._bitfinex_reserve_pct
+                self._balance._trade_amount
+                * self._balance._trading_float_multiplier
             )
-        if "bitfinex_reserve_hard_floor" in settings:
-            self._balance._bitfinex_reserve_hard_floor = float(settings["bitfinex_reserve_hard_floor"])
-            self._balance._bitfinex_reserve_hard_floor_amount = (
-                self._balance._initial_investment * self._balance._bitfinex_reserve_hard_floor
+        if "trading_float_replenish_trigger" in settings:
+            self._balance._trading_float_replenish_trigger = float(
+                settings["trading_float_replenish_trigger"]
+            )
+        if "trading_float_overflow_multiplier" in settings:
+            self._balance._trading_float_overflow_multiplier = float(
+                settings["trading_float_overflow_multiplier"]
             )
 
         # Simulation realism features
@@ -2484,24 +2503,43 @@ class DashboardServer:
                     f"[Settings] SYNC FAILED: hourly_cap set to ${new_val:.2f} "
                     f"but reads back as ${actual:.2f}"
                 )
-        if "bitfinex_reserve_pct" in settings:
-            old_val = self._balance._bitfinex_reserve_pct
-            new_val = float(settings["bitfinex_reserve_pct"])
-            self._balance._bitfinex_reserve_pct = new_val
+        # v0.30+: capital architecture
+        if "custody_hub_exchange" in settings:
+            old_val = self._balance._custody_hub_exchange
+            new_val = str(settings["custody_hub_exchange"])
+            self._balance._custody_hub_exchange = new_val
+            if old_val != new_val:
+                synced.append(f"custody_hub: {old_val} -> {new_val}")
+        if "custody_hub_network" in settings:
+            old_val = self._balance._custody_hub_network
+            new_val = str(settings["custody_hub_network"])
+            self._balance._custody_hub_network = new_val
+            if old_val != new_val:
+                synced.append(f"custody_network: {old_val} -> {new_val}")
+        if "trading_float_multiplier" in settings:
+            old_val = self._balance._trading_float_multiplier
+            new_val = float(settings["trading_float_multiplier"])
+            self._balance._trading_float_multiplier = new_val
             self._balance._bitfinex_reserve_target = (
-                self._balance._initial_investment * new_val
+                self._balance._trade_amount * new_val
             )
             if old_val != new_val:
-                synced.append(f"bfx_reserve: {old_val*100:.1f}% -> {new_val*100:.1f}%")
-        if "bitfinex_reserve_hard_floor" in settings:
-            old_val = self._balance._bitfinex_reserve_hard_floor
-            new_val = float(settings["bitfinex_reserve_hard_floor"])
-            self._balance._bitfinex_reserve_hard_floor = new_val
-            self._balance._bitfinex_reserve_hard_floor_amount = (
-                self._balance._initial_investment * new_val
-            )
+                synced.append(
+                    f"trading_float_mult: {old_val:.1f}x -> {new_val:.1f}x "
+                    f"(target=${self._balance._bitfinex_reserve_target:.0f})"
+                )
+        if "trading_float_replenish_trigger" in settings:
+            old_val = self._balance._trading_float_replenish_trigger
+            new_val = float(settings["trading_float_replenish_trigger"])
+            self._balance._trading_float_replenish_trigger = new_val
             if old_val != new_val:
-                synced.append(f"bfx_floor: {old_val*100:.1f}% -> {new_val*100:.1f}%")
+                synced.append(f"replenish_trigger: {old_val:.1f}x -> {new_val:.1f}x")
+        if "trading_float_overflow_multiplier" in settings:
+            old_val = self._balance._trading_float_overflow_multiplier
+            new_val = float(settings["trading_float_overflow_multiplier"])
+            self._balance._trading_float_overflow_multiplier = new_val
+            if old_val != new_val:
+                synced.append(f"overflow_mult: {old_val:.2f}x -> {new_val:.2f}x")
         if "rebalance_cooldown" in settings:
             old_val = self._balance._rebalance_cooldown
             new_val = int(settings["rebalance_cooldown"])
@@ -2636,7 +2674,9 @@ class DashboardServer:
         # Always log critical runtime values for debugging
         logger.info(
             f"[Settings] Verified: hourly_cap=${self._balance._hourly_external_transfer_cap:.2f}, "
-            f"bfx_reserve={self._balance._bitfinex_reserve_pct*100:.1f}%, "
+            f"custody={self._balance._custody_hub_exchange}, "
+            f"trading_float=${self._balance._bitfinex_reserve_target:.0f} "
+            f"({self._balance._trading_float_multiplier:.1f}x), "
             f"rebal_cooldown={self._balance._rebalance_cooldown}s, "
             f"min_net_pct={self._monitor._min_net_profit_pct:.4f}"
         )
@@ -2775,14 +2815,24 @@ class DashboardServer:
             "hedge_close_scheduled": hedge_close_scheduled,
         }
 
-    def _distribute_from_bitfinex(self) -> dict:
-        """Distribute USDT from Bitfinex to other exchanges. Operator action."""
-        if not self._balance or "Bitfinex" not in (self._balance._exchanges or []):
+    def _distribute_from_custody_hub(self) -> dict:
+        """Distribute USDT from the custody hub to other active exchanges.
+
+        v0.30+: was `_distribute_from_bitfinex`. Source is now the configured
+        custody hub (default Bybit), routed via the configured custody-hub
+        network (default Aptos $0). Used by the Danger Zone "Distribute USDT
+        from {custody_hub}" operator button.
+        """
+        if not self._balance:
+            return {"available": 0, "transfers": [], "strategy": "none"}
+        hub = self._balance._custody_hub_exchange
+        if hub not in (self._balance._exchanges or []):
             return {"available": 0, "transfers": [], "strategy": "none"}
 
-        bitfinex_usdt = self._balance.usdt.get("Bitfinex", 0.0)
-        reserve = getattr(self._balance, "_bitfinex_reserve_target", 0.0)
-        available = max(0, bitfinex_usdt - reserve)
+        hub_usdt = self._balance.usdt.get(hub, 0.0)
+        # Keep a small buffer on the hub (5% as a safety margin)
+        reserve = hub_usdt * 0.05
+        available = max(0, hub_usdt - reserve)
         if available < 10:
             return {"available": round(available, 2), "transfers": [], "strategy": "insufficient"}
 
@@ -2791,7 +2841,7 @@ class DashboardServer:
             self._fee_manager.get_enabled_exchanges()
             if self._fee_manager else set(self._balance._exchanges or [])
         )
-        targets = [ex for ex in enabled_exchanges if ex != "Bitfinex"]
+        targets = [ex for ex in enabled_exchanges if ex != hub]
         if not targets:
             return {"available": round(available, 2), "transfers": [], "strategy": "no_targets"}
 
@@ -2840,24 +2890,34 @@ class DashboardServer:
         for ex, amount in allocations.items():
             if amount < 1:
                 continue
-            self._balance.usdt["Bitfinex"] -= amount
-            self._balance.usdt[ex] = self._balance.usdt.get(ex, 0.0) + amount
+            fee = self._balance._get_withdrawal_fee(hub, amount)
+            self._balance.usdt[hub] -= amount
+            self._balance.usdt[ex] = self._balance.usdt.get(ex, 0.0) + (amount - fee)
+            if fee > 0:
+                self._balance.total_transfer_fees += fee
+                self._balance.total_external_transfer_fees += fee
+                self._balance._record_external_fee(fee)
             transfers.append({"exchange": ex, "amount": round(amount, 2)})
             logger.info(
-                f"[Monitor] DISTRIBUTE Bitfinex→{ex}: ${amount:.2f} (free)"
+                f"[Capital] DISTRIBUTE {hub}→{ex}: ${amount:.2f} via "
+                f"{self._balance._custody_hub_network} (fee=${fee:.4f})"
             )
 
         total_distributed = sum(t["amount"] for t in transfers)
         logger.info(
-            f"[Monitor] DISTRIBUTE_COMPLETE: ${total_distributed:.2f} to "
-            f"{len(transfers)} exchanges ({strategy})"
+            f"[Capital] DISTRIBUTE_COMPLETE: ${total_distributed:.2f} from "
+            f"{hub} to {len(transfers)} exchanges ({strategy})"
         )
         return {
             "available": round(available, 2),
             "distributed": round(total_distributed, 2),
             "transfers": transfers,
             "strategy": strategy,
+            "source_exchange": hub,
         }
+
+    # Backward-compat alias
+    _distribute_from_bitfinex = _distribute_from_custody_hub
 
     def _log_all_settings(self, reason: str, old_settings: dict | None = None) -> None:
         """Log comprehensive settings snapshot. Called at session start and on change."""
@@ -2923,9 +2983,14 @@ class DashboardServer:
         sls_t = s.get("symbol_loss_streak_threshold", 4)
         sls_c = s.get("symbol_loss_streak_cooldown", 300)
 
-        # Bitfinex reserve
-        bfx_pct = s.get("bitfinex_reserve_pct", 0.15)
-        bfx_floor = s.get("bitfinex_reserve_hard_floor", 0.05)
+        # v0.30+: capital architecture
+        custody_hub = s.get("custody_hub_exchange", "Bybit")
+        custody_net = s.get("custody_hub_network", "Aptos")
+        tf_mult = float(s.get("trading_float_multiplier", 8.0))
+        tf_trigger = float(s.get("trading_float_replenish_trigger", 3.0))
+        tf_overflow = float(s.get("trading_float_overflow_multiplier", 1.5))
+        trade_amt_for_log = float(s.get("trade_amount_usd", 40.0))
+        tf_target_dollar = trade_amt_for_log * tf_mult
 
         lines = [
             f"trade_amount={ta_str}",
@@ -2940,11 +3005,12 @@ class DashboardServer:
             f"stability: factor={s.get('score_stability_factor', 0.5)}, min_seconds={s.get('score_stability_seconds', 120)}s",
             f"anomaly: enabled={ano_enabled}, cb_window={cb_w}s, cb_threshold=${cb_t:.2f}, cb_cooldown={cb_c}s",
             f"anomaly: dd_threshold={dd_t:.1f}%, dd_emergency={dd_e:.1f}x, streak_threshold={sls_t}, streak_cooldown={sls_c}s",
-            f"bitfinex_reserve={bfx_pct * 100:.1f}% (${capital * bfx_pct:.0f}), hard_floor={bfx_floor * 100:.1f}% (${capital * bfx_floor:.0f})",
+            f"capital_hub: custody={custody_hub} via {custody_net}, "
+            f"trading_float=Bitfinex (target=${tf_target_dollar:.0f} = trade_amount ${trade_amt_for_log:.0f} × {tf_mult:.1f}x, "
+            f"replenish_trigger={tf_trigger:.1f}x, overflow={tf_overflow:.2f}x)",
             f"hourly_transfer_cap=${s.get('hourly_external_transfer_cap', 2.0):.2f}",
             f"momentum_filter: enabled={s.get('momentum_filter_enabled', True)}, lookback={s.get('momentum_lookback_hours', 24.0)}h, sample_interval={s.get('momentum_sample_interval_minutes', 60.0)}min, factor=[{s.get('momentum_min_factor', 0.3)}, {s.get('momentum_max_factor', 1.5)}]",
             f"inventory_rebalance: enabled={s.get('inventory_rebalance_enabled', True)}, interval={s.get('inventory_rebalance_interval_hours', 6.0)}h, drift_threshold={s.get('inventory_drift_threshold', 0.3)*100:.0f}%",
-            f"bfx_over_target: enabled={s.get('bitfinex_over_target_enabled', True)}, multiplier={s.get('bitfinex_over_target_multiplier', 1.5)}x",
             f"auto_expand_on_understaff={s.get('auto_expand_on_understaff', True)}",
             f"diversification_floor: enabled={s.get('diversification_floor_enabled', True)}, "
             f"multiplier={s.get('diversification_floor_multiplier', 0.7)}x (relaxes activation threshold when understaffed)",
@@ -2983,7 +3049,10 @@ class DashboardServer:
                 "circuit_breaker_window", "circuit_breaker_threshold",
                 "circuit_breaker_cooldown", "drawdown_threshold_pct",
                 "drawdown_emergency_mult", "symbol_loss_streak_threshold",
-                "symbol_loss_streak_cooldown", "bitfinex_reserve_pct",
+                "symbol_loss_streak_cooldown",
+                "custody_hub_exchange", "custody_hub_network",
+                "trading_float_multiplier", "trading_float_replenish_trigger",
+                "trading_float_overflow_multiplier",
                 "hourly_external_transfer_cap", "execution_mode",
                 "net_pct_sizing_enabled", "net_pct_multiplier_cap",
                 "fee_threshold_multiplier",
@@ -3329,6 +3398,8 @@ class DashboardServer:
             "manual_stopped": self._monitor._manual_stopped,
             "manual_stop_timestamp": self._monitor._manual_stop_timestamp,
             "distribute_enabled": self._distribute_enabled,
+            "custody_hub_exchange": self._balance._custody_hub_exchange if self._balance else "Bybit",
+            "custody_hub_network": self._balance._custody_hub_network if self._balance else "Aptos",
             **(self._monitor._anomaly.to_broadcast_dict()),
             "all_exchanges": ALL_EXCHANGES,
             "all_symbols": SYMBOLS,

@@ -338,8 +338,20 @@ REBALANCE_ROI_DIVISOR: int = 3           # ROI threshold = fee_rate / divisor (h
 REALLOCATION_COST_HORIZON: float = 2.0    # Hours of profit to justify reallocation cost
 DEMOTION_COOLDOWN_MULTIPLIER: float = 5.0 # Cooldown after demotion = period × multiplier
 HOURLY_EXTERNAL_TRANSFER_CAP: float = 2.0 # Max external withdrawal fees per hour ($), 0=disabled
-BITFINEX_RESERVE_PCT: float = 0.15        # Keep 15% of capital as USDT on Bitfinex (free withdrawals)
-BITFINEX_RESERVE_HARD_FLOOR: float = 0.05 # Never drain below 5% in emergency draws
+BITFINEX_RESERVE_PCT: float = 0.15        # DEPRECATED v0.30 — use TRADING_FLOAT_MULTIPLIER instead. Kept for migration only.
+BITFINEX_RESERVE_HARD_FLOOR: float = 0.05 # DEPRECATED v0.30 — use TRADING_FLOAT_REPLENISH_TRIGGER instead.
+
+# Capital architecture (v0.30.0-beta)
+# - Bybit holds bulk USDT custody (third-party PoR audited, $1.5B stress-tested)
+# - Bitfinex holds a small "trading float" sized by trade_amount, not by capital
+# - Replenish: Bybit → Bitfinex via Aptos $0 when float < replenish_trigger × trade_amount
+# - Overflow: Bitfinex → Bybit via Aptos $0 when float > target × overflow_multiplier
+# This keeps Bitfinex exposure bounded in dollars regardless of capital growth.
+CUSTODY_HUB_EXCHANGE: str = "Bybit"        # Where bulk idle USDT lives
+CUSTODY_HUB_NETWORK: str = "Aptos"         # Free-withdrawal network for replenishment
+TRADING_FLOAT_MULTIPLIER: float = 8.0      # Bitfinex float target = trade_amount × this (operator-tunable)
+TRADING_FLOAT_REPLENISH_TRIGGER: float = 3.0  # Replenish when float < trade_amount × this
+TRADING_FLOAT_OVERFLOW_MULTIPLIER: float = 1.5  # Overflow→custody when float > target × this
 
 # Simulation realism (configurable via settings page)
 SPREAD_PERSISTENCE_TICKS: int = 1           # Consecutive ticks spread must persist before executing (0=instant)
