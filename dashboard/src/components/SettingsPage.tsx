@@ -866,7 +866,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Boost-Aware Activation Gate</h2>
         <p className="text-xs text-slate-500 mb-3">
-          With Bitfinex.buyer_boost and MEXC.seller_boost set, the bot already prefers that route during execution — but the activation logic was route-blind, so it would still activate symbols whose dominant pair lives elsewhere (e.g., JUPUSDT routing through OKX→KuCoin) at routine 0.1-0.3 scores. This gate raises the activation bar for those non-preferred routes so only exceptional spreads (AR-style 12% spikes → score &gt;&gt; 0.6) can override the route preference. Symbols with at least one boost-preferred role in their dominant pair use the standard fee-aware threshold.
+          With Bitfinex.buyer_boost and MEXC.seller_boost set, the bot already prefers that route during execution — but the activation logic was route-blind, so it would still activate weak symbols whose dominant pair lives elsewhere. This gate raises the activation bar for non-preferred routes. Floor formula: <code>strong_threshold × multiplier</code> (default 0.1 × 2.0 = 0.2). 1.0 = require strong; 2.0 = require very_strong; 3.0+ = require exceptional spikes. Symbols with at least one boost-preferred role in their dominant pair use the standard fee-aware threshold.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="flex items-center gap-2">
@@ -881,7 +881,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
               Non-Preferred Score Multiplier
-              <Tooltip text="Floor for non-preferred routes is computed as very_strong_threshold × this multiplier (e.g., 0.3 × 2.0 = 0.6). Higher = stricter (only true spikes can activate). Lower = more permissive. Range: 1.0-5.0. Default: 2.0. Config key: non_preferred_score_multiplier" />
+              <Tooltip text="Floor for non-preferred routes is strong_threshold × this multiplier (e.g., 0.1 × 2.0 = 0.2). 1.0 = strong tier (0.1); 2.0 = very_strong tier (0.2); 3.0+ = exceptional spikes only. Range: 1.0-5.0. Default: 2.0. Config key: non_preferred_score_multiplier" />
             </label>
             <input type="number" value={nonPreferredScoreMultiplier} min={1.0} max={5.0} step={0.1}
               onChange={d(setNonPreferredScoreMultiplier, 2.0)}

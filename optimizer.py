@@ -2056,14 +2056,17 @@ class SymbolOptimizer:
 
         # Boost-aware activation floor (S26 follow-up). If the dominant pair
         # does NOT include a boost-preferred exchange (e.g., neither
-        # Bitfinex-as-buyer nor MEXC-as-seller), require a high score floor
-        # so only exceptional opportunities (AR-style spikes) can override
-        # the route preference. Routine 0.1-0.3 candidates on non-preferred
-        # routes get blocked from activation. The floor is computed from
-        # `very_strong_threshold × non_preferred_score_multiplier` and only
-        # raises (never lowers) the threshold.
+        # Bitfinex-as-buyer nor MEXC-as-seller), require a higher score floor
+        # so weaker candidates can't activate on non-preferred routes.
+        # The floor is `strong_threshold × non_preferred_score_multiplier`:
+        #   1.0 → require strong tier (0.1)
+        #   2.0 → require very_strong tier (0.2)
+        #   3.0+ → require exceptional spikes only
+        # Only raises (never lowers) the threshold. Refactored from
+        # very_strong base in v0.30.2-beta — the old base blocked legitimate
+        # strong candidates (e.g., S27 JUPUSDT @ 0.191 on MEXC→Bitfinex).
         if self._boost_aware_activation_enabled and not self._is_boost_preferred_route(symbol):
-            non_preferred_floor = self._very_strong_threshold * self._non_preferred_score_multiplier
+            non_preferred_floor = self._strong_threshold * self._non_preferred_score_multiplier
             if non_preferred_floor > threshold:
                 threshold = non_preferred_floor
 
