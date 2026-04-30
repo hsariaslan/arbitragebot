@@ -868,21 +868,38 @@ class HedgeManager:
 
     def get_debug_state(self) -> dict:
         now = time.time()
-        # Pull live mark prices from optimizer's price view (already used by
-        # _get_prices_for). Fallback to entry price when fetcher data is empty.
+        # v0.30.1+: Mark-price source priority for hedge unrealized PnL:
+        #   1. Binance Futures markPrice (from FundingMonitor poll, 1000X-scaled)
+        #      — this is the actual close-out price on the hedge venue
+        #   2. Spot mid from optimizer fetchers — fallback only
+        # Using spot mid as proxy created phantom drawdowns (S25/S26): when
+        # spot/futures basis spread, the offset between spot crypto MTM and
+        # hedge unrealized was wrong by the basis. Now they truly net out.
         if self._shadows and self._optimizer is not None:
-            live_prices = self._get_prices_for([s for s in self._shadows.keys()])
+            spot_prices = self._get_prices_for([s for s in self._shadows.keys()])
         else:
-            live_prices = {}
+            spot_prices = {}
 
         open_hedges: list[dict] = []
         total_notional = 0.0
         total_unrealized_pnl = 0.0
+        futures_mark_used = 0
+        spot_fallback_used = 0
         for s in self._shadows.values():
             if s.qty <= 0:
                 continue
             entry = s.entry_price
-            mark = live_prices.get(s.spot_symbol, entry)
+            # Prefer Binance Futures mark — actual hedge venue
+            futures_mark = self._funding_monitor.get_mark_price(s.spot_symbol)
+            if futures_mark is not None and futures_mark > 0:
+                mark = futures_mark
+                mark_source = "futures"
+                futures_mark_used += 1
+            else:
+                # Fall back to spot mid until first funding poll arrives
+                mark = spot_prices.get(s.spot_symbol, entry)
+                mark_source = "spot"
+                spot_fallback_used += 1
             # Short PnL: (entry - mark) × qty (positive when price drops)
             unrealized_pnl = (entry - mark) * s.qty
             notional = s.qty * (mark if mark > 0 else entry)
@@ -894,6 +911,7 @@ class HedgeManager:
                 "qty": s.qty,
                 "entry_price": entry,
                 "mark_price": mark,
+                "mark_source": mark_source,  # "futures" or "spot" (fallback)
                 "notional_usd": notional,
                 "unrealized_pnl_usd": unrealized_pnl,
                 "opened_at": s.opened_at,
@@ -906,6 +924,17 @@ class HedgeManager:
             })
             total_notional += notional
             total_unrealized_pnl += unrealized_pnl
+
+        # v0.30.1+: log when first futures-mark snapshot is taken (one-time
+        # transition from spot fallback to futures mark) — confirms Fix B
+        # is active in the diagnostic logs.
+        if futures_mark_used > 0 and not getattr(self, "_logged_futures_mark", False):
+            logger.info(
+                f"[Hedge] Mark price source: Binance Futures markPrice for "
+                f"{futures_mark_used} hedge(s). Hedge unrealized PnL now "
+                f"matches actual close-out price (was: spot mid proxy)."
+            )
+            self._logged_futures_mark = True
 
         return {
             "enabled": self._enabled,

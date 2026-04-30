@@ -1610,7 +1610,13 @@ class DashboardServer:
                 hedge_pnl_usd = 0.0
 
         try:
-            portfolio_value = self._balance.get_portfolio_value(prices, hedge_pnl_usd=hedge_pnl_usd)
+            # v0.30.1+: per-exchange MTM (Fix A) — same convention as _build_state
+            ppe = self._monitor._get_per_exchange_prices()
+            portfolio_value = self._balance.get_portfolio_value(
+                prices,
+                hedge_pnl_usd=hedge_pnl_usd,
+                prices_per_exchange=ppe,
+            )
         except Exception:
             return False
         if portfolio_value <= 0:
@@ -3177,12 +3183,41 @@ class DashboardServer:
             except Exception:
                 hedge_pnl_usd = 0.0
         initial = self._balance._initial_investment
+        # v0.30.1+: pass per-exchange prices so crypto on each exchange is
+        # MTM-marked against THAT exchange's actual price (Fix A). Falls back
+        # to the flat `prices` dict for any (exchange, symbol) without per-
+        # exchange data.
+        try:
+            prices_per_exchange = self._monitor._get_per_exchange_prices()
+        except Exception:
+            prices_per_exchange = None
         portfolio_value = (
-            self._balance.get_portfolio_value(prices, hedge_pnl_usd=hedge_pnl_usd)
+            self._balance.get_portfolio_value(
+                prices,
+                hedge_pnl_usd=hedge_pnl_usd,
+                prices_per_exchange=prices_per_exchange,
+            )
             if self._balance.initialized else initial
         )
         trading_pnl = sum(t.profit_usd for t in self._monitor._trades)
         transfer_fees = self._balance.total_transfer_fees
+
+        # v0.30.1+: realized capital is what peak should ratchet against
+        # (USDT + locked-in trade P&L + credited cashback - external fees).
+        # This eliminates phantom drawdowns from MTM oscillation that the
+        # hedge couldn't perfectly offset (S25/S26). Drawdown is still
+        # measured against MTM portfolio_value — peak just doesn't include
+        # MTM noise anymore.
+        credited_cashback_for_peak = (
+            self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
+        )
+        realized_value = (
+            self._balance.get_realized_capital(
+                trading_pnl=trading_pnl,
+                credited_cashback=credited_cashback_for_peak,
+            )
+            if self._balance.initialized else initial
+        )
 
         # Anomaly protection: update drawdown tracking with portfolio context
         # Collect symbols with crypto exposure (for per-symbol drawdown blocking)
@@ -3192,16 +3227,20 @@ class DashboardServer:
                 for sym, qty in self._balance.crypto.get(ex, {}).items():
                     if qty > 0 and prices.get(sym, 0) > 0:
                         crypto_symbols.add(sym)
-        self._monitor._anomaly.update_portfolio_value(portfolio_value, context={
-            "portfolio_value": portfolio_value,
-            "active_symbols": len(active_symbols),
-            "connected_exchanges": connected,
-            "total_exchanges": len(active_exchanges),
-            "crypto_symbols": sorted(crypto_symbols),
-            # Snapshot the configured capital so to_state_dict can persist it.
-            # On next load, mismatched capital triggers a peak reset.
-            "total_capital": float(getattr(self._monitor, "_total_capital", 0.0) or 0.0),
-        })
+        self._monitor._anomaly.update_portfolio_value(
+            portfolio_value,
+            realized_value=realized_value,
+            context={
+                "portfolio_value": portfolio_value,
+                "realized_value": realized_value,
+                "mtm_offset": portfolio_value - realized_value,  # how much MTM diverges
+                "active_symbols": len(active_symbols),
+                "connected_exchanges": connected,
+                "total_exchanges": len(active_exchanges),
+                "crypto_symbols": sorted(crypto_symbols),
+                "total_capital": float(getattr(self._monitor, "_total_capital", 0.0) or 0.0),
+            },
+        )
 
         # Net profit awareness: update optimizer to gate rotations when in deficit
         credited_cashback = (

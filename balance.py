@@ -1631,27 +1631,65 @@ class BalanceTracker:
         self,
         prices: dict[str, float],
         hedge_pnl_usd: float = 0.0,
+        prices_per_exchange: dict[str, dict[str, float]] | None = None,
     ) -> float:
         """Calculate total portfolio value in USD.
 
-        Includes spot USDT + spot crypto value + optional futures hedge
-        unrealized PnL. When hedging is active (testnet/live), passing the
-        hedge PnL keeps the metric representing real economic exposure —
-        spot price moves are offset by opposing futures PnL, so peak/drawdown
-        tracking reflects net portfolio risk instead of single-side noise.
+        v0.30.1+: when `prices_per_exchange` is provided, crypto held on
+        each exchange is MTM-marked against THAT exchange's actual price
+        (Fix A — per-exchange spot pricing). Eliminates the dispersion error
+        where, e.g., SNX held on Bitget was being marked at Binance's price.
 
-        In shadow mode, hedge_pnl_usd is the simulated unrealized PnL on
-        the would-be short. Passing it makes the drawdown signal a useful
-        preview of what real-mode behavior would look like.
+        Falls back to flat `prices` dict for any (exchange, symbol) missing
+        from `prices_per_exchange`.
+
+        Includes spot USDT + spot crypto value + optional futures hedge
+        unrealized PnL.
         """
         total = sum(self.usdt.values())
         for ex in self._exchanges:
+            ex_prices = (prices_per_exchange or {}).get(ex, {})
             for sym, qty in self.crypto[ex].items():
                 if qty > 0:
-                    p = prices.get(sym, 0.0)
+                    # Prefer per-exchange price; fall back to flat dict
+                    p = ex_prices.get(sym) or prices.get(sym, 0.0)
                     total += qty * p
         total += hedge_pnl_usd
         return total
+
+    def get_realized_capital(
+        self,
+        trading_pnl: float = 0.0,
+        credited_cashback: float = 0.0,
+    ) -> float:
+        """Capital that's actually locked in (no MTM dependency).
+
+        Used for peak-tracking in anomaly protection: peak should ratchet
+        up only when capital is *realized* (sold to USDT, cashback credited),
+        not when crypto inventory transiently MTMs higher and then reverts.
+
+        formula:
+            realized = initial_investment
+                     + cumulative_trading_pnl     (locked-in trade profits/losses)
+                     - total_external_fees        (spent on withdrawals)
+                     + credited_cashback          (credited to USDT, not pending)
+
+        This deliberately EXCLUDES:
+          - Spot crypto MTM (qty × current_price) — that's the volatility we
+            want to measure drawdown AGAINST, not pollute peak with
+          - Hedge unrealized PnL — same reason, it's MTM noise on either side
+          - Pending cashback — not yet credited
+
+        The caller passes trading_pnl and credited_cashback because those
+        live in monitor + fee_manager respectively; balance only knows
+        about transfers.
+        """
+        return (
+            self._initial_investment
+            + trading_pnl
+            - self.total_external_transfer_fees
+            + credited_cashback
+        )
 
     def get_balance_lines(self, prices: dict[str, float]) -> list[str]:
         """Get formatted balance summary lines for live display."""

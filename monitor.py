@@ -2165,7 +2165,13 @@ class ArbitrageMonitor:
         self._print_table(dt, rows, tick_ages)
 
     def _get_current_prices(self) -> dict[str, float]:
-        """Get current mid prices for all active symbols from fetcher states."""
+        """Get current mid prices for all active symbols from fetcher states.
+
+        Returns ONE price per symbol — the mid from the first active exchange
+        that has live data. Used as a fallback when per-exchange prices are
+        unavailable. For accurate per-position MTM, prefer
+        `_get_per_exchange_prices()` (v0.30.1+).
+        """
         prices: dict[str, float] = {}
         for sym in self._symbols:
             for fetcher in self._fetchers:
@@ -2182,6 +2188,38 @@ class ArbitrageMonitor:
                     except (ValueError, TypeError):
                         continue
         return prices
+
+    def _get_per_exchange_prices(self) -> dict[str, dict[str, float]]:
+        """Get current mid prices per (exchange, symbol).
+
+        Returns `{exchange: {symbol: mid_price}}`. Used by
+        `BalanceTracker.get_portfolio_value()` to MTM crypto held on each
+        exchange against THAT exchange's actual price — not against the
+        first-fetcher's price as a global proxy.
+
+        Eliminates cross-exchange spot-price dispersion error from MTM
+        (Fix A). Per-exchange spreads are typically 0.05–0.5% — small per
+        position but adds up across multiple holdings.
+        """
+        per_ex: dict[str, dict[str, float]] = {}
+        for fetcher in self._fetchers:
+            ex_name = fetcher.exchange_name
+            if ex_name not in self._active_exchanges:
+                continue
+            state = fetcher.get_state()
+            ex_prices: dict[str, float] = {}
+            for sym in self._symbols:
+                ps = state.get(sym)
+                if ps and ps.bid and ps.ask:
+                    try:
+                        mid = (float(ps.bid) + float(ps.ask)) / 2.0
+                        if mid > 0:
+                            ex_prices[sym] = mid
+                    except (ValueError, TypeError):
+                        continue
+            if ex_prices:
+                per_ex[ex_name] = ex_prices
+        return per_ex
 
     def _print_table(self, dt: datetime,
                      rows: list[tuple[str, str, float, str, float, float, float, float, float]],

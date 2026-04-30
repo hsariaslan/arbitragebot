@@ -213,6 +213,22 @@ class FundingMonitor:
     def get_next_funding_time_ms(self, spot_symbol: str) -> int | None:
         return self._next_funding_times.get(spot_symbol)
 
+    def get_mark_price(self, spot_symbol: str) -> float | None:
+        """Latest Binance Futures mark price, scaled to spot-equivalent.
+
+        For 1000X contracts (PEPE/SHIB/FLOKI), Binance Futures' markPrice is
+        per-1000-contract. We divide by the multiplier so callers can do
+        `(spot_entry - mark) × spot_qty` directly without unit-mismatch.
+
+        Returns None when no fresh poll data is available — caller should
+        fall back to spot mid in that case.
+        """
+        raw = self._mark_prices.get(spot_symbol)
+        if raw is None or raw <= 0:
+            return None
+        _, multiplier = get_futures_symbol(spot_symbol)
+        return raw / multiplier if multiplier > 1 else raw
+
     def get_annualized_short_pct(self, spot_symbol: str) -> float | None:
         """Annualized funding income/cost % for a short position.
 

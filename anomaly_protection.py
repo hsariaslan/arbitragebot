@@ -281,27 +281,68 @@ class AnomalyProtection:
     PEAK_MAX_GROWTH_PER_TICK_PCT: float = 1.0
 
     def update_portfolio_value(
-        self, value: float, context: dict | None = None,
+        self,
+        value: float,
+        context: dict | None = None,
+        realized_value: float | None = None,
     ) -> None:
         """Update peak portfolio and drawdown tracking.
 
-        Peak growth is capped at PEAK_MAX_GROWTH_PER_TICK_PCT per call. Real
-        sustained gains still compound (5% per ~1Hz update = 18,000% per
-        hour theoretical ceiling — never reached in practice). Single-tick
-        flash quotes can no longer corrupt peak.
+        v0.30.1+: peak ratchets only on **realized capital** (USDT + locked-in
+        P&L), not on MTM portfolio value. Drawdown is computed against the
+        realized peak with `value` (which includes MTM + hedge unrealized).
+
+        Why: S25/S26 showed peaks getting inflated by MTM noise that the
+        hedge was supposed to offset but didn't (spot/futures price source
+        asymmetry, multi-exchange spot-price dispersion, symbol-rotation
+        windows where spot inventory is unhedged). Tying peak to realized
+        capital eliminates the entire class of phantom drawdowns: peak only
+        moves when USDT is actually credited from a sell, so transient MTM
+        swings on held inventory can't poison it.
+
+        Params:
+            value: full portfolio value with MTM (USDT + crypto×price + hedge_pnl).
+                   This is what drawdown is measured against.
+            realized_value: capital that's actually locked in
+                   (initial + trading_pnl - external_fees + credited_cashback).
+                   If None, falls back to `value` (legacy behavior — for callers
+                   that don't yet plumb the realized number through).
+            context: optional dict (active symbols, capital, etc.) for diagnostics.
+
+        Peak still has the per-tick growth cap as a defense-in-depth, but
+        with realized capital as input, the cap rarely kicks in (realized
+        capital can't move fast in normal trading).
         """
         if not self._enabled or value <= 0:
             return
         if context:
             self._portfolio_context = context
-        if value > self._peak_portfolio_value:
+
+        # Peak source: realized capital if provided, else fall back to MTM
+        peak_source = realized_value if realized_value is not None and realized_value > 0 else value
+
+        if peak_source > self._peak_portfolio_value:
             if self._peak_portfolio_value > 0:
                 cap = self._peak_portfolio_value * (
                     1.0 + self.PEAK_MAX_GROWTH_PER_TICK_PCT / 100.0
                 )
-                self._peak_portfolio_value = min(value, cap)
+                old_peak = self._peak_portfolio_value
+                self._peak_portfolio_value = min(peak_source, cap)
+                # Diagnostic: log when realized peak grows substantially in
+                # a single tick (rare; usually means a large trade just settled)
+                if self._peak_portfolio_value - old_peak > old_peak * 0.005:
+                    logger.info(
+                        f"[Anomaly] Peak grew (realized): "
+                        f"${old_peak:.2f} → ${self._peak_portfolio_value:.2f} "
+                        f"(+{(self._peak_portfolio_value - old_peak):.2f}, "
+                        f"realized_in=${peak_source:.2f}, mtm_value=${value:.2f})"
+                    )
             else:
-                self._peak_portfolio_value = value
+                self._peak_portfolio_value = peak_source
+
+        # Drawdown: peak (realized) vs current (MTM-inclusive). This is the
+        # right semantic — drawdown represents "how much worse is current MTM
+        # vs locked-in capital", not "how much did MTM-on-MTM oscillate".
         if self._peak_portfolio_value > 0:
             self._current_drawdown_pct = (
                 (self._peak_portfolio_value - value)
@@ -491,8 +532,17 @@ class AnomalyProtection:
                         )
                         self._total_symbol_blocks += 1
                         blocked_count += 1
+                # v0.30.1+: include realized vs MTM breakdown so phantom
+                # drawdowns are diagnosable. mtm_offset = portfolio - realized.
+                # If mtm_offset is large negative, the MTM has dropped well
+                # below realized capital — indicates either real loss OR
+                # spot/hedge price-source asymmetry creating phantom drop.
+                realized = ctx.get("realized_value", 0.0)
+                mtm_offset = ctx.get("mtm_offset", 0.0)
                 details = {
-                    "portfolio": f"${ctx.get('portfolio_value', 0):.2f}",
+                    "portfolio_mtm": f"${ctx.get('portfolio_value', 0):.2f}",
+                    "realized_capital": f"${realized:.2f}",
+                    "mtm_offset": f"${mtm_offset:+.2f} (mtm vs realized)",
                     "peak": f"${self._peak_portfolio_value:.2f}",
                     "drop": f"${drop:.2f}",
                     "blocked_symbols": ", ".join(crypto_symbols),
