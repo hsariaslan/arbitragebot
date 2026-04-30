@@ -694,3 +694,154 @@ The architecture refactor implemented after S25 directly addresses three observa
 3. **Demotion sweeps stayed on Bitfinex** (visible in the post-demotion balances). v0.30 explicitly sweeps demotion proceeds to Bybit via Aptos $0.
 
 These changes don't fix the drawdown bug (#1 above) — that's still a separate v0.30 priority.
+
+### Session #26 — 2026-04-30 (v0.30.0-beta, First Live Run with Capital Architecture Refactor)
+
+**Date**: 2026-04-30 07:07 UTC → 14:05 UTC (~6h 58m active accounting)
+**Capital**: $1,000 ($40 per trade, 4%)
+**Version**: v0.30.0-beta — first session with the Bybit custody hub + Bitfinex trading float architecture. v0.30.0-beta committed locally but **never pushed/deployed** — same as v0.28.3/v0.29.0.
+**VPS**: LightNode Bangkok + Oracle Zurich (Bitfinex proxy)
+**Hedge mode**: testnet
+**Active exchanges**: 6 (Binance, OKX, Bybit, MEXC, Bitget, Bitfinex)
+**Disabled exchanges**: 3 (Gate.io, KuCoin, Pionex)
+
+#### Headline Result — Deficit, Mostly From Activation-Then-Unwind Cycles
+
+| Metric | Value |
+|---|---:|
+| Trades | 22 |
+| Trading P&L | +$0.30 |
+| Transfer fees | $1.05 |
+| Cashback (credited / pending) | $0.07 / $0.05 |
+| **Net** | **-$0.69** |
+| **$/hr** | **-$0.10** |
+| Final portfolio | $1,001 (started $1,000, +0.1% raw — slight crypto MTM gain) |
+| sz0 | 753 |
+| Phantom spreads filtered | 78 |
+| Pos-cap throttles | 35 |
+| Rebalance blocked | 50 |
+| EVD seller penalties / demoted | 10,117 / **102** |
+| Anomaly | 0 pauses / 0 warnings / **3 symbol-blocks** |
+
+A loss session, mostly because the bot activated 5 symbols (SNXUSDT → DOGEUSDT → APTUSDT → ZROUSDT → HYPEUSDT → JUPUSDT) but only managed to execute 22 trades total. Each activation-then-demotion cycle paid setup + unwind fees.
+
+#### v0.30 Migration Worked
+
+- `[Settings] Startup sync: trading_float_mult: 8.0x -> 6.7x (target=$268)` — migration from v0.29's `bitfinex_reserve_pct=0.20` × $1000 / $40 = **6.7×** (clamped). Idempotent on subsequent restarts.
+- `[Capital] Trading float: $268 on Bitfinex (trade_amount $40 × 6.7x), custody hub = Bybit` — confirmed at every discovery completion.
+- All `[Capital]` log component lines populated correctly: trading float overflow, custody consolidation, custody sweep, post-demotion sweep, idle-sell-via-Bitfinex+sweep.
+
+Capital flow worked exactly as designed:
+- Bitfinex held ~$268 (trading float) for the entire session
+- Bybit accumulated to $733 (final) — bulk USDT custody
+- Other exchanges cycled to ~$0 between activations
+
+#### Headline Issue: $0.30 in OKX→Bybit Aptos Fees Were Actually Polygon Fees
+
+The bot's `_get_withdrawal_fee(exchange)` returns each exchange's preferred-network fee, not the configured `custody_hub_network` fee. The log line says "via Aptos" but the actual withdrawal uses each source exchange's preferred network:
+
+| Source → Bybit "via Aptos" | Actual fee | Reason |
+|---|---:|---|
+| MEXC → Bybit | **$0.0000** ✓ | MEXC's preferred is Arbitrum (genuinely free) |
+| Bitget → Bybit | $0.0010 ✓ | Bitget's preferred is Plasma/Arbitrum (~free) |
+| **OKX → Bybit** | **$0.1000 ✗** | **OKX's preferred is Polygon — NOT Aptos!** |
+| Bitfinex → Bybit | $0.0000 ✓ | Bitfinex has 14 free networks |
+
+**3 OKX consolidations × $0.10 = $0.30** in unintended fees during the session — that's 32% of the total $0.95 transfer fees.
+
+The architecture spec said "Aptos $0 universal" but the code uses the existing per-exchange `preferred_network` setting, which for OKX is Polygon. Need to either (a) add `network` parameter to `_get_withdrawal_fee()`, or (b) override `preferred_network` to `Aptos` for all enabled exchanges at custody-hub-flow time.
+
+#### Drawdown False-Positives Continue (Pre-Fix-C)
+
+3 SYMBOL_BLOCKs fired:
+
+| Time | Drawdown reported | Real portfolio | Implied peak |
+|---|---:|---:|---:|
+| 07:33:09 | 15.96% | $960 | $1,142 |
+| 08:59:50 | 15.52% | ~$1,001 | ~$1,184 |
+| (later) | — | — | — |
+
+Same v0.28.3 cap-insufficiency bug carried forward. Diagnosed in this session: the 1%/tick cap doesn't fix the actual mechanism, which is **MTM noise getting baked into peak**. Three contributing factors identified:
+
+1. **Spot crypto held on multiple exchanges, each with its own slightly-different price** — bot uses ONE price (first fetcher) for all exchanges' crypto MTM. Cross-exchange spread = persistent MTM noise.
+2. **Hedge unrealized PnL uses spot mid as proxy for futures close-out price** — spot ≠ futures (basis spread). Hedge doesn't perfectly offset spot crypto MTM moves.
+3. **Symbol-rotation windows where spot inventory and hedge are out of sync** — e.g., FET inventory still on Bitget after rotating to SNX hedge → unhedged FET MTM moves contribute pure noise.
+
+Fixes designed and implemented post-session (v0.30.1-beta):
+- **Fix C**: peak ratchets only on **realized capital** (USDT + locked-in P&L + credited cashback), not MTM. Eliminates the entire phantom-drawdown class. **Reproduced S26 scenario: peak goes from $1,142 → $1,000.10, drawdown from 15.96% → 4.01%, no SYMBOL_BLOCK.**
+- **Fix A**: per-exchange spot pricing for crypto MTM. Each exchange's crypto is marked at THAT exchange's actual price.
+- **Fix B**: hedge unrealized uses Binance Futures markPrice (already polled by `funding_monitor`, 1000X-scaled for PEPE/SHIB/FLOKI).
+
+#### Session Timeline
+
+| Time | Event |
+|---|---|
+| 07:07:18 | Session start. v0.30 migration: `bitfinex_reserve_pct=0.20 → trading_float_multiplier=6.7×` |
+| 07:22:20 | First activation FETUSDT, hedge OPEN, demoted 2s later |
+| 07:22:22 | Hedge OPEN SNXUSDT |
+| 07:32:40 | First trade (SNX OKX→Bitget) |
+| 07:33:09 | **DRAWDOWN_BLOCK 15.96%** (false positive, peak inflated by FET inventory MTM during rotation) |
+| 08:23:29 | SNX demoted; first post-demotion sweep $692 → Bybit (paid $0.10 OKX fee — Fix-needed signal) |
+| 08:28:30 | DOGEUSDT activated, hedge OPEN |
+| 08:44:11 | DOGE demoted (held 0.3h) |
+| 08:59:13 | APTUSDT activated, hedge OPEN |
+| 08:59:50 | **DRAWDOWN_BLOCK 15.52%** (2nd false positive) |
+| 09:31:08 | Rotation APT→ZRO ($10/hr improvement estimate) |
+| 10:00:32 | ZRO demoted (held 0.4h) |
+| 10:05:34 | HYPEUSDT activated, hedge OPEN |
+| 12:59:16 | HYPEUSDT demoted, no replacement found |
+| 13:04:17 | **JUPUSDT activated** (only candidate) — but Bitfinex doesn't list JUP → boost preference can't fire |
+| 13:04 → 13:34 | **Zero JUP trades** for 30 min |
+| 13:34:25 | Idle-crypto consolidation: sold $368 of unused JUP via Bitfinex 0%, swept to Bybit, paid $0.001 in unwind fees |
+| 13:34 → 14:05 | Idle, no further activity |
+| 14:05:55 | Final session line: net=-$0.69 |
+
+#### Per-Symbol Performance
+
+| Symbol | Trades | Profit | Hedge held | Notes |
+|---|---:|---:|---:|---|
+| SNXUSDT | 2 | +$0.026 | 1.0h | Demoted before generating real spread |
+| APTUSDT | 11 | +$0.272 | 0.6h | Best performer, half went via Bitfinex (boost worked) |
+| HYPEUSDT | 9 | +$0.014 | 0.7h | All Bitget→MEXC, 0% net% by end (spread closed) |
+| DOGEUSDT | 0 | $0 | 0.3h × 2 | Activated twice, demoted twice without trading |
+| ZROUSDT | 0 | $0 | 0.4h | Activated, demoted, never traded |
+| JUPUSDT | 0 | $0 | not hedged | Activated but Bitfinex didn't list — boost couldn't fire |
+
+#### Issues Identified
+
+| # | Severity | Issue |
+|---|---|---|
+| 1 | **HIGH** | **OKX preferred-network fee leaks** — v0.30 architecture said "Aptos universal $0", but code uses each exchange's `preferred_network` setting. OKX's is Polygon ($0.10). Three OKX→Bybit consolidations cost $0.30 (32% of total session fees). Fix: add `network` param to `_get_withdrawal_fee()` OR override `preferred_network` for custody-hub flows. |
+| 2 | **HIGH** | **Drawdown false positives still firing** — Fix C designed and implemented after session ends. |
+| 3 | MEDIUM | **JUPUSDT activation futile** — Bitfinex doesn't list JUP, so boost-preferred Bitfinex+MEXC route can't form. Bot allocated, sat 30 min, unwound at small loss. Should expansion ranking deprioritize symbols not on Bitfinex even harder than the current 0.7× penalty? |
+| 4 | LOW | **5 distinct symbols cycled in 6h with only 22 trades total** — average 4.4 trades per activation. Most activations were unprofitable churn. The market is offering near-zero spread on the bot's preferred Bitfinex+MEXC pairs. |
+
+#### Capital Flow
+
+Final balances: `Binance=$0 Bitfinex=$268 Bitget=$0 Bybit=$733 MEXC=$0 OKX=$0` = **$1,001 total**.
+
+The v0.30 architecture worked exactly as designed:
+- Bitfinex stayed at trading float target ($268) all session
+- Bybit absorbed the rest as custody (~$733)
+- Other exchanges cycled to ~$0 between active periods
+- Trading float overflow fired 3× ($244 + $366 + $179 = $789 swept BFX→Bybit at $0)
+- Demotion sweeps to Bybit fired 4× (one per demotion)
+- Idle crypto sold via Bitfinex 0% → swept to Bybit (preserved 0% taker advantage)
+
+#### Lessons / Conclusions
+
+- **v0.30 architecture is structurally correct.** Capital flows match the design exactly. The custody/trading-float split works.
+- **OKX consolidation cost is the priority fix.** $0.30 of the $1.05 transfer fees came from OKX→Bybit "Aptos" routes that actually used Polygon. Fix: network-aware withdrawal fee lookup, OR temporarily override `preferred_network` during custody-hub flows.
+- **Drawdown false positives are now diagnosed and fixed** (Fix C implemented post-session). Reproduced S26 scenario, confirmed peak $1,142 → $1,000, drawdown 15.96% → 4.01%.
+- **Activation churn dominates losses** at this market regime. 5 symbols cycled in 6h with 22 trades. The boost-preferred Bitfinex+MEXC pair only fired meaningfully on APTUSDT for ~30 min. This isn't a bug — it's the market not offering spread.
+- **JUPUSDT activation was a textbook example** of "symbol activated despite not being on Bitfinex" → boost preference can't fire → trades don't happen → unwound. Expansion preference should harshly penalize non-Bitfinex symbols when other candidates exist, not just apply a 0.7× factor.
+- **Hedge testnet remained perfect** (continuing the trend from S22-S25). 6 OPENs, 6 CLOSEs, 0 errors. Cumulative funding -$0.005.
+
+#### Set-Up for v0.30.1-beta (Drawdown Fixes + Network-Aware Fees)
+
+After session end, three drawdown fixes were implemented:
+- **Fix C** (peak from realized capital, not MTM) — eliminates phantom drawdown class entirely
+- **Fix A** (per-exchange crypto MTM) — reduces dispersion error
+- **Fix B** (Binance Futures markPrice for hedge unrealized) — eliminates spot/futures basis error
+
+The OKX network-fee leak is **not yet fixed**. That's the highest-priority operational issue for v0.30.1.
