@@ -2,7 +2,8 @@ import { useState } from 'react';
 import type { FundingRateInfo, SymbolRanking } from '../types';
 
 const EX_SHORT: Record<string, string> = {
-  Binance: 'BIN', OKX: 'OKX', Bybit: 'BYB', Bitget: 'BGT', KuCoin: 'KUC', MEXC: 'MEX', 'Gate.io': 'GAT',
+  Binance: 'BIN', OKX: 'OKX', Bybit: 'BYB', Bitget: 'BGT', KuCoin: 'KUC',
+  MEXC: 'MEX', 'Gate.io': 'GAT', Bitfinex: 'BFX', Pionex: 'PNX',
 };
 function shortEx(name: string) { return EX_SHORT[name] ?? name.slice(0, 3).toUpperCase(); }
 
@@ -54,13 +55,30 @@ const trajectoryColor: Record<string, string> = {
   insufficient_data: 'text-slate-500',
 };
 
-function SymbolDetailPopover({ r }: { r: SymbolRanking }) {
+function SymbolDetailPopover({ r, cursor }: { r: SymbolRanking; cursor: { x: number; y: number } }) {
   const d = r.diagnostic;
   if (!d) return null;
+  // Position bottom-right of the cursor with a 16px margin. Clamp inside the
+  // viewport so it never clips off-screen.
+  const POPOVER_W = 320;
+  const POPOVER_MAX_H = 520;
+  const MARGIN = 16;
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
+  let left = cursor.x + MARGIN;
+  let top = cursor.y + MARGIN;
+  // If popover would overflow the right edge, flip to left of cursor
+  if (left + POPOVER_W + MARGIN > vw) {
+    left = Math.max(MARGIN, cursor.x - POPOVER_W - MARGIN);
+  }
+  // If popover would overflow the bottom edge, flip above cursor
+  if (top + POPOVER_MAX_H + MARGIN > vh) {
+    top = Math.max(MARGIN, cursor.y - POPOVER_MAX_H - MARGIN);
+  }
   return (
     <div
-      className="fixed bottom-4 right-4 z-50 w-80 max-w-[90vw] bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl overflow-hidden pointer-events-none"
-      style={{ animation: 'fadeIn 120ms ease-out' }}
+      className="fixed z-50 w-80 max-w-[90vw] bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl shadow-2xl overflow-hidden pointer-events-none"
+      style={{ left: `${left}px`, top: `${top}px`, animation: 'fadeIn 80ms ease-out' }}
     >
       {/* Header */}
       <div className="px-4 py-3 bg-gradient-to-r from-slate-800 to-slate-900 border-b border-slate-700/60">
@@ -133,7 +151,7 @@ function SymbolDetailPopover({ r }: { r: SymbolRanking }) {
             <span className="text-slate-500">Buyers: </span>
             {r.exchange_view.buyers.length === 0 ? <span className="text-slate-600">—</span> : r.exchange_view.buyers.map((b, i) => (
               <span key={`pb-${b.exchange}`} className={b.blocked ? 'text-rose-500/80 line-through' : i === 0 ? 'text-cyan-300 font-semibold' : 'text-cyan-500/80'}>
-                {i > 0 && <span className="text-slate-600">,</span>}{b.exchange.slice(0, 3).toUpperCase()}
+                {i > 0 && <span className="text-slate-600">,</span>}{shortEx(b.exchange)}
               </span>
             ))}
           </div>
@@ -141,7 +159,7 @@ function SymbolDetailPopover({ r }: { r: SymbolRanking }) {
             <span className="text-slate-500">Sellers: </span>
             {r.exchange_view.sellers.length === 0 ? <span className="text-slate-600">—</span> : r.exchange_view.sellers.map((s, i) => (
               <span key={`ps-${s.exchange}`} className={s.blocked ? 'text-rose-500/80 line-through' : i === 0 ? 'text-fuchsia-300 font-semibold' : 'text-fuchsia-500/80'}>
-                {i > 0 && <span className="text-slate-600">,</span>}{s.exchange.slice(0, 3).toUpperCase()}
+                {i > 0 && <span className="text-slate-600">,</span>}{shortEx(s.exchange)}
               </span>
             ))}
           </div>
@@ -153,6 +171,7 @@ function SymbolDetailPopover({ r }: { r: SymbolRanking }) {
 
 export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, discoveryMode, fundingRates }: SymbolRankingsProps) {
   const [hoveredSymbol, setHoveredSymbol] = useState<string | null>(null);
+  const [cursor, setCursor] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const hoveredRanking = hoveredSymbol ? rankings.find(r => r.symbol === hoveredSymbol) : null;
 
   if (rankings.length === 0) {
@@ -211,7 +230,11 @@ export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, 
                 <tr
                   key={r.symbol}
                   className={`border-t border-slate-700/30 cursor-help transition-colors hover:bg-slate-700/30 ${rowClass}`}
-                  onMouseEnter={() => setHoveredSymbol(r.symbol)}
+                  onMouseEnter={(e) => {
+                    setHoveredSymbol(r.symbol);
+                    setCursor({ x: e.clientX, y: e.clientY });
+                  }}
+                  onMouseMove={(e) => setCursor({ x: e.clientX, y: e.clientY })}
                   onMouseLeave={() => setHoveredSymbol(prev => prev === r.symbol ? null : prev)}
                 >
                   <td className="px-2 py-1.5 text-slate-500 font-mono">{r.rank}</td>
@@ -306,7 +329,7 @@ export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, 
           </tbody>
         </table>
       </div>
-      {hoveredRanking && <SymbolDetailPopover r={hoveredRanking} />}
+      {hoveredRanking && <SymbolDetailPopover r={hoveredRanking} cursor={cursor} />}
     </div>
   );
 }
