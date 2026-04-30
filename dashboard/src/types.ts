@@ -157,9 +157,9 @@ export interface Settings {
   // Diversification floor (S21 follow-up)
   diversification_floor_enabled?: boolean;
   diversification_floor_multiplier?: number;
-  // Boost-aware activation gate (S26 follow-up)
-  boost_aware_activation_enabled?: boolean;
-  non_preferred_score_multiplier?: number;
+  // Fast-track discovery exit (S29 follow-up)
+  fast_track_discovery_enabled?: boolean;
+  fast_track_aggressiveness?: number;
   auto_disable_volume_enabled?: boolean;
   auto_disable_volume_threshold_usd?: number;
   // Funding-aware scoring (Phase A)
@@ -237,6 +237,20 @@ export interface SymbolRanking {
   exchange_view?: {
     buyers: { exchange: string; weight: number; blocked: boolean }[];
     sellers: { exchange: string; weight: number; blocked: boolean }[];
+  };
+  diagnostic?: {
+    status: string;
+    tier: string;
+    trajectory: string;
+    reasons: string[];
+    score_formula: string;
+    threshold_breakdown: string;
+    watchlist: {
+      entered_seconds_ago?: number;
+      samples?: number;
+      peak_score?: number;
+      confirmed?: boolean;
+    };
   };
   current_net_pct: number;
 }

@@ -357,16 +357,13 @@ class SymbolOptimizer:
         self._diversification_floor_enabled: bool = DIVERSIFICATION_FLOOR_ENABLED
         self._diversification_floor_multiplier: float = DIVERSIFICATION_FLOOR_MULTIPLIER
 
-        # Boost-aware activation gate (S26 follow-up). Symbols whose dominant
-        # pair does NOT include a boost-preferred exchange (default
-        # Bitfinex-as-buyer or MEXC-as-seller) need a much higher score to
-        # activate — only exceptional spreads should override the route
-        # preference. Hot-applied via dashboard.
-        from config import BOOST_AWARE_ACTIVATION_ENABLED, NON_PREFERRED_SCORE_MULTIPLIER
-        self._boost_aware_activation_enabled: bool = BOOST_AWARE_ACTIVATION_ENABLED
-        self._non_preferred_score_multiplier: float = NON_PREFERRED_SCORE_MULTIPLIER
-        # Throttle for [Optimizer] NON_PREFERRED_BLOCK log lines (per symbol)
-        self._last_non_preferred_log: dict[str, float] = {}
+        # Fast-track discovery exit (S29 follow-up). Trajectory-aware exit:
+        # rising/stable candidates activate sooner than declining ones, with
+        # tier-based time requirements scaled by aggressiveness multiplier.
+        # See config.py FAST_TRACK_* docs for the timing matrix.
+        from config import FAST_TRACK_DISCOVERY_ENABLED, FAST_TRACK_AGGRESSIVENESS
+        self._fast_track_discovery_enabled: bool = FAST_TRACK_DISCOVERY_ENABLED
+        self._fast_track_aggressiveness: float = FAST_TRACK_AGGRESSIVENESS
 
         # Funding-aware scoring (Phase A — set externally via set_funding_monitor)
         self._funding_monitor: "FundingMonitor | None" = None
@@ -439,34 +436,91 @@ class SymbolOptimizer:
                 elapsed = now - self._discovery_start
 
                 if self._tick_count >= self._min_warmup_ticks:
-                    # Require scoring window to be substantially filled before
-                    # trusting frequency — prevents inflated scores from thin
-                    # windows after reset/restart (e.g., 100% freq from 60
-                    # ticks vs real 55% freq from 1800 ticks)
-                    min_ticks = self._scoring_window // 2
-                    min_early_exit_time = float(self._scoring_window // 2)
-                    # Check every tick for tradeable candidates (>= threshold)
-                    tradeable_found = sorted(
-                        [
-                            s for s in self._scores.values()
-                            if s.score >= self._get_activation_threshold(s.symbol)
-                            and s.total_ticks >= min_ticks
-                        ],
-                        key=lambda s: s.score,
-                        reverse=True,
-                    )
-                    # Early exit: at least 1 tradeable + half scoring window elapsed
-                    if (
-                        tradeable_found
-                        and elapsed >= min_early_exit_time
-                    ):
+                    # Standard early-exit: half a scoring window of observation.
+                    # Prevents inflated scores from thin windows (e.g., 100% freq
+                    # from 60 ticks vs real 55% from 1800 ticks).
+                    min_ticks_std = self._scoring_window // 2
+                    min_time_std = float(self._scoring_window // 2)
+
+                    # Fast-track (S29 follow-up): trajectory-aware exit. Per-tier
+                    # base times multiplied by aggressiveness; declining
+                    # candidates fall back to the standard wait.
+                    ft_enabled = self._fast_track_discovery_enabled
+                    ft_aggr = self._fast_track_aggressiveness
+
+                    def _qualifies(s) -> tuple[bool, str, float]:
+                        """Return (qualifies_for_exit, path_kind, required_elapsed_seconds)."""
+                        if s.score < self._get_activation_threshold(s.symbol):
+                            return False, "", min_time_std
+                        # Standard path always wins if eligible
+                        if s.total_ticks >= min_ticks_std:
+                            return True, "standard", min_time_std
+                        if not ft_enabled:
+                            return False, "", min_time_std
+
+                        # Trajectory classification needs 30+ samples
+                        wl = self._watchlist.get(s.symbol)
+                        if not wl or len(wl.score_samples) < 30:
+                            return False, "", min_time_std
+
+                        trajectory = self._classify_trajectory(wl)
+                        if trajectory == "declining":
+                            return False, "", min_time_std  # full wait
+
+                        # Tier from current score (matches focus-tier classification)
+                        if s.score >= self._strong_threshold:
+                            # very_strong AND strong both use the same fast wait
+                            tier_kind = "strong+"
+                            base = 30.0 if trajectory == "rising" else 60.0
+                        else:
+                            tier_kind = "normal"
+                            base = 240.0 if trajectory == "rising" else 300.0
+
+                        required = base * ft_aggr
+
+                        # Tier-confirmation gate: prevents activating on a brief
+                        # single-tick spike into the tier. Last `required`
+                        # samples (= seconds at 1Hz) must all be at the tier
+                        # threshold. A symbol that was strong throughout
+                        # discovery passes immediately; one that just
+                        # transitioned waits until enough strong samples
+                        # accumulate.
+                        if tier_kind == "strong+":
+                            n_check = int(required)
+                            if len(wl.score_samples) < n_check:
+                                return False, "", required
+                            recent = list(wl.score_samples)[-n_check:]
+                            if not all(x >= self._strong_threshold for x in recent):
+                                return False, "", required
+
+                        # Total ticks gate: at least as many ticks as seconds
+                        if s.total_ticks < required:
+                            return False, "", required
+                        return True, f"fast_track_{tier_kind}_{trajectory}", required
+
+                    tradeable_found: list = []
+                    qualified_kind: str = ""
+                    qualified_required: float = min_time_std
+                    for s in self._scores.values():
+                        ok, kind, required = _qualifies(s)
+                        if ok:
+                            tradeable_found.append(s)
+                            # Prefer the standard kind in logs if any candidate
+                            # qualifies via that path; otherwise show fast-track
+                            # kind of the best (highest-score) candidate.
+                            if not qualified_kind or "standard" in kind:
+                                qualified_kind = kind
+                                qualified_required = required
+                    tradeable_found.sort(key=lambda s: s.score, reverse=True)
+
+                    if tradeable_found and elapsed >= qualified_required:
                         names = ", ".join(
                             f"{s.symbol.replace('USDT', '')}({s.score:.4f})"
                             for s in tradeable_found[:5]
                         )
                         logger.info(
                             f"[Optimizer] {len(tradeable_found)} tradeable candidates "
-                            f"found at {elapsed:.0f}s: {names} — exiting discovery"
+                            f"found at {elapsed:.0f}s ({qualified_kind}): {names} — exiting discovery"
                         )
                         self._complete_discovery()
                     elif elapsed >= self._discovery_duration:
@@ -800,12 +854,6 @@ class SymbolOptimizer:
             status = "NEW" if is_new else "WATCH"
             act_thresh = self._get_activation_threshold(s.symbol)
             fee_adj = self._compute_fee_threshold_adjustment(s.symbol)
-            route = (
-                "preferred"
-                if (not self._boost_aware_activation_enabled
-                    or self._is_boost_preferred_route(s.symbol))
-                else "non_preferred"
-            )
             logger.info(
                 f"[Candidate] {status} {s.symbol}: "
                 f"score={s.score:.6f} peak={wl.peak_score:.6f} "
@@ -813,8 +861,7 @@ class SymbolOptimizer:
                 f"avg_net={s.avg_profitable_net:.4f}% freq={s.frequency:.1%} "
                 f"ticks={s.profitable_ticks}/{s.total_ticks} "
                 f"trend={trend} phase=discovery "
-                f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f}) "
-                f"route={route}"
+                f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f})"
             )
 
         # Drop watchlist entries that fell below threshold
@@ -1492,6 +1539,50 @@ class SymbolOptimizer:
 
     # ── Watchlist ──────────────────────────────────────────────────────────
 
+    def _classify_trajectory(self, entry: WatchlistEntry) -> str:
+        """Classify a candidate's recent score trajectory as rising/stable/declining.
+
+        Compares the average of the recent half of the sample window against
+        the earlier half, with a peak-resilience clause to tolerate brief
+        dips. Robust to single-tick noise (averages instead of endpoints).
+
+        Returns one of: "rising", "stable", "declining".
+            rising:    recent_avg > earlier_avg × 1.02 (clear up bias)
+            stable:    within ±2% OR current ≥ peak × 0.85 (peak resilience)
+            declining: recent_avg < earlier_avg × 0.95 (sustained drop)
+
+        Requires ≥30 samples; falls back to "stable" if not enough data
+        (caller should gate on minimum samples separately).
+        """
+        samples = list(entry.score_samples)
+        n = len(samples)
+        if n < 30:
+            return "stable"
+
+        # Use the last 30 samples; split into two halves of 15
+        recent = samples[-30:]
+        earlier_half = recent[:15]
+        recent_half = recent[15:]
+        earlier_avg = sum(earlier_half) / 15
+        recent_avg = sum(recent_half) / 15
+
+        if earlier_avg <= 0:
+            # Score was zero earlier and is non-zero now → rising
+            return "rising" if recent_avg > 0 else "stable"
+
+        ratio = recent_avg / earlier_avg
+        if ratio >= 1.02:
+            return "rising"
+        if ratio < 0.95:
+            # Even when averages drop, peak-resilience saves a candidate
+            # that hit a high recently and is dipping but still close
+            current = samples[-1]
+            if entry.peak_score > 0 and current >= entry.peak_score * 0.85:
+                return "stable"
+            return "declining"
+        # Within ±2-5% — generally stable
+        return "stable"
+
     def _is_score_stable(
         self, entry: WatchlistEntry, current_score: float
     ) -> tuple[bool, str]:
@@ -1610,20 +1701,13 @@ class SymbolOptimizer:
                     status = "NEW" if is_new else "WATCH"
                     act_thresh = self._get_activation_threshold(sym)
                     fee_adj = self._compute_fee_threshold_adjustment(sym)
-                    route = (
-                        "preferred"
-                        if (not self._boost_aware_activation_enabled
-                            or self._is_boost_preferred_route(sym))
-                        else "non_preferred"
-                    )
                     logger.info(
                         f"[Candidate] {status} {sym}: "
                         f"score={score_val:.6f} peak={entry.peak_score:.6f} "
                         f"avg_net={score_obj.avg_profitable_net:.4f}% freq={score_obj.frequency:.1%} "
                         f"ticks={score_obj.profitable_ticks}/{score_obj.total_ticks} "
                         f"trend={trend} block={block} "
-                        f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f}) "
-                        f"route={route}"
+                        f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f})"
                     )
             else:
                 # Score dropped below threshold — remove from watchlist
@@ -2066,49 +2150,7 @@ class SymbolOptimizer:
         ):
             threshold *= self._diversification_floor_multiplier
 
-        # Boost-aware activation floor (S26 follow-up). If the dominant pair
-        # does NOT include a boost-preferred exchange (e.g., neither
-        # Bitfinex-as-buyer nor MEXC-as-seller), require a higher score floor
-        # so weaker candidates can't activate on non-preferred routes.
-        # The floor is `strong_threshold × non_preferred_score_multiplier`:
-        #   1.0 → require strong tier (0.1)
-        #   2.0 → require very_strong tier (0.2)
-        #   3.0+ → require exceptional spikes only
-        # Only raises (never lowers) the threshold. Refactored from
-        # very_strong base in v0.30.2-beta — the old base blocked legitimate
-        # strong candidates (e.g., S27 JUPUSDT @ 0.191 on MEXC→Bitfinex).
-        if self._boost_aware_activation_enabled and not self._is_boost_preferred_route(symbol):
-            non_preferred_floor = self._strong_threshold * self._non_preferred_score_multiplier
-            if non_preferred_floor > threshold:
-                threshold = non_preferred_floor
-
         return threshold
-
-    def _is_boost_preferred_route(self, symbol: str) -> bool:
-        """Return True if the symbol's dominant pair includes at least one
-        boost-preferred exchange role (buyer_boost > 1.0 on the top buyer,
-        OR seller_boost > 1.0 on the top seller).
-
-        With default config (Bitfinex.buyer_boost=5.0, MEXC.seller_boost=5.0),
-        any pair that has Bitfinex as dominant buyer OR MEXC as dominant
-        seller is "preferred". Symbols whose dominant pair lives elsewhere
-        (e.g., JUPUSDT routing through OKX→KuCoin) are non-preferred.
-
-        Uses cached `_dominant_pairs` when available (post-discovery), falls
-        back to recent profitable-tick analysis (same source as
-        `_get_symbol_pair_fee`) for pre-activation candidates.
-        """
-        if not self._fee_manager:
-            return True  # No fee manager → don't gate
-
-        top_buyer, top_seller = self._get_dominant_buyer_seller(symbol)
-        if not top_buyer or not top_seller:
-            # Insufficient data — treat as preferred (don't block on noise)
-            return True
-
-        buyer_boosted = self._fee_manager.get_buyer_boost(top_buyer) > 1.0
-        seller_boosted = self._fee_manager.get_seller_boost(top_seller) > 1.0
-        return buyer_boosted or seller_boosted
 
     def _get_dominant_buyer_seller(self, symbol: str) -> tuple[str, str]:
         """Return (top_buyer, top_seller) for a symbol.
@@ -2826,12 +2868,6 @@ class SymbolOptimizer:
                                 f"({buyers[0][0]}→{sellers[0][0]}) — pair_fee_exceeds_net"
                             )
                             continue
-                route = (
-                    "preferred"
-                    if (not self._boost_aware_activation_enabled
-                        or self._is_boost_preferred_route(candidate.symbol))
-                    else "non_preferred"
-                )
                 logger.info(
                     f"[Candidate] EXPAND_READY {candidate.symbol}: "
                     f"score={candidate.score:.6f} peak={wl_entry.peak_score:.6f} "
@@ -2841,7 +2877,6 @@ class SymbolOptimizer:
                     f"est_hourly=${candidate.est_hourly_profit:.4f} "
                     f"setup_cost=${est_cost:.2f} "
                     f"bfx={'yes' if self._is_symbol_on_bitfinex(candidate.symbol) else 'no'} "
-                    f"route={route} "
                     f"— activating"
                 )
                 self._expand_active(candidate.symbol, candidate)
@@ -3469,9 +3504,126 @@ class SymbolOptimizer:
                 "dominant_sellers": [ex for ex, _ in self._dominant_pairs[s.symbol]["sellers"]] if s.symbol in self._dominant_pairs else [],
                 "exchange_view": self.get_symbol_exchange_view(s.symbol),
                 "current_net_pct": round(self._ticks[s.symbol][-1].best_net_pct, 4) if s.symbol in self._ticks and self._ticks[s.symbol] else 0.0,
+                "diagnostic": self._build_symbol_diagnostic(s, s.symbol in active_set, now),
             }
             for i, s in enumerate(ranked)
         ]
+
+    def _build_symbol_diagnostic(self, s, is_active: bool, now: float) -> dict:
+        """Build a structured diagnostic explaining a symbol's current state.
+
+        Used by the dashboard hover tooltip to show WHY a symbol is active /
+        candidate / blocked. All values are pre-computed strings so the UI
+        can just render them.
+        """
+        symbol = s.symbol
+        threshold = self._get_activation_threshold(symbol)
+        fee_adj = self._compute_fee_threshold_adjustment(symbol)
+        score = s.score
+
+        # Tier (matches focus tier classification)
+        if score >= self._very_strong_threshold:
+            tier = "very_strong"
+        elif score >= self._strong_threshold:
+            tier = "strong"
+        elif score >= self._trading_threshold:
+            tier = "normal"
+        else:
+            tier = "weak"
+
+        # Trajectory (from watchlist samples)
+        wl = self._watchlist.get(symbol)
+        if wl and len(wl.score_samples) >= 30:
+            trajectory = self._classify_trajectory(wl)
+            samples_count = len(wl.score_samples)
+        else:
+            trajectory = "insufficient_data"
+            samples_count = len(wl.score_samples) if wl else 0
+
+        # Status reason
+        reasons: list[str] = []
+        if is_active:
+            status = "active"
+            mult = round(s.trade_multiplier, 2)
+            sized = round(self._trade_amount * s.trade_multiplier, 2)
+            reasons.append(f"Active in dominant pair (multiplier {mult}×, trade size ${sized})")
+        elif symbol in self._recently_demoted:
+            status = "cooldown"
+            cd = max(0.0, self._demotion_cooldown - (now - self._recently_demoted[symbol]))
+            reasons.append(f"In demotion cooldown ({cd:.0f}s remaining)")
+        elif score < threshold:
+            status = "below_threshold"
+            reasons.append(
+                f"Score {score:.4f} < activation threshold {threshold:.4f}"
+            )
+            reasons.append(
+                f"Need score ≥ {threshold:.4f} (= base {self._trading_threshold} + fee_adj {fee_adj:+.4f})"
+            )
+        elif trajectory == "declining":
+            status = "candidate_declining"
+            reasons.append(
+                f"Score is declining — falls back to standard {self._scoring_window // 2}s wait"
+            )
+        elif trajectory == "insufficient_data":
+            status = "candidate_warming_up"
+            reasons.append(f"Need 30+ samples for trajectory check (have {samples_count})")
+        else:
+            status = "candidate"
+            # Determine fast-track requirement
+            if score >= self._strong_threshold:
+                base = 30.0 if trajectory == "rising" else 60.0
+                tier_label = "strong+"
+            else:
+                base = 240.0 if trajectory == "rising" else 300.0
+                tier_label = "normal"
+            required = base * self._fast_track_aggressiveness
+            reasons.append(
+                f"Fast-track {tier_label}+{trajectory}: needs {required:.0f}s observation"
+            )
+            if score >= self._strong_threshold:
+                # Tier-confirmation gate
+                n_check = int(required)
+                if wl and len(wl.score_samples) >= n_check:
+                    recent = list(wl.score_samples)[-n_check:]
+                    strong_count = sum(1 for x in recent if x >= self._strong_threshold)
+                    if strong_count < n_check:
+                        reasons.append(
+                            f"Tier-confirmation: {strong_count}/{n_check} recent samples at strong tier"
+                        )
+            if s.total_ticks < required:
+                reasons.append(
+                    f"Observation: {s.total_ticks}/{int(required)} ticks accumulated"
+                )
+
+        # Score breakdown
+        score_formula = (
+            f"avg_profitable_net {s.avg_profitable_net:.4f}% × frequency "
+            f"{s.frequency:.1%} = score {score:.4f}"
+        )
+
+        # Watchlist details
+        wl_info = {}
+        if wl:
+            elapsed = now - wl.entered_at
+            wl_info = {
+                "entered_seconds_ago": round(elapsed, 0),
+                "samples": samples_count,
+                "peak_score": round(wl.peak_score, 4),
+                "confirmed": bool(wl.confirmed),
+            }
+
+        return {
+            "status": status,
+            "tier": tier,
+            "trajectory": trajectory,
+            "reasons": reasons,
+            "score_formula": score_formula,
+            "threshold_breakdown": (
+                f"base {self._trading_threshold:.4f} + fee_adj {fee_adj:+.4f} "
+                f"= {threshold:.4f}"
+            ),
+            "watchlist": wl_info,
+        }
 
     def get_rotations(self) -> list[dict]:
         """Return rotation history for the dashboard."""

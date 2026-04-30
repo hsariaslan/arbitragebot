@@ -6,7 +6,7 @@ All symbols, exchange settings, and operational parameters.
 
 import os
 
-__version__ = "0.30.3-beta"
+__version__ = "0.30.4-beta"
 
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
@@ -387,15 +387,26 @@ AUTO_EXPAND_ON_UNDERSTAFF: bool = True
 DIVERSIFICATION_FLOOR_ENABLED: bool = True
 DIVERSIFICATION_FLOOR_MULTIPLIER: float = 0.7  # 30% easier to clear when understaffed
 
-# Boost-aware activation gate (S26 follow-up). When a candidate's dominant pair
-# does NOT include a boost-preferred exchange (e.g., neither Bitfinex-as-buyer
-# nor MEXC-as-seller), require a much higher score to activate. Routine
-# 0.1-0.3 candidates on non-preferred routes get blocked; only exceptional
-# spikes (AR-style 12% spreads → score >> 0.6) can override the route
-# preference. Symbols with at least one boost-preferred role in their
-# dominant pair use the standard fee-aware threshold.
-BOOST_AWARE_ACTIVATION_ENABLED: bool = True
-NON_PREFERRED_SCORE_MULTIPLIER: float = 2.0  # × very_strong_threshold (0.3) = 0.6 floor
+# Fast-track discovery exit (S29 follow-up). When a candidate's trajectory
+# is healthy (rising or stable, not declining) and it clears the activation
+# threshold, exit discovery much sooner than the standard 15-min warmup.
+#
+# Trajectory is classified by comparing the average of the recent half of
+# the sample window vs the earlier half, plus a peak-resilience clause to
+# tolerate brief dips in an otherwise strong candidate. This is robust to
+# noisy single-tick fluctuations.
+#
+# Per-tier time requirements (multiplied by `FAST_TRACK_AGGRESSIVENESS`):
+#   very_strong / strong + rising:   30s
+#   very_strong / strong + stable:   60s
+#   normal + rising:                240s
+#   normal + stable:                300s
+#   any + declining:    full standard wait (scoring_window // 2)
+#
+# Aggressiveness multiplier scales all fast-track waits (1.0 = baseline,
+# 0.5 = halve, 2.0 = double). Hot-applied via dashboard.
+FAST_TRACK_DISCOVERY_ENABLED: bool = True
+FAST_TRACK_AGGRESSIVENESS: float = 1.0
 
 # Auto-disable thinly-traded symbols per exchange. Daily at 00:01 UTC, the bot
 # fetches 24h volumes from each exchange and adds (exchange, symbol) combos

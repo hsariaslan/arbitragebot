@@ -81,9 +81,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   // Funding-aware scoring (Phase A)
   const [diversificationFloorEnabled, setDiversificationFloorEnabled] = useState(currentSettings.diversification_floor_enabled ?? true);
   const [diversificationFloorMultiplier, setDiversificationFloorMultiplier] = useState(currentSettings.diversification_floor_multiplier ?? 0.7);
-  // Boost-aware activation gate (S26 follow-up)
-  const [boostAwareActivationEnabled, setBoostAwareActivationEnabled] = useState(currentSettings.boost_aware_activation_enabled ?? true);
-  const [nonPreferredScoreMultiplier, setNonPreferredScoreMultiplier] = useState(currentSettings.non_preferred_score_multiplier ?? 2.0);
+  const [fastTrackDiscoveryEnabled, setFastTrackDiscoveryEnabled] = useState(currentSettings.fast_track_discovery_enabled ?? true);
+  const [fastTrackAggressiveness, setFastTrackAggressiveness] = useState(currentSettings.fast_track_aggressiveness ?? 1.0);
   const [autoDisableVolumeEnabled, setAutoDisableVolumeEnabled] = useState(currentSettings.auto_disable_volume_enabled ?? true);
   const [autoDisableVolumeThreshold, setAutoDisableVolumeThreshold] = useState(currentSettings.auto_disable_volume_threshold_usd ?? 10000);
   const [fundingAwareEnabled, setFundingAwareEnabled] = useState(currentSettings.funding_aware_scoring_enabled ?? true);
@@ -172,8 +171,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setMaxPositionMultiplier(currentSettings.max_position_multiplier ?? 5.0);
       setDiversificationFloorEnabled(currentSettings.diversification_floor_enabled ?? true);
       setDiversificationFloorMultiplier(currentSettings.diversification_floor_multiplier ?? 0.7);
-      setBoostAwareActivationEnabled(currentSettings.boost_aware_activation_enabled ?? true);
-      setNonPreferredScoreMultiplier(currentSettings.non_preferred_score_multiplier ?? 2.0);
+      setFastTrackDiscoveryEnabled(currentSettings.fast_track_discovery_enabled ?? true);
+      setFastTrackAggressiveness(currentSettings.fast_track_aggressiveness ?? 1.0);
       setAutoDisableVolumeEnabled(currentSettings.auto_disable_volume_enabled ?? true);
       setAutoDisableVolumeThreshold(currentSettings.auto_disable_volume_threshold_usd ?? 10000);
       setFundingAwareEnabled(currentSettings.funding_aware_scoring_enabled ?? true);
@@ -253,8 +252,8 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     max_position_multiplier: maxPositionMultiplier,
     diversification_floor_enabled: diversificationFloorEnabled,
     diversification_floor_multiplier: diversificationFloorMultiplier,
-    boost_aware_activation_enabled: boostAwareActivationEnabled,
-    non_preferred_score_multiplier: nonPreferredScoreMultiplier,
+    fast_track_discovery_enabled: fastTrackDiscoveryEnabled,
+    fast_track_aggressiveness: fastTrackAggressiveness,
     auto_disable_volume_enabled: autoDisableVolumeEnabled,
     auto_disable_volume_threshold_usd: autoDisableVolumeThreshold,
     funding_aware_scoring_enabled: fundingAwareEnabled,
@@ -862,29 +861,36 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         </div>
       </div>
 
-      {/* Boost-Aware Activation Gate (S26 follow-up — block routine candidates on non-preferred routes) */}
+      {/* Fast-Track Discovery Exit (S29 follow-up — trajectory-aware exit) */}
       <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Boost-Aware Activation Gate</h2>
+        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Fast-Track Discovery Exit</h2>
         <p className="text-xs text-slate-500 mb-3">
-          With Bitfinex.buyer_boost and MEXC.seller_boost set, the bot already prefers that route during execution — but the activation logic was route-blind, so it would still activate weak symbols whose dominant pair lives elsewhere. This gate raises the activation bar for non-preferred routes. Floor formula: <code>strong_threshold × multiplier</code> (default 0.1 × 2.0 = 0.2). 1.0 = require strong; 2.0 = require very_strong; 3.0+ = require exceptional spikes. Symbols with at least one boost-preferred role in their dominant pair use the standard fee-aware threshold.
+          Trajectory-aware early exit. Standard discovery waits <code>scoring_window // 2</code> (15 min default) — too long for already-stable candidates. Fast-track classifies the candidate's recent trajectory (rising / stable / declining) using moving-average comparison plus peak-resilience for noise tolerance, then applies tier-aware time requirements. The strong+ tier also requires the last N samples to all be at the tier threshold (prevents activating on single-tick spikes).
         </p>
+        <div className="text-xs text-slate-400 mb-3 bg-slate-900/40 rounded p-3 font-mono">
+          <div>strong+rising:  30s × aggressiveness</div>
+          <div>strong+stable:  60s × aggressiveness</div>
+          <div>normal+rising: 240s × aggressiveness</div>
+          <div>normal+stable: 300s × aggressiveness</div>
+          <div>any +declining: full standard wait (scoring_window // 2)</div>
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="flex items-center gap-2">
             <label className="flex items-center cursor-pointer">
-              <input type="checkbox" checked={boostAwareActivationEnabled}
-                onChange={e => setBoostAwareActivationEnabled(e.target.checked)}
+              <input type="checkbox" checked={fastTrackDiscoveryEnabled}
+                onChange={e => setFastTrackDiscoveryEnabled(e.target.checked)}
                 className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
-              <span className="text-sm text-slate-300">Enable Boost-Aware Activation</span>
+              <span className="text-sm text-slate-300">Enable Fast-Track Discovery</span>
             </label>
-            <Tooltip text="When enabled, candidates whose dominant pair does NOT include a boost-preferred exchange (buyer_boost > 1.0 on top buyer OR seller_boost > 1.0 on top seller) need a much higher score to activate. Default: enabled. Config key: boost_aware_activation_enabled" />
+            <Tooltip text="When enabled, candidates exit discovery via trajectory-aware tier-based timing. Standard 15-min wait still applies for declining candidates and as a fallback. Default: enabled. Config key: fast_track_discovery_enabled" />
           </div>
           <div>
             <label className="flex items-center text-xs text-slate-500 mb-1">
-              Non-Preferred Score Multiplier
-              <Tooltip text="Floor for non-preferred routes is strong_threshold × this multiplier (e.g., 0.1 × 2.0 = 0.2). 1.0 = strong tier (0.1); 2.0 = very_strong tier (0.2); 3.0+ = exceptional spikes only. Range: 1.0-5.0. Default: 2.0. Config key: non_preferred_score_multiplier" />
+              Aggressiveness Multiplier
+              <Tooltip text="Multiplies all fast-track wait times. 1.0 = baseline (e.g., strong+rising = 30s); 0.5 = halve (15s); 2.0 = double (60s). Lower = faster activation but less confirmation; higher = more cautious. Range: 0.1-3.0. Default: 1.0. Config key: fast_track_aggressiveness" />
             </label>
-            <input type="number" value={nonPreferredScoreMultiplier} min={1.0} max={5.0} step={0.1}
-              onChange={d(setNonPreferredScoreMultiplier, 2.0)}
+            <input type="number" value={fastTrackAggressiveness} min={0.1} max={3.0} step={0.1}
+              onChange={d(setFastTrackAggressiveness, 1.0)}
               className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
           </div>
         </div>
