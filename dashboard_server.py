@@ -1444,6 +1444,21 @@ class DashboardServer:
 
         elif msg_type == "restart":
             logger.info("[Dashboard] Fresh restart requested from dashboard")
+            # Close all real futures positions before clearing state — orphan
+            # positions inherited across restarts produce phantom drawdowns
+            # via futures markPrice divergence (S30: -$215 unrealized loss
+            # from a -273 PENDLE short adopted at $1.3357 from prior session).
+            try:
+                hm = getattr(self._monitor, "_hedge_manager", None)
+                if hm is not None:
+                    res = await hm.close_all_real_positions(reason="restart")
+                    logger.info(
+                        f"[Dashboard] Restart pre-flight: "
+                        f"closed {res.get('n_closed', 0)} hedge positions, "
+                        f"failed {res.get('n_failed', 0)}"
+                    )
+            except Exception as e:
+                logger.error(f"[Dashboard] Restart pre-flight hedge close failed: {e}")
             if self._state_manager:
                 self._state_manager.clear()
             await ws.send(json.dumps({"type": "restart_ack"}))

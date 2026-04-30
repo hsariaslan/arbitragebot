@@ -287,12 +287,6 @@ export default function SymbolRankings({ rankings, warmupRemaining, autoRotate, 
                           </span>
                         ))}
                       </span>
-                    ) : r.dominant_buyers?.length > 0 ? (
-                      <span className="text-cyan-400">
-                        {r.dominant_buyers.map(shortEx).join(',')}
-                        <span className="text-slate-500">→</span>
-                        {r.dominant_sellers.map(shortEx).join(',')}
-                      </span>
                     ) : '—'}
                   </td>
                   <td className="px-2 py-1.5 text-center">

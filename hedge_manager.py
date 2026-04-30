@@ -267,6 +267,75 @@ class HedgeManager:
             "n_failed": len(failed),
         }
 
+    async def close_all_real_positions(self, reason: str = "restart") -> dict:
+        """Close every real futures position, including orphans not in shadow.
+
+        Used by Restart Bot to wipe the slate clean — orphan positions
+        carried over from previous sessions can produce phantom drawdowns
+        (S30: PENDLE -273 contracts inherited at $1.3357 entry produced a
+        $215 unrealized loss when Fix B switched to futures markPrice
+        post-restart).
+
+        Differs from `close_all_for_emergency`:
+        - Queries the executor for ALL real positions (not just shadow)
+        - Closes orphans that have no shadow entry
+        - Wipes shadow state regardless of close success
+
+        Safe in shadow/simulation mode — just clears shadow state.
+        """
+        closed: list[dict] = []
+        failed: list[dict] = []
+        if self._execution_mode in ("simulation",) or self._executor is None:
+            # No real positions to close; just wipe shadow
+            n_shadows = len(self._shadows)
+            self._shadows.clear()
+            logger.info(
+                f"[Hedge] CLOSE_ALL_REAL_POSITIONS reason={reason}: "
+                f"shadow_only mode — cleared {n_shadows} shadow entries"
+            )
+            return {"closed": [], "failed": [], "n_closed": 0, "n_failed": 0,
+                    "shadow_cleared": n_shadows}
+        try:
+            real_positions = await self._executor.get_all_positions()
+        except Exception as e:
+            logger.error(f"[Hedge] CLOSE_ALL_REAL_POSITIONS get_all_positions failed: {e}")
+            real_positions = []
+        symbols_to_close: set[str] = set()
+        for pos in real_positions or []:
+            futures_sym = pos.get("symbol")
+            if not futures_sym:
+                continue
+            try:
+                size = float(pos.get("positionAmt", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                size = 0.0
+            if abs(size) > 0:
+                symbols_to_close.add(futures_sym)
+        # Also close any shadow-tracked symbols whose futures may have desynced
+        for spot_sym in list(self._shadows.keys()):
+            futures_sym, _ = get_futures_symbol(spot_sym)
+            symbols_to_close.add(futures_sym)
+        for futures_sym in symbols_to_close:
+            try:
+                ok = await self._executor.close_position(futures_sym)
+                if ok:
+                    closed.append({"symbol": futures_sym})
+                    logger.info(f"[Hedge] CLOSE_ALL_REAL_POSITIONS: closed {futures_sym}")
+                else:
+                    failed.append({"symbol": futures_sym, "error": "close returned False"})
+                    logger.warning(f"[Hedge] CLOSE_ALL_REAL_POSITIONS: {futures_sym} returned False")
+            except Exception as e:
+                failed.append({"symbol": futures_sym, "error": str(e)})
+                logger.error(f"[Hedge] CLOSE_ALL_REAL_POSITIONS {futures_sym} failed: {e}")
+        # Wipe shadow state regardless
+        self._shadows.clear()
+        logger.info(
+            f"[Hedge] CLOSE_ALL_REAL_POSITIONS reason={reason}: "
+            f"closed={len(closed)} failed={len(failed)} (shadow wiped)"
+        )
+        return {"closed": closed, "failed": failed,
+                "n_closed": len(closed), "n_failed": len(failed)}
+
     def _lock_for(self, symbol: str) -> asyncio.Lock:
         if symbol not in self._symbol_locks:
             self._symbol_locks[symbol] = asyncio.Lock()

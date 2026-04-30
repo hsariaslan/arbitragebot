@@ -1663,8 +1663,20 @@ class ArbitrageMonitor:
                 # Minimum net% threshold (scoring_net includes cashback weighting)
                 pair_min_net = self._min_net_profit_pct
 
-                # Simulate trade if profitable after cashback and above threshold
-                if best_scoring_net > 0 and best_scoring_net >= pair_min_net:
+                # Simulate trade if profitable after cashback AND raw P&L is
+                # positive. The raw-net check (v0.30.5) prevents executing
+                # trades that depend on delayed cashback to break even —
+                # observed in S30 where Bitget→Binance PENDLE trades printed
+                # net=-0.0055% (raw loss $0.001/trade) because scoring_net
+                # included pre-applied cashback. Cashback is real but
+                # delayed; we shouldn't trade at an immediate raw deficit
+                # for the *promise* of cashback.
+                raw_net_pct = best_row[7] if best_row else 0.0
+                if (
+                    best_scoring_net > 0
+                    and best_scoring_net >= pair_min_net
+                    and raw_net_pct > 0
+                ):
                     self._interval_profitable += 1
 
                     # Spread persistence gate: require spread across consecutive ticks

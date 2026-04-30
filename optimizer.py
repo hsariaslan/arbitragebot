@@ -296,6 +296,14 @@ class SymbolOptimizer:
 
         # Latest computed scores
         self._scores: dict[str, SymbolScore] = {}
+
+        # Per-symbol score history — updated every tick for ALL symbols (not
+        # tied to watchlist). Used by `_classify_trajectory` so trajectory
+        # stays current for active symbols too. (Bug fixed v0.30.5: watchlist
+        # samples were frozen post-activation, making active symbols always
+        # show their last-discovery trend even after they'd been declining
+        # for tens of minutes.)
+        self._score_history: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=120))
         self._prev_candidate_set: set[str] = set()  # for tracking candidate transitions
         self._prev_strong_set: set[str] = set()     # score >= 0.1 last tick
         self._prev_very_strong_set: set[str] = set()  # score >= 0.3 last tick
@@ -458,12 +466,16 @@ class SymbolOptimizer:
                         if not ft_enabled:
                             return False, "", min_time_std
 
-                        # Trajectory classification needs 30+ samples
+                        # Trajectory classification needs 30+ samples — use
+                        # live per-symbol score history (works for active +
+                        # candidates).
+                        history = self._score_history.get(s.symbol)
                         wl = self._watchlist.get(s.symbol)
-                        if not wl or len(wl.score_samples) < 30:
+                        if not history or len(history) < 30:
                             return False, "", min_time_std
 
-                        trajectory = self._classify_trajectory(wl)
+                        peak_for_traj = wl.peak_score if wl else max(history)
+                        trajectory = self._classify_trajectory(history, peak_score=peak_for_traj)
                         if trajectory == "declining":
                             return False, "", min_time_std  # full wait
 
@@ -487,9 +499,9 @@ class SymbolOptimizer:
                         # accumulate.
                         if tier_kind == "strong+":
                             n_check = int(required)
-                            if len(wl.score_samples) < n_check:
+                            if len(history) < n_check:
                                 return False, "", required
-                            recent = list(wl.score_samples)[-n_check:]
+                            recent = list(history)[-n_check:]
                             if not all(x >= self._strong_threshold for x in recent):
                                 return False, "", required
 
@@ -1058,6 +1070,11 @@ class SymbolOptimizer:
 
         self._scores = {s.symbol: s for s in all_scores}
 
+        # Maintain per-symbol score history for trajectory classification.
+        # Independent of watchlist so it stays current for active symbols.
+        for s in all_scores:
+            self._score_history[s.symbol].append(s.score)
+
         # Compute per-symbol trade multipliers with focus tiers for active symbols
         # Tiered system: very_strong (>=0.3), strong (>=0.1), normal (>=0.01), weak (<0.01)
         # Symbols >= self._trading_threshold can trade; below that get multiplier=0 (unless active: 1.0x floor)
@@ -1539,9 +1556,10 @@ class SymbolOptimizer:
 
     # ── Watchlist ──────────────────────────────────────────────────────────
 
-    def _classify_trajectory(self, entry: WatchlistEntry) -> str:
-        """Classify a candidate's recent score trajectory as rising/stable/declining.
+    def _classify_trajectory(self, samples_or_entry, peak_score: float | None = None) -> str:
+        """Classify a symbol's recent score trajectory as rising/stable/declining.
 
+        Accepts either a list/deque of scores or a WatchlistEntry (back-compat).
         Compares the average of the recent half of the sample window against
         the earlier half, with a peak-resilience clause to tolerate brief
         dips. Robust to single-tick noise (averages instead of endpoints).
@@ -1550,11 +1568,14 @@ class SymbolOptimizer:
             rising:    recent_avg > earlier_avg × 1.02 (clear up bias)
             stable:    within ±2% OR current ≥ peak × 0.85 (peak resilience)
             declining: recent_avg < earlier_avg × 0.95 (sustained drop)
-
-        Requires ≥30 samples; falls back to "stable" if not enough data
-        (caller should gate on minimum samples separately).
         """
-        samples = list(entry.score_samples)
+        if isinstance(samples_or_entry, WatchlistEntry):
+            samples = list(samples_or_entry.score_samples)
+            peak = samples_or_entry.peak_score if peak_score is None else peak_score
+        else:
+            samples = list(samples_or_entry)
+            peak = peak_score if peak_score is not None else (max(samples) if samples else 0.0)
+
         n = len(samples)
         if n < 30:
             return "stable"
@@ -1567,20 +1588,16 @@ class SymbolOptimizer:
         recent_avg = sum(recent_half) / 15
 
         if earlier_avg <= 0:
-            # Score was zero earlier and is non-zero now → rising
             return "rising" if recent_avg > 0 else "stable"
 
         ratio = recent_avg / earlier_avg
         if ratio >= 1.02:
             return "rising"
         if ratio < 0.95:
-            # Even when averages drop, peak-resilience saves a candidate
-            # that hit a high recently and is dipping but still close
             current = samples[-1]
-            if entry.peak_score > 0 and current >= entry.peak_score * 0.85:
+            if peak > 0 and current >= peak * 0.85:
                 return "stable"
             return "declining"
-        # Within ±2-5% — generally stable
         return "stable"
 
     def _is_score_stable(
@@ -3531,14 +3548,20 @@ class SymbolOptimizer:
         else:
             tier = "weak"
 
-        # Trajectory (from watchlist samples)
+        # Trajectory (from per-symbol score history — live for both
+        # active and candidate symbols, updated each tick in _compute_scores)
+        history = self._score_history.get(symbol)
         wl = self._watchlist.get(symbol)
-        if wl and len(wl.score_samples) >= 30:
-            trajectory = self._classify_trajectory(wl)
-            samples_count = len(wl.score_samples)
+        if history and len(history) >= 30:
+            peak_for_traj = wl.peak_score if wl else max(history)
+            trajectory = self._classify_trajectory(history, peak_score=peak_for_traj)
+            samples_count = len(history)
+        elif history:
+            trajectory = "insufficient_data"
+            samples_count = len(history)
         else:
             trajectory = "insufficient_data"
-            samples_count = len(wl.score_samples) if wl else 0
+            samples_count = 0
 
         # Status reason
         reasons: list[str] = []
@@ -3581,10 +3604,10 @@ class SymbolOptimizer:
                 f"Fast-track {tier_label}+{trajectory}: needs {required:.0f}s observation"
             )
             if score >= self._strong_threshold:
-                # Tier-confirmation gate
+                # Tier-confirmation gate (uses live score_history)
                 n_check = int(required)
-                if wl and len(wl.score_samples) >= n_check:
-                    recent = list(wl.score_samples)[-n_check:]
+                if history and len(history) >= n_check:
+                    recent = list(history)[-n_check:]
                     strong_count = sum(1 for x in recent if x >= self._strong_threshold)
                     if strong_count < n_check:
                         reasons.append(
