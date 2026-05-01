@@ -845,3 +845,167 @@ After session end, three drawdown fixes were implemented:
 - **Fix B** (Binance Futures markPrice for hedge unrealized) — eliminates spot/futures basis error
 
 The OKX network-fee leak is **not yet fixed**. That's the highest-priority operational issue for v0.30.1.
+
+### Patches v0.30.1-beta → v0.30.6-beta (between S26 and S27)
+
+Six patch releases were shipped during the S26→S27 gap, addressing drawdown false-positives, activation-logic gaps, observability, and UI polish. Summarized inline so the next session post-mortem doesn't have to re-derive context from git.
+
+#### v0.30.1-beta — Phantom Drawdown Fixes
+- **Fix C — peak ratchets on realized capital**, not MTM. `BalanceTracker.get_realized_capital()` returns `initial + trading_pnl + credited_cashback − external_fees` (no spot/hedge MTM). `AnomalyProtection.update_portfolio_value(realized_value=…)` uses this for peak tracking; drawdown is still measured against MTM `portfolio_value`. Eliminates the entire phantom-drawdown class from MTM oscillation.
+- **Fix A — per-exchange spot prices for crypto MTM**. Crypto on each exchange is marked at THAT exchange's actual price. New `monitor._get_per_exchange_prices()` helper; `BalanceTracker.get_portfolio_value(prices_per_exchange=…)`.
+- **Fix B — Binance Futures markPrice for hedge unrealized PnL**. `HedgeManager.get_debug_state()` prefers `funding_monitor.get_mark_price()` (1000X-scaled) over spot mid. Each hedge entry tags `mark_source: "futures"|"spot"`.
+- **Boost-aware activation gate (initial)** — set non-preferred-route activation floor to `very_strong × non_preferred_score_multiplier` (default 0.3 × 2.0 = 0.6). *This part was reverted in v0.30.4 — see below.*
+
+#### v0.30.2-beta — Boost-aware Floor Rebase
+- After S27 (now-renumbered S27, observed as JUPUSDT @ 0.191) showed legitimate strong-tier candidates being blocked at 0.6 floor, rebased the formula to `strong_threshold × multiplier` (= 0.1 × 2.0 = 0.2). Multiplier semantics became: 1.0 = strong tier, 2.0 = very-strong-ish, 3.0+ = exceptional only. *Also reverted in v0.30.4.*
+
+#### v0.30.3-beta — Block-aware Scoring + Per-symbol Exchange View
+- **Block-aware scoring**. `_score_tick()` now skips `(buyer, seller)` pairs where either leg is blocked for the symbol via `fee_manager.can_buy/can_sell`. Without this, the score reflected opportunities through blocked exchanges that the allocator couldn't actually use — observed when JUPUSDT scored 0.27 while Bitfinex was auto-disabled for JUP, leaving the bot allocated to a zero-edge Bybit↔MEXC pair.
+- **Per-symbol exchange view in rankings UI**. New `SymbolOptimizer.get_symbol_exchange_view(symbol)` returns sorted `buyers` and `sellers` lists for any symbol (not just active ones), each entry tagged with `weight` and `blocked`. Mirrors `_compute_dominant_pairs._select_top` math. Surfaced in `get_rankings()` as `exchange_view`. Symbol Rankings table renders for **all 20 ranked symbols** — best buyer (cyan, bold) → best seller (fuchsia, bold), secondary entries dimmer, **blocked exchanges in rose strikethrough**.
+
+#### v0.30.4-beta — Drop Boost-aware Gate; Trajectory-aware Fast-track + Hover Tooltip
+- **Boost-aware activation gate REMOVED**. Per operator: the gate was *deboosting* non-preferred routes via a hard score floor — contradicting the multiplicative-only design intent. The 25× boost in pair selection (`monitor._tick`, `optimizer._select_top`) is sufficient. Removed: `_is_boost_preferred_route`, `boost_aware_activation_enabled`, `non_preferred_score_multiplier`, `route=` log fields, UI section. Boost multipliers in pair selection unchanged.
+- **Fast-track discovery exit**. Trajectory-aware early-exit replaces the simple `scoring_window // 6` rule:
+  - `_classify_trajectory(samples_or_entry)` compares `mean(last-15)` vs `mean(prior-15)` with peak-resilience clause (`current ≥ peak × 0.85` overrides averages-based decline).
+  - Tier × trajectory matrix: `strong+ rising = 30s`, `strong+ stable = 60s`, `normal rising = 240s`, `normal stable = 300s`, `any + declining = full standard`.
+  - Strong-tier candidates additionally need a tier-confirmation gate (last N samples all ≥ strong_threshold) to prevent activating on single-tick spikes.
+  - Settings: `fast_track_discovery_enabled` (default true), `fast_track_aggressiveness` (float, default 1.0).
+- **Per-symbol diagnostic + hover tooltip**. `optimizer._build_symbol_diagnostic()` produces structured `{status, tier, trajectory, reasons[], score_formula, threshold_breakdown, watchlist}` per ranking entry. Symbol Rankings table renders a sticky hover popover with status pill, tier color, trajectory icon, bulleted reasons, score/threshold breakdowns. Updates with each broadcast tick.
+
+#### v0.30.5-beta — Trajectory Fix + Deficit-trade Gate + Restart Orphan Close-out
+- **Trajectory bug for active symbols**. S30 showed GRT 0.066 → 0.049 over 5 min (clearly declining) with tooltip reporting "rising" because `_classify_trajectory` was reading `WatchlistEntry.score_samples` — only populated during discovery + watchlist confirmation. After activation the watchlist entry was popped and samples froze. Added `SymbolOptimizer._score_history: dict[str, deque[float]]` (maxlen 120) updated for ALL symbols at the end of every `_compute_scores()` tick. `_classify_trajectory` now accepts a list/deque or `WatchlistEntry`.
+- **Deficit-trade gate**. S30 had multiple PENDLE Bitget→Binance trades print `net=-0.0055%`. Root cause: the threshold check uses `scoring_net` which has cashback discount baked in via `get_scoring_fee` → scoring_net positive while raw_net negative. Fix: `monitor._tick()` now also requires `raw_net_pct > 0` before executing. Cashback IS real but delayed (1-24h); the bot shouldn't trade at immediate raw deficit on the *promise* of cashback.
+- **Restart orphan close-out**. S30's $215 phantom drawdown was caused by a -273 PENDLE futures short adopted as orphan from a previous session at $1.3357 entry — when Fix B switched to markPrice, the inherited entry vs current testnet markPrice gap produced fictitious unrealized loss that hedging cannot offset (it's pre-existing, not new exposure). New `HedgeManager.close_all_real_positions(reason)` queries the executor for ALL real positions (not just shadow-tracked) and closes every one. Wired into the dashboard "Restart Bot" handler — runs BEFORE state clear. Shadow-only mode just wipes shadow.
+- **UI: column always uses exchange_view**. Removed the `dominant_buyers/dominant_sellers` fallback path. Column is now consistent with the hover tooltip.
+
+#### v0.30.6-beta — Tooltip Bitget/Bitfinex Collision + Cursor-following Popover
+- **Tooltip Bitget/Bitfinex collision**. Popover was rendering exchange names via `name.slice(0, 3).toUpperCase()`, collapsing both "Bitget" AND "Bitfinex" to "BIT". The column used `shortEx()` with the EX_SHORT lookup (Bitget→BGT). Same data, two render paths, reported as "column shows BGT, tooltip shows BIT" inconsistency. Added Bitfinex→BFX and Pionex→PNX to EX_SHORT; popover now uses `shortEx()` for both buyer and seller lists.
+- **Cursor-following popover**. Tooltip follows the mouse cursor with a 16px margin instead of being pinned to the viewport's bottom-right. Auto-flips to the left of the cursor if it would overflow the right edge; auto-flips above if it would overflow the bottom. Animation shortened from 120ms → 80ms.
+
+### Session #27 — 2026-04-30/05-01 (v0.30.6-beta, ~8h14m, ended in deficit)
+
+#### Headline Result — Deficit despite all v0.30.1-6 fixes
+
+| Metric | Value |
+|---|---:|
+| Duration | 8h14m (17:09 UTC → 01:23 UTC next day) |
+| Trades | 14 (1.7 trades/hour) |
+| Trading P&L | +$0.13 |
+| External transfer fees | $0.29 |
+| Cashback (credited / pending) | $0.03 / $0.03 |
+| **Net** | **−$0.12** ($/hr = −$0.01) |
+| Final portfolio value | ~$999 (≈ flat from $1,000 start) |
+| Symbols cycled | 4 (NEAR → PENDLE → EIGEN → DOGE) |
+| Hedge OPENs / CLOSEs / errors | 4 / 3 / 0 |
+| Cumulative funding (hedge) | +$0.005 |
+| Anomaly events | 0 pauses, 0 warnings, 0 symbol blocks |
+| sz0 / rebal_blocked / phantom / pos_cap | 912 / 309 / 79 / 35 |
+| evd_seller penalties applied | 11,914 (53 demoted) |
+
+**This is the cleanest session yet** — zero anomalies, zero errors, hedge testnet still flawless, no phantom drawdowns (Fix C did its job), no deficit trades after the v0.30.5 raw-net gate, no orphan position issues (none carried over from S26→S27 since the user clicked Restart Bot which now closes all real positions). And yet the bot still ended slightly negative.
+
+#### Why the Deficit (root cause, single sentence)
+
+**Demotion-sell taker fees ($0.28) consumed the trading P&L ($0.13).** Specifically:
+- PENDLE demotion at 19:56:58 sold $361.09 of crypto on MEXC (NOT routed via Bitfinex 0%) → fees $0.181
+- EIGEN demotion at 00:10:10 sold $42.94 on Bitget → fees $0.101
+- NEAR demotion was correctly routed via Bitfinex 0% → fees $0.000 (saved $0.017 taker)
+
+The $0.28 in demotion-sell fees is the dominant cost. Trade execution itself was profitable — every recorded trade had a positive net% (no deficit-trade events fired the v0.30.5 raw-net gate, confirming it works).
+
+#### Why So Few Trades (14 in 8 hours)
+
+| Cause | Count | Effect |
+|---|---:|---|
+| Size-zero skips | 912 | Most ticks couldn't generate a meaningful trade size — likely due to inventory drift |
+| Rebalance blocked | 309 | Various rebalance gates rejected |
+| Position-cap skips | 35 | Crypto inventory hit the `max_position_multiplier × trade_amount` cap |
+| Phantom-spread filtered | 79 | Spread didn't persist across consecutive ticks |
+| EVD-seller penalty | 11,914 | Bitfinex-as-seller score-time penalty applied (does NOT block, just deprioritizes) |
+| Demoted candidates | 53 | Most candidates declined and were demoted before activation |
+
+The bot was *working as designed* — it just spent most of the session waiting for a tradeable opportunity, and the few times it found one (3-4 trades per active symbol) the spreads were thin and inventory imbalances quickly forced size-zero skips.
+
+#### Per-symbol Performance
+
+| Symbol | Trades | Net profit | Held | Notes |
+|---|---:|---:|---:|---|
+| NEARUSDT | 4 | +$0.021 | 0.5h | Bitfinex→MEXC (preferred route worked). Demoted at 17:43, no replacement for ~1h. |
+| PENDLEUSDT | 2 | −$0.017 | 1.2h | Bitget→MEXC (non-preferred). Trade #5 printed -$0.0195 profit despite +0.0272% net% — suspicious; quantity rounding cost. Demoted with $0.18 fee. |
+| EIGENUSDT | 4 | +$0.102 | 0.6h | OKX→Bitget once, MEXC→Bitget thrice. Best-performing activation. Demoted with $0.10 fee. |
+| DOGEUSDT | 4 | +$0.027 | 0.7h+ | Bitfinex→MEXC (preferred). Still active at session end. |
+| **Total** | **14** | **+$0.133** | | Trade execution was net positive; demotion fees (-$0.28) flipped the session negative. |
+
+#### v0.30.1-6 Feature Validation — All Working
+
+| Feature | Verdict | Evidence |
+|---|---|---|
+| Fix C (realized-capital peak) | ✓ working | Zero false-positive DRAWDOWN_BLOCK events. PEAK_RESET fired correctly on hedge open/close basis changes (00:40:13/14) and on full crypto liquidation (00:10:10). |
+| Fix A (per-exchange MTM) | ✓ working | No spot/dispersion noise observed. |
+| Fix B (futures markPrice) | ✓ working | Hedge unrealized stayed reasonable. |
+| Block-aware scoring | ✓ working | No phantom JUPUSDT-style activations. |
+| Trajectory classifier (live) | ✓ working | Active symbols' trajectory updates each tick now. |
+| Raw-net gate | ✓ working | Zero deficit-trade events recorded; every executed trade was raw-positive. |
+| Restart orphan close-out | ✓ working | No orphans inherited from previous session. |
+| Fast-track discovery | ✓ working | NEAR activated at 257s (fast_track), faster than the 900s standard would have been. |
+| Cursor-following tooltip | ✓ working | (operator-confirmed in S30 follow-up before session end). |
+
+#### Hedge Activity (testnet)
+
+| Time | Event | Symbol | Notional | Funding |
+|---|---|---|---:|---:|
+| 17:13:26 | OPEN | NEAR | $366 | +7.26%/yr |
+| 17:43:33 | CLOSE | NEAR (demoted) | — | accrued +$0.0017 |
+| 18:45:35 | OPEN | PENDLE | $366 | +10.95%/yr |
+| 19:56:58 | CLOSE | PENDLE (demoted) | — | accrued +$0.0053 |
+| 23:31:19 | OPEN | EIGEN | $364 | -3.34%/yr |
+| 00:06:23 | ADJUST | EIGEN (qty 2014→237) | $43 | — |
+| 00:10:11 | CLOSE | EIGEN (demoted) | — | accrued -$0.0015 |
+| 00:40:14 | OPEN | DOGE | $364 | -0.21%/yr |
+
+Hedge testnet remains flawless — 4 OPENs, 3 CLOSEs, 1 ADJUST, **0 errors**, cumulative funding +$0.005.
+
+#### Capital Flow
+
+Final per-exchange balances roughly: `Bitfinex ≈ $268 (trading float target, exact)`, `Bybit ≈ $720+ (custody hub, all overflows landed here)`, `MEXC ≈ $40 (one trade in flight)`, others near $0.
+
+Capital flows matched v0.30 architecture perfectly:
+- Trading float overflow fired 3× ($244 + $406 + $213 = $863 swept Bitfinex→Bybit at $0)
+- Post-demotion sweep fired (PENDLE: $725 freed, swept to Bybit, $0.001 fees)
+- Custody consolidation fired 4× from Bitget ($91+$99+$100+$120 = $410, fees $0.004)
+- Idle-sell sweep fired once (EIGEN $321 idle 1839s, sold via Bitfinex 0%, swept to Bybit at $0)
+- Custody hub on Aptos: zero fees
+
+#### Issues Identified
+
+| # | Severity | Issue |
+|---|---|---|
+| 1 | **HIGH** | **Demotion-sell route doesn't always go through Bitfinex 0%.** PENDLE demotion at 19:56:58 sold $361 of crypto on MEXC at 0.04% taker = $0.18 fee. EIGEN demotion sold $43 on Bitget at 0.08% = $0.03, plus a $0.07 fee elsewhere. NEAR demotion correctly routed via Bitfinex 0%. The decision logic for "sell here vs route via Bitfinex" needs tightening — it should ALWAYS prefer Bitfinex when the symbol is listed there and crypto can be transferred for free. |
+| 2 | MEDIUM | **Trade #5 PENDLE Bitget→MEXC printed profit=−$0.0195 despite net=+0.0272%.** Quantity rounding likely cost more than expected. Worth investigating quantity-rounding precision in `BalanceTracker.execute_trade()` for `LOT_SIZE_STEP`. |
+| 3 | MEDIUM | **53 demoted candidates over 8 hours.** Most candidates didn't reach activation. Some symbols (e.g., NEAR/DOGE) cycled multiple times. Each demotion costs cooldown time + setup fees. Could benefit from a "soft demote" for symbols that are profitable but just below threshold — keep them inventoried, lower the trade multiplier, instead of full liquidation. |
+| 4 | LOW | **Activation gap — 1h between PENDLE demotion (19:56:58) and EIGEN activation (23:31:18).** Bot sat idle for 3.5h with all-USDT portfolio. Either the candidate set was genuinely thin, or the discovery extension is too patient. |
+
+#### Capital Flow
+
+Final balance: ~$999 portfolio value (≈ flat from $1,000 start).
+- Trading P&L: +$0.13
+- Transfer fees: −$0.29 (mostly demotion-sell taker fees, see issue #1)
+- Cashback credited: +$0.03 (referral cashback)
+- Net: −$0.12
+
+#### Lessons / Conclusions
+
+- **All v0.30.1-6 fixes work as intended.** Zero anomalies, zero deficit trades, zero phantom drawdowns, zero orphan-position issues. The infrastructure is solid.
+- **Demotion-sell fee leak is the new operational priority.** $0.28 in demotion fees consumed all $0.13 of trading P&L. Fix: the demotion logic should ALWAYS route via Bitfinex 0% when the symbol is listed there, regardless of the symbol's most recent dominant pair.
+- **Trade frequency is the structural bottleneck.** 14 trades in 8h is too few to overcome any operational cost. The market wasn't offering edge on the bot's preferred Bitfinex+MEXC pairs for most of the session — when it did (NEAR for ~30 min, EIGEN for ~30 min, DOGE at session end), trades printed reliably.
+- **Hedge testnet is production-ready.** Five sessions of clean operation (S22-S27 except for the orphan-adoption issue, now fixed in v0.30.5).
+- **Tooltip + exchange_view UI feedback is now consistent.** Column and popover render the same data via the same `shortEx()` helper.
+
+#### Set-Up for v0.30.7-beta (Demotion-sell Routing Fix)
+
+The single highest-value fix for v0.30.7 is forcing demotion sells through Bitfinex 0% whenever the symbol is listed there, instead of selling locally on the buyer exchange. Saved $0.20+ in S27 alone.
+
+Lower priority:
+- Quantity-rounding investigation (PENDLE Trade #5 anomaly)
+- Optional: "soft demote" for marginally-failing strong candidates instead of full liquidation
+- Optional: tighten discovery extension when candidate set is thin (1h+ idle gaps are wasteful)
