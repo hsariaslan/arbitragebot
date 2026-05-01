@@ -58,22 +58,25 @@ const trajectoryColor: Record<string, string> = {
 function SymbolDetailPopover({ r, cursor }: { r: SymbolRanking; cursor: { x: number; y: number } }) {
   const d = r.diagnostic;
   if (!d) return null;
-  // Position bottom-right of the cursor with a 16px margin. Clamp inside the
-  // viewport so it never clips off-screen.
+  // Position bottom-right of the cursor, snug to it. If near the right edge,
+  // flip to the LEFT side of the cursor (still bottom-aligned). If near the
+  // bottom edge, slide UP just enough to fit — never flip above the cursor
+  // (avoids the "huge gap above cursor" complaint when the previous logic
+  // reserved 520px of vertical space above for an unmeasured popover).
   const POPOVER_W = 320;
-  const POPOVER_MAX_H = 520;
-  const MARGIN = 16;
+  const POPOVER_EST_H = 380; // conservative; actual content is usually shorter
+  const MARGIN = 12;
   const vw = typeof window !== 'undefined' ? window.innerWidth : 1920;
   const vh = typeof window !== 'undefined' ? window.innerHeight : 1080;
   let left = cursor.x + MARGIN;
   let top = cursor.y + MARGIN;
-  // If popover would overflow the right edge, flip to left of cursor
+  // Right-edge clamp: place to left of cursor if overflowing
   if (left + POPOVER_W + MARGIN > vw) {
     left = Math.max(MARGIN, cursor.x - POPOVER_W - MARGIN);
   }
-  // If popover would overflow the bottom edge, flip above cursor
-  if (top + POPOVER_MAX_H + MARGIN > vh) {
-    top = Math.max(MARGIN, cursor.y - POPOVER_MAX_H - MARGIN);
+  // Bottom-edge clamp: slide up to fit — keep it below cursor whenever possible
+  if (top + POPOVER_EST_H + MARGIN > vh) {
+    top = Math.max(MARGIN, vh - POPOVER_EST_H - MARGIN);
   }
   return (
     <div
