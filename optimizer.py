@@ -304,6 +304,16 @@ class SymbolOptimizer:
         # show their last-discovery trend even after they'd been declining
         # for tens of minutes.)
         self._score_history: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=120))
+
+        # Last-known Bitfinex bid per symbol, updated each tick when a
+        # Bitfinex quote is observed in `_score_tick`. Used by
+        # `_execute_demotion` to route through Bitfinex 0% even when the
+        # current Bitfinex feed has a brief gap (event-driven update can
+        # be 10-20s stale; without this cache, demotion sells fall back
+        # to local-exchange taker fees — observed in S27: PENDLE demoted
+        # locally on MEXC at 0.04% taker = $0.18 fee, vs $0.00 if routed
+        # via Bitfinex). v0.30.7-beta.
+        self._bitfinex_last_bid: dict[str, float] = {}
         self._prev_candidate_set: set[str] = set()  # for tracking candidate transitions
         self._prev_strong_set: set[str] = set()     # score >= 0.1 last tick
         self._prev_very_strong_set: set[str] = set()  # score >= 0.3 last tick
@@ -646,6 +656,12 @@ class SymbolOptimizer:
                     if bid_f <= 0 or ask_f <= 0:
                         continue
                     exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, ps.bids, ps.asks))
+                    # Cache Bitfinex bids for later demotion-sell routing.
+                    # Bitfinex's event-driven feed has 10-20s gaps; without a
+                    # cached last-known bid, demotions miss the 0% taker
+                    # advantage during those gaps.
+                    if fetcher.exchange_name == "Bitfinex":
+                        self._bitfinex_last_bid[symbol] = bid_f
                 except (ValueError, TypeError):
                     continue
 
@@ -1805,17 +1821,11 @@ class SymbolOptimizer:
 
         now = time.time()
 
-        # Check if symbol has live price data on Bitfinex (0% taker fee)
-        bitfinex_bid = 0.0
-        bitfinex_available = False
-        if "Bitfinex" in self._balance._exchanges:
-            for fetcher in self._fetchers:
-                if fetcher.exchange_name == "Bitfinex":
-                    ps = fetcher.get_state().get(symbol)
-                    if ps and ps.bid and float(ps.bid) > 0:
-                        bitfinex_available = True
-                        bitfinex_bid = float(ps.bid)
-                    break
+        # Decide whether to route the demotion sell through Bitfinex 0%
+        # taker. Uses a cached last-known bid so event-driven feed gaps
+        # don't force a fall-back to local-exchange selling at 0.04-0.10%
+        # taker. v0.30.7-beta — fixes S27's $0.28 demotion-sell fee leak.
+        bitfinex_available, bitfinex_bid = self._bitfinex_sell_route(symbol)
 
         # Sell all crypto of the demoted symbol on every exchange
         prices = self._get_all_prices()
@@ -2279,6 +2289,55 @@ class SymbolOptimizer:
                 ps = fetcher.get_state().get(symbol)
                 return bool(ps and ps.bid and float(ps.bid) > 0)
         return False
+
+    def _bitfinex_sell_route(self, symbol: str) -> tuple[bool, float]:
+        """Decide if demotion sells should route through Bitfinex 0% taker.
+
+        Returns (route_via_bitfinex, bid_for_valuation).
+
+        Tolerates the event-driven feed gap by using a cached last-known
+        Bitfinex bid (`_bitfinex_last_bid`), so brief 10-20s windows where
+        Bitfinex hasn't pushed an update don't force a fallback to local-
+        exchange selling at 0.04-0.10% taker. v0.30.7-beta — fixes S27's
+        $0.28 demotion-sell fee leak.
+
+        Conditions for routing via Bitfinex:
+        - Bitfinex is in the active exchanges set
+        - Symbol is not blocked on Bitfinex (manual or auto blocklist)
+        - Either: (a) Bitfinex has a live bid right now, OR
+                 (b) Bitfinex has previously quoted this symbol (cached bid)
+        """
+        if "Bitfinex" not in self._balance._exchanges:
+            return False, 0.0
+        if self._fee_manager is not None:
+            if not self._fee_manager.is_symbol_enabled("Bitfinex", symbol):
+                return False, 0.0
+            # Both buy/sell roles must be allowed for the route to make sense
+            # (we transfer crypto to Bitfinex and sell — the sell side must
+            # be permitted).
+            if not self._fee_manager.can_sell("Bitfinex", symbol):
+                return False, 0.0
+
+        # Try live bid first
+        for fetcher in self._fetchers:
+            if fetcher.exchange_name == "Bitfinex":
+                ps = fetcher.get_state().get(symbol)
+                if ps and ps.bid:
+                    try:
+                        live_bid = float(ps.bid)
+                        if live_bid > 0:
+                            self._bitfinex_last_bid[symbol] = live_bid
+                            return True, live_bid
+                    except (ValueError, TypeError):
+                        pass
+                break  # Found Bitfinex fetcher, no live bid — fall through
+
+        # Fall back to cached last-known bid (event-driven feed gap)
+        cached = self._bitfinex_last_bid.get(symbol, 0.0)
+        if cached > 0:
+            return True, cached
+
+        return False, 0.0
 
     def _any_active_on_bitfinex(self) -> bool:
         """Check if any active symbol is tradeable on Bitfinex."""
