@@ -39,7 +39,7 @@ from config import (
     verify_dashboard_password,
 )
 from email_notifier import notify_blocked, notify_login
-from settings import save_settings
+from settings import save_settings, save_registry
 
 if TYPE_CHECKING:
     from balance import BalanceTracker
@@ -70,18 +70,46 @@ def _safe_task(coro, name: str = "task") -> asyncio.Task:
 
 
 class DashboardLogHandler(logging.Handler):
-    """Captures recent log entries in memory for dashboard broadcast and export."""
+    """Captures recent log entries in memory for dashboard broadcast and export.
+
+    v0.31.0-beta: also captures `config_group_id` / `config_id` from the
+    LogRecord (stamped by `ConfigPrefixFilter` in `log_context.py`) so the
+    frontend Bot Logs cascading dropdowns can filter by group → config.
+    Records without context (shared subsystems) get `None` IDs and are
+    surfaced in the "Universal" bucket.
+    """
 
     _COMPONENT_RE = re.compile(r"^\[([\w.]+)\]\s*(.*)$", re.DOTALL)
+    # Matches the multi-config prefix the filter prepends to record.msg
+    _CONFIG_PREFIX_RE = re.compile(r"^\[[^\]]+\]\[[^\]]+\]\s*", re.DOTALL)
 
     def __init__(self, maxlen: int = 2000):
         super().__init__()
         self._entries: deque[dict] = deque(maxlen=maxlen)
-        self._all_entries: list[dict] = []  # full session for export
+        # Bounded deque(maxlen=50000) — pre-fix this was an UNBOUNDED list
+        # appended on every log emit. Even though it's only READ on one
+        # specific WS message (`request_all_bot_logs` for the filtered
+        # log view), the unbounded list inflated Python's gen2 GC scan
+        # time every collection cycle. With 30K log lines per 15 min
+        # and a 30+ min session this list held 60K+ dicts that the GC
+        # had to traverse. Cross-day exports go through
+        # `_read_bot_logs_from_disk` so they don't depend on this. 50K
+        # is plenty for the in-memory filtered view (~20-25 min at our
+        # current emit rate).
+        self._all_entries: deque[dict] = deque(maxlen=50000)
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = record.getMessage()
+            # Strip the [GROUP_x][CONFIG_y] prefix added by ConfigPrefixFilter
+            # so the dashboard can render component + message cleanly. The
+            # filter already stashed group/config IDs as record attrs.
+            group_id = getattr(record, "config_group_id", None)
+            config_id = getattr(record, "config_id", None)
+            group_name = getattr(record, "config_group_name", None)
+            config_name = getattr(record, "config_name", None)
+            if group_id and config_id:
+                msg = self._CONFIG_PREFIX_RE.sub("", msg, count=1)
             component = ""
             m = self._COMPONENT_RE.match(msg)
             if m:
@@ -92,6 +120,10 @@ class DashboardLogHandler(logging.Handler):
                 "level": record.levelname,
                 "component": component,
                 "message": msg,
+                "config_group_id": group_id,
+                "config_id": config_id,
+                "config_group_name": group_name,
+                "config_name": config_name,
             }
             self._entries.append(entry)
             self._all_entries.append(entry)
@@ -194,11 +226,21 @@ class DashboardServer:
         self._auto_disable_state_file = Path("state/auto_disable_volumes.json")
         self._last_auto_disable_run_date_utc: str = ""  # "YYYY-MM-DD"
         self._last_auto_disable_run_ts: float = 0.0
+        # Force-run flag: cleared after the first successful run on each
+        # bot startup. The daily-cap check ("already ran today") is
+        # bypassed on this first call so a mid-day restart immediately
+        # refreshes the blocklist instead of running yesterday's lists
+        # until tomorrow's 00:01 UTC trigger. Operator request: "When
+        # the bot is restarted, it must run the auto fetcher&updater."
+        self._auto_disable_force_run_on_start: bool = True
         # Track manual volume fetches server-side too, so the Fee Management
         # tab's "last manual fetch" indicator survives component remounts
         # (sub-tab navigation, WS reconnect, browser refresh). Stored in the
         # same state file so it survives bot restart.
         self._last_manual_volumes_fetch_ts: float = 0.0
+        # Cached volumes from the last fetch — broadcast in state so the
+        # Fee Management tab keeps showing them after a page refresh.
+        self._cached_volumes: dict[str, dict[str, float]] = {}
         self._load_auto_disable_state()
         self._load_sessions()
 
@@ -726,12 +768,32 @@ class DashboardServer:
             def _log_startup():
                 from config import __version__
                 logger.info(f"[Config] version=v{__version__}")
-                self._log_all_settings("session_start")
+                # Multi-config: dump every config's full settings (each
+                # tagged with [Group X][Config Y] via ConfigContextVar)
+                self._log_all_configs_settings("session_start")
             asyncio.get_event_loop().call_later(10.0, _log_startup)
+            # Broadcast diagnostics — accumulated then logged per minute.
+            # Reveals whether the broadcast loop's `_build_state()` and
+            # `json.dumps()` are growing over time (which would inflate
+            # the orchestrator's measured sweep_ms because broadcast runs
+            # during the sweep's `await asyncio.sleep(0)` yields).
+            bcast_diag_last_ts: float = 0.0
+            bcast_diag_build_ms: float = 0.0
+            bcast_diag_dumps_ms: float = 0.0
+            bcast_diag_payload_bytes: int = 0
+            bcast_diag_count: int = 0
             while self._running:
                 if self._clients:
+                    t_build = time.monotonic()
                     state = self._build_state()
+                    build_ms = (time.monotonic() - t_build) * 1000.0
+                    t_dumps = time.monotonic()
                     payload = json.dumps(state)
+                    dumps_ms = (time.monotonic() - t_dumps) * 1000.0
+                    bcast_diag_build_ms += build_ms
+                    bcast_diag_dumps_ms += dumps_ms
+                    bcast_diag_payload_bytes += len(payload)
+                    bcast_diag_count += 1
                     dead: set[Any] = set()
                     # Snapshot to a tuple — `await ws.send()` yields control,
                     # and new clients connecting during the await would mutate
@@ -759,6 +821,54 @@ class DashboardServer:
                     self._last_cleanup = now
                 # Enforce IP whitelist on every broadcast cycle (~1s)
                 await self._enforce_ip_whitelist()
+                # Per-minute broadcast diagnostic — averages of build/dumps
+                # times + payload size. Compares directly against the
+                # orchestrator's sweep_ms growth to identify whether the
+                # broadcast is the source of progressive slowdown.
+                now_mono = time.monotonic()
+                if now_mono - bcast_diag_last_ts >= 60.0 and bcast_diag_count > 0:
+                    bcast_diag_last_ts = now_mono
+                    build_avg = bcast_diag_build_ms / bcast_diag_count
+                    dumps_avg = bcast_diag_dumps_ms / bcast_diag_count
+                    payload_avg_kb = (bcast_diag_payload_bytes / bcast_diag_count) / 1024.0
+                    n_clients = len(self._clients)
+                    log_total = (
+                        self._log_handler.total_count() if self._log_handler else 0
+                    )
+                    bcast_diag_build_ms = 0.0
+                    bcast_diag_dumps_ms = 0.0
+                    bcast_diag_payload_bytes = 0
+                    bcast_diag_count = 0
+                    # Per-section payload sizing — sample one build to
+                    # see which sections dominate the payload. Cheap
+                    # because we already build the state every second.
+                    section_sizes: dict[str, int] = {}
+                    try:
+                        sample_state = self._build_state()
+                        for k, v in sample_state.items():
+                            try:
+                                section_sizes[k] = len(json.dumps(v, default=str))
+                            except Exception:
+                                section_sizes[k] = 0
+                    except Exception:
+                        pass
+                    top_sections = sorted(
+                        section_sizes.items(), key=lambda kv: kv[1], reverse=True
+                    )[:8]
+                    logger.info(
+                        f"[Broadcast] build_avg={build_avg:.0f}ms "
+                        f"dumps_avg={dumps_avg:.0f}ms payload_avg={payload_avg_kb:.0f}KB "
+                        f"clients={n_clients} log_entries={log_total}"
+                    )
+                    if top_sections:
+                        logger.info(
+                            "[Broadcast] top_sections: " +
+                            ", ".join(
+                                f"{k}={v // 1024}KB" if v >= 1024
+                                else f"{k}={v}B"
+                                for k, v in top_sections
+                            )
+                        )
                 await asyncio.sleep(1.0)
 
         logger.info("[Dashboard] WebSocket server stopped")
@@ -970,6 +1080,66 @@ class DashboardServer:
 
     # --- Settings validation ---
 
+    # Fields where 0 is a valid "feature off / ignore this knob" signal.
+    # The validator accepts 0 even when the field's `min` is otherwise > 0,
+    # so the operator can opt out of the feature while leaving normal
+    # ranges enforced when the feature IS in use. Fields not in this set
+    # reject 0 with a clear error pointing the operator at the matching
+    # `*_enabled` toggle (or telling them no disable exists for that knob).
+    _DISABLE_VIA_ZERO: set[str] = {
+        "trade_amount_pct",  # 0 = use fixed trade_amount_usd
+        "fee_threshold_multiplier",  # 0 = no fee-aware threshold adjustment
+        "hourly_external_transfer_cap",  # 0 = unlimited
+        "spread_persistence_ticks",  # 0 = instant execution
+        "event_driven_seller_penalty_pct",  # 0 = no EVD penalty
+        "one_leg_failure_rate",  # 0 = no one-leg simulation
+        "max_position_multiplier",  # 0 = no per-position cap
+        "auto_disable_volume_threshold_usd",  # 0 = never auto-disable
+        "trading_float_multiplier",  # 0 = trading float disabled entirely
+        "trading_float_replenish_trigger",  # 0 = never auto-replenish
+        "trading_float_overflow_multiplier",  # 0 = never sweep overflow
+        "min_net_profit_pct",  # 0 = trade on any positive net
+    }
+
+    # Fields where 0 would silently break the bot (timers, division, etc.)
+    # The validator rejects 0 with a message pointing at the right toggle.
+    _DISABLE_HINT: dict[str, str] = {
+        "anomaly_protection_enabled": "anomaly_protection_enabled=false",
+        "circuit_breaker_window": "anomaly_protection_enabled=false",
+        "circuit_breaker_threshold": "anomaly_protection_enabled=false",
+        "drawdown_threshold_pct": "anomaly_protection_enabled=false",
+        "drawdown_emergency_mult": "anomaly_protection_enabled=false",
+        "realized_drawdown_emergency_pct": "anomaly_protection_enabled=false",
+        "combined_drawdown_emergency_pct": "anomaly_protection_enabled=false",
+        "combined_drawdown_sustained_seconds": "anomaly_protection_enabled=false",
+        "symbol_loss_streak_threshold": "anomaly_protection_enabled=false",
+        "warning_pnl_pct": "anomaly_protection_enabled=false",
+        "momentum_lookback_hours": "momentum_filter_enabled=false",
+        "momentum_sample_interval_minutes": "momentum_filter_enabled=false",
+        "inventory_rebalance_interval_hours": "inventory_rebalance_enabled=false",
+        "inventory_drift_threshold": "inventory_rebalance_enabled=false",
+        "funding_poll_interval_seconds": "funding_aware_scoring_enabled=false",
+        "funding_score_min_factor": "funding_aware_scoring_enabled=false",
+        "funding_score_max_factor": "funding_aware_scoring_enabled=false",
+        "hedge_evaluation_interval_seconds": "hedging_enabled=false",
+        "hedge_dust_threshold_usd": "hedging_enabled=false",
+        "hedge_adjust_threshold_pct": "hedging_enabled=false",
+        "scoring_window": "(no disable — would divide by zero)",
+        "evaluation_interval": "(no disable — would tight-loop)",
+        "discovery_duration": "(no disable — would skip discovery)",
+        "num_active_symbols": "(no disable — would prevent any activation)",
+        "max_active_symbols": "(no disable — would prevent any activation)",
+        "confirmation_period": "(no disable — would activate on first sample)",
+        "score_stability_seconds": "(no disable — see score_stability_factor)",
+        "score_stability_factor": "(no disable — would reject every candidate)",
+        "demotion_period": "(no disable — would demote instantly)",
+        "rebalance_cooldown": "(no disable — would rebalance every tick)",
+        "rebalance_roi_horizon": "(no disable — would divide by zero)",
+        "rebalance_roi_divisor": "(no disable — would divide by zero)",
+        "total_capital": "(no disable — use Stop Trading instead)",
+        "trade_amount_usd": "(no disable — set trade_amount_pct > 0 to ignore)",
+    }
+
     _SETTINGS_SCHEMA: dict[str, tuple[type, float | None, float | None]] = {
         "trade_amount_usd": (float, 1, 100000),
         "trade_amount_pct": (float, 0.0, 0.50),
@@ -1007,6 +1177,7 @@ class DashboardServer:
         # v0.30+: capital architecture
         "custody_hub_exchange": (str, None, None),
         "custody_hub_network": (str, None, None),
+        # 0 accepted as "trading float disabled" via _DISABLE_VIA_ZERO.
         "trading_float_multiplier": (float, 2.0, 50.0),
         "trading_float_replenish_trigger": (float, 0.5, 50.0),
         "trading_float_overflow_multiplier": (float, 1.1, 5.0),
@@ -1035,6 +1206,24 @@ class DashboardServer:
         "bitfinex_over_target_multiplier": (float, 1.0, 5.0),
         # Auto-expand on understaff (Feature 6)
         "auto_expand_on_understaff": (bool, None, None),
+        # Time-based regime gating (per-config). UTC hours are categorized
+        # into strong/neutral/weak buckets; weak hours apply tightened
+        # thresholds + suppress rebalance/demote/expand to avoid fee
+        # churn during thin spread windows. See SESSIONS.md analysis of
+        # 9-day pattern showing 17:00-19:00 / 12:00-14:00 UTC as worst
+        # hours and 07:00 / 20:00-22:00 UTC as best.
+        "regime_gating_enabled": (bool, None, None),
+        "regime_strong_hours": (list, None, None),     # list[int 0-23]
+        "regime_neutral_hours": (list, None, None),    # list[int 0-23]
+        "regime_weak_min_net_multiplier": (float, 1.0, 10.0),
+        "regime_weak_disable_rebalance": (bool, None, None),
+        "regime_weak_disable_demote": (bool, None, None),
+        "regime_weak_disable_expand": (bool, None, None),
+        # Anti-churn: demotion-frequency cooldown scaling + quiet-period
+        # pause + activation-cost multiplier (3-bundle for 2026-05-03 fix).
+        "demotion_freq_scaling_enabled": (bool, None, None),
+        "quiet_period_pause_minutes": (float, 0.0, 240.0),
+        "activation_profit_horizon_multiplier": (float, 1.0, 10.0),
         # Diversification floor (S21 follow-up)
         "diversification_floor_enabled": (bool, None, None),
         "diversification_floor_multiplier": (float, 0.1, 1.0),
@@ -1066,6 +1255,11 @@ class DashboardServer:
         "drawdown_threshold_pct": (float, 0.5, 20.0),
         "drawdown_resume_pct": (float, 0.1, 10.0),
         "drawdown_emergency_mult": (float, 1.5, 5.0),
+        # v0.31.0-beta+: two-layer emergency gate
+        "realized_drawdown_emergency_pct": (float, 1.0, 50.0),
+        "combined_drawdown_emergency_pct": (float, 1.0, 80.0),
+        "combined_drawdown_sustained_seconds": (float, 30.0, 3600.0),
+        "emergency_auto_liquidate": (bool, None, None),
         "symbol_loss_streak_threshold": (int, 2, 50),
         "symbol_loss_streak_cooldown": (int, 60, 7200),
         "warning_pnl_pct": (float, 0.1, 1.0),
@@ -1095,6 +1289,21 @@ class DashboardServer:
             elif expected_type in (int, float):
                 if not isinstance(value, (int, float)) or isinstance(value, bool):
                     return False, f"{key} must be a number"
+                # 0 = "feature off" for fields in the disable-via-zero set.
+                # Skip the min check so the operator can opt out while still
+                # enforcing the normal range when the feature IS in use.
+                if value == 0 and key in cls._DISABLE_VIA_ZERO:
+                    continue
+                # If 0 isn't a valid disable signal for this field, reject
+                # with a hint pointing at the correct toggle.
+                if value == 0 and min_val is not None and min_val > 0:
+                    hint = cls._DISABLE_HINT.get(key)
+                    if hint:
+                        return False, (
+                            f"{key} cannot be 0 — to disable this feature, "
+                            f"use {hint}. Otherwise must be >= {min_val}."
+                        )
+                    return False, f"{key} must be >= {min_val}"
                 if min_val is not None and value < min_val:
                     return False, f"{key} must be >= {min_val}"
                 if max_val is not None and value > max_val:
@@ -1357,28 +1566,34 @@ class DashboardServer:
             logger.info("[Transfer] Transfer fee settings saved and applied")
 
         elif msg_type == "fetch_volumes":
-            # On-demand 24h USD volume fetch for all 9 exchanges (Fee Mgmt tab)
+            # On-demand 24h USD volume fetch for all 9 exchanges. After the
+            # fetch, applies the auto-disable threshold across EVERY config's
+            # FeeManager so disabled symbols stay in sync with the latest
+            # volumes (manual fetch == immediate apply, just like the daily
+            # cron at 00:01 UTC).
             try:
                 from volume_fetcher import fetch_all_24h_volumes
                 volumes = await fetch_all_24h_volumes()
                 fetched_at = time.time()
-                # Record server-side so the "Last manual fetch" indicator
-                # survives component unmount/remount on the frontend.
                 self._last_manual_volumes_fetch_ts = fetched_at
-                # Persist to state file so it also survives bot restart.
-                # Reuse the auto-disable state file (same scope: volume-fetch
-                # bookkeeping). Pass None for auto-run fields so the existing
-                # blocklist snapshot is preserved (partial update).
+                # Cache for broadcast — survives page refresh
+                self._cached_volumes = volumes
                 self._save_auto_disable_state()
+                # Apply auto-disable across all configs (multi-config aware)
+                apply_summary = self._apply_auto_disable_to_all_configs(volumes)
                 await ws.send(json.dumps({
                     "type": "volumes_response",
                     "ok": True,
                     "volumes": volumes,
                     "fetched_at": fetched_at,
+                    "auto_disable_summary": apply_summary,
                 }))
                 logger.info(
                     f"[VolumeFetch] Fetched 24h volumes: "
-                    f"{ {ex: len(v) for ex, v in volumes.items()} }"
+                    f"{ {ex: len(v) for ex, v in volumes.items()} } — "
+                    f"applied auto-disable to {apply_summary['configs_updated']} config(s) "
+                    f"(+{apply_summary['total_added']} disabled / "
+                    f"-{apply_summary['total_removed']} re-enabled)"
                 )
             except Exception as e:
                 logger.exception("[VolumeFetch] Failed")
@@ -1442,7 +1657,7 @@ class DashboardServer:
             self._distribute_enabled = False
             await ws.send(json.dumps({"type": "distribute_result", **result}))
 
-        elif msg_type == "restart":
+        elif msg_type == "restart" or msg_type == "process_restart":
             logger.info("[Dashboard] Fresh restart requested from dashboard")
             # Close all real futures positions before clearing state — orphan
             # positions inherited across restarts produce phantom drawdowns
@@ -1463,6 +1678,630 @@ class DashboardServer:
                 self._state_manager.clear()
             await ws.send(json.dumps({"type": "restart_ack"}))
             asyncio.get_event_loop().call_later(1.0, self._trigger_restart)
+
+        # ── Multi-config CRUD (v0.31.0-beta) ─────────────────────────
+        elif msg_type.startswith("config_") or msg_type == "save_shared_execution_mode" or msg_type == "select_config" or msg_type == "subscribe_logs":
+            await self._handle_config_message(msg, ws, msg_type)
+
+    async def _handle_config_message(self, msg: dict, ws: Any, msg_type: str) -> None:
+        """Multi-config (v0.31.0-beta) WS handlers. All mutations save the
+        registry to settings.json; structural mutations also call
+        orchestrator.reconcile_components() to propagate."""
+        if not getattr(self, "_registry", None) or not getattr(self, "_orchestrator", None):
+            await ws.send(json.dumps({
+                "type": "config_error",
+                "error": "Multi-config registry not initialized",
+            }))
+            return
+
+        registry = self._registry
+        orch = self._orchestrator
+
+        async def _ack(extra: dict | None = None) -> None:
+            payload = {"type": "config_ack", "msg_type": msg_type, "ok": True}
+            if extra:
+                payload.update(extra)
+            await ws.send(json.dumps(payload))
+
+        async def _err(message: str) -> None:
+            await ws.send(json.dumps({
+                "type": "config_error",
+                "msg_type": msg_type,
+                "error": message,
+            }))
+
+        try:
+            if msg_type == "config_add_group":
+                name = msg.get("name") or None
+                capital = float(msg.get("initial_capital", 1000.0))
+                g = registry.add_group(name=name, initial_capital=capital)
+                save_registry(registry)
+                await orch.reconcile_components()
+                await _ack({"group_id": g.id})
+
+            elif msg_type == "config_remove_group":
+                gid = msg.get("group_id")
+                # Capture the cascading config list BEFORE remove so we can
+                # clean up per-config state files + close real hedges.
+                # Without this, group-remove orphans every config's
+                # session.json on disk indefinitely (S31: 11 stale files).
+                g = registry.find_group(gid)
+                cascade_ids: list[str] = []
+                cascade_names: list[str] = []
+                if g is not None:
+                    for c in list(g.configs):
+                        cascade_ids.append(c.id)
+                        cascade_names.append(c.name)
+                        bundle = orch.get_bundle(c.id)
+                        if bundle and bundle.hedge_mode in ("testnet", "live") and bundle.hedge_manager:
+                            try:
+                                await bundle.hedge_manager.close_all_real_positions(
+                                    reason="config_remove_group"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"[Config] hedge close on group remove failed for "
+                                    f"{c.id[:8]}…: {e}"
+                                )
+                group_name = g.name if g else "(unknown)"
+                registry.remove_group(gid)
+                save_registry(registry)
+                # Wipe per-config state files + their directories
+                if self._state_manager:
+                    for cid in cascade_ids:
+                        self._state_manager.clear_config(cid, remove_dir=True)
+                await orch.reconcile_components()
+                # Re-point selected config if it was in the removed group
+                if getattr(self, "_selected_config_id", None) in cascade_ids:
+                    fallback_cfg = registry.default_config
+                    if fallback_cfg is None:
+                        # Defensive: pick any remaining config
+                        for c in registry.iter_configs():
+                            fallback_cfg = c
+                            break
+                    if fallback_cfg is not None:
+                        fallback_bundle = orch.get_bundle(fallback_cfg.id)
+                        if fallback_bundle is not None:
+                            self._monitor = fallback_bundle.monitor
+                            self._optimizer = fallback_bundle.optimizer
+                            self._balance = fallback_bundle.balance
+                            self._fee_manager = fallback_bundle.fee_manager
+                            self._selected_config_id = fallback_cfg.id
+                            logger.info(
+                                f"[Config] Selected config was in removed "
+                                f"group; falling back to '{fallback_cfg.name}'"
+                            )
+                logger.info(
+                    f"[Config] Removed group '{group_name}' "
+                    f"({len(cascade_ids)} config(s): "
+                    f"{', '.join(cascade_names) if cascade_names else 'none'})"
+                )
+                await _ack()
+
+            elif msg_type == "config_rename_group":
+                gid = msg.get("group_id")
+                name = msg.get("name", "")
+                registry.rename_group(gid, name)
+                save_registry(registry)
+                await _ack()
+
+            elif msg_type == "config_set_capital":
+                gid = msg.get("group_id")
+                cap = float(msg.get("initial_capital", 0))
+                registry.set_group_capital(gid, cap)
+                save_registry(registry)
+                # Capital change resets per-config balances → restart configs
+                g = registry.find_group(gid)
+                if g:
+                    for c in g.configs:
+                        await orch.request_restart(c.id)
+                await _ack()
+
+            elif msg_type == "config_reorder_groups":
+                order = msg.get("order", [])
+                registry.reorder_groups(order)
+                save_registry(registry)
+                await _ack()
+
+            elif msg_type == "config_add":
+                gid = msg.get("group_id")
+                # If no settings provided, inherit from default config (so new
+                # configs start with current bot defaults, not empty)
+                settings = msg.get("settings")
+                if not settings and registry.default_config:
+                    settings = dict(registry.default_config.settings)
+                c = registry.add_config(
+                    group_id=gid,
+                    settings=settings,
+                    name=msg.get("name"),
+                    description=msg.get("description", ""),
+                )
+                save_registry(registry)
+                await orch.reconcile_components()
+                # Log full settings for the new config
+                self._log_one_config_settings(c.id, "config_added")
+                await _ack({"config_id": c.id})
+
+            elif msg_type == "config_remove":
+                cid = msg.get("config_id")
+                # Capture name + group BEFORE registry removal so the log
+                # line is human-readable.
+                cfg = registry.find_config(cid)
+                grp = registry.find_group_for_config(cid) if cfg else None
+                cfg_name = cfg.name if cfg else "(unknown)"
+                grp_name = grp.name if grp else "(unknown)"
+                # Try to close any real futures positions first if super-primary
+                bundle = orch.get_bundle(cid)
+                if bundle and bundle.hedge_mode in ("testnet", "live") and bundle.hedge_manager:
+                    try:
+                        await bundle.hedge_manager.close_all_real_positions(
+                            reason="config_remove"
+                        )
+                    except Exception as e:
+                        logger.warning(f"[Config] hedge close on remove failed: {e}")
+                registry.remove_config(cid)
+                save_registry(registry)
+                # Delete per-config state file + the now-empty directory
+                if self._state_manager:
+                    self._state_manager.clear_config(cid, remove_dir=True)
+                await orch.reconcile_components()
+                # Re-point selected config if it was the removed one. Otherwise
+                # the dashboard's `self._monitor` / `self._optimizer` / etc.
+                # still reference torn-down components — the next broadcast
+                # would try to read state from objects no longer wired to
+                # fetchers, producing stale or zero data.
+                if getattr(self, "_selected_config_id", None) == cid:
+                    fallback_cfg = registry.default_config or (
+                        registry.iter_configs().__next__()
+                        if any(True for _ in registry.iter_configs()) else None
+                    )
+                    if fallback_cfg is not None:
+                        fallback_bundle = orch.get_bundle(fallback_cfg.id)
+                        if fallback_bundle is not None:
+                            self._monitor = fallback_bundle.monitor
+                            self._optimizer = fallback_bundle.optimizer
+                            self._balance = fallback_bundle.balance
+                            self._fee_manager = fallback_bundle.fee_manager
+                            self._selected_config_id = fallback_cfg.id
+                            logger.info(
+                                f"[Config] Selected config was removed; "
+                                f"falling back to '{fallback_cfg.name}'"
+                            )
+                logger.info(
+                    f"[Config] Removed config '{cfg_name}' from group '{grp_name}' "
+                    f"(id={cid[:8]}…)"
+                )
+                await _ack()
+
+            elif msg_type == "config_clone":
+                cid = msg.get("config_id")
+                target_gid = msg.get("target_group_id")
+                new_name = msg.get("name")
+                clone = registry.clone_config(cid, target_gid, new_name)
+                save_registry(registry)
+                await orch.reconcile_components()
+                self._log_one_config_settings(clone.id, "config_cloned")
+                await _ack({"config_id": clone.id})
+
+            elif msg_type == "config_clone_group":
+                gid = msg.get("group_id")
+                new_name = msg.get("name")
+                src_group = registry.find_group(gid)
+                if src_group is None:
+                    return await _err(f"Group not found: {gid}")
+                # Create new group with same capital
+                new_group = registry.add_group(
+                    name=new_name or f"{src_group.name} (copy)",
+                    initial_capital=src_group.initial_capital,
+                )
+                # Copy each config (without primary/default/super-primary flags)
+                for src_cfg in sorted(src_group.configs, key=lambda x: x.order):
+                    registry.add_config(
+                        group_id=new_group.id,
+                        settings=dict(src_cfg.settings),
+                        name=src_cfg.name,
+                        description=src_cfg.description,
+                    )
+                save_registry(registry)
+                await orch.reconcile_components()
+                # Log every newly-cloned config in the new group
+                logger.info(
+                    f"[Config] Cloned group '{src_group.name}' → "
+                    f"'{new_group.name}' ({len(new_group.configs)} configs)"
+                )
+                for c in new_group.configs:
+                    self._log_one_config_settings(c.id, "group_cloned")
+                await _ack({"group_id": new_group.id})
+
+            elif msg_type == "config_rename":
+                cid = msg.get("config_id")
+                name = msg.get("name", "")
+                desc = msg.get("description")
+                registry.rename_config(cid, name, desc)
+                save_registry(registry)
+                await _ack()
+
+            elif msg_type == "config_reorder":
+                gid = msg.get("group_id")
+                order = msg.get("order", [])
+                registry.reorder_configs(gid, order)
+                save_registry(registry)
+                await _ack()
+
+            elif msg_type == "config_set_primary":
+                cid = msg.get("config_id")
+                value = bool(msg.get("value", False))
+                registry.set_primary(cid, value)
+                save_registry(registry)
+                await _ack()
+
+            elif msg_type == "config_set_default":
+                cid = msg.get("config_id")
+                registry.set_default(cid)
+                save_registry(registry)
+                await _ack()
+
+            elif msg_type == "config_set_super_primary":
+                cid = msg.get("config_id")
+                # Close real futures positions on the outgoing super-primary
+                old_sp_id = registry.super_primary_id
+                if old_sp_id and old_sp_id != cid:
+                    old_bundle = orch.get_bundle(old_sp_id)
+                    if old_bundle and old_bundle.hedge_mode in ("testnet", "live") and old_bundle.hedge_manager:
+                        try:
+                            await old_bundle.hedge_manager.close_all_real_positions(
+                                reason="super_primary_handoff"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"[Config] hedge close on super-primary handoff failed: {e}"
+                            )
+                registry.set_super_primary(cid)
+                save_registry(registry)
+                # Reconcile rebuilds both old + new super-primary with new
+                # effective execution mode + hedge mode
+                await orch.reconcile_components()
+                await _ack()
+
+            elif msg_type == "config_apply_settings":
+                cid = msg.get("config_id")
+                settings = msg.get("settings", {})
+                cfg = registry.find_config(cid)
+                if cfg is None:
+                    return await _err(f"Config not found: {cid}")
+                bundle = orch.get_bundle(cid)
+                if bundle is None:
+                    return await _err(f"Bundle not built: {cid}")
+                # Update the registry first (persisted source of truth)
+                registry.update_config_settings(cid, settings)
+                save_registry(registry)
+                # Hot-apply against the bundle's components, tagged in logs
+                from log_context import set_config_context, reset_config_context
+                group = registry.find_group_for_config(cid)
+                token = (
+                    set_config_context(group.id, group.name, cfg.id, cfg.name)
+                    if group else None
+                )
+                try:
+                    self._apply_settings_to_bundle(bundle, dict(cfg.settings))
+                finally:
+                    if token:
+                        reset_config_context(token)
+                # Log the new state of this specific config
+                self._log_one_config_settings(cid, "settings_applied")
+                await _ack()
+
+            elif msg_type == "config_apply_settings_bulk":
+                cids = msg.get("config_ids", [])
+                settings = msg.get("settings", {})
+                applied = 0
+                for cid in cids:
+                    cfg = registry.find_config(cid)
+                    bundle = orch.get_bundle(cid)
+                    if cfg is None or bundle is None:
+                        continue
+                    registry.update_config_settings(cid, settings)
+                    self._apply_settings_to_bundle(bundle, dict(cfg.settings))
+                    applied += 1
+                save_registry(registry)
+                await _ack({"applied": applied})
+
+            elif msg_type == "config_restart":
+                cid = msg.get("config_id")
+                # Wipe per-config state file, then rebuild
+                if self._state_manager:
+                    self._state_manager.clear_config(cid)
+                ok = await orch.request_restart(cid)
+                if not ok:
+                    return await _err(f"Config not found in orchestrator: {cid}")
+                # Log the freshly-rebuilt config's full settings so the operator
+                # has a clean record of what's now running after the restart.
+                self._log_one_config_settings(cid, "config_restarted")
+                # If this was the selected config, repoint to the new bundle —
+                # the OLD bundle's components are torn down and stale.
+                if getattr(self, "_selected_config_id", None) == cid:
+                    new_bundle = orch.get_bundle(cid)
+                    if new_bundle is not None:
+                        self._monitor = new_bundle.monitor
+                        self._optimizer = new_bundle.optimizer
+                        self._balance = new_bundle.balance
+                        self._fee_manager = new_bundle.fee_manager
+                await _ack()
+
+            elif msg_type == "config_restart_all":
+                # Wipe all per-config state files, then rebuild every config
+                if self._state_manager:
+                    for c in registry.iter_configs():
+                        self._state_manager.clear_config(c.id)
+                n = await orch.request_restart_all()
+                self._log_all_configs_settings("restart_all_configs")
+                # All bundles were torn down + rebuilt; selected config's
+                # references are stale. Repoint to the new bundle.
+                cur_sel = getattr(self, "_selected_config_id", None)
+                if cur_sel:
+                    new_bundle = orch.get_bundle(cur_sel)
+                    if new_bundle is not None:
+                        self._monitor = new_bundle.monitor
+                        self._optimizer = new_bundle.optimizer
+                        self._balance = new_bundle.balance
+                        self._fee_manager = new_bundle.fee_manager
+                await _ack({"restarted": n})
+
+            elif msg_type == "config_anomaly_resume":
+                # Per-config anomaly resume — clears emergency_triggered + paused
+                # for ONE config (vs the legacy `anomaly_resume` which targets
+                # the dashboard-bound default config).
+                cid = msg.get("config_id")
+                bundle = orch.get_bundle(cid)
+                if bundle is None:
+                    return await _err(f"Config not found: {cid}")
+                try:
+                    bundle.monitor._anomaly.manual_resume()
+                    bundle.monitor._anomaly_paused = False
+                    cfg = registry.find_config(cid)
+                    g = registry.find_group_for_config(cid)
+                    label = f"{g.name}/{cfg.name}" if cfg and g else cid[:8]
+                    logger.info(f"[Anomaly] Manual resume for {label} via dashboard")
+                except Exception as e:
+                    return await _err(f"Resume failed: {e}")
+                await _ack()
+
+            elif msg_type == "config_manual_stop":
+                # Per-config manual stop — sets _manual_stopped + timestamp.
+                cid = msg.get("config_id")
+                bundle = orch.get_bundle(cid)
+                if bundle is None:
+                    return await _err(f"Config not found: {cid}")
+                bundle.monitor._manual_stopped = True
+                bundle.monitor._manual_stop_timestamp = time.time()
+                cfg = registry.find_config(cid)
+                g = registry.find_group_for_config(cid)
+                label = f"{g.name}/{cfg.name}" if cfg and g else cid[:8]
+                logger.info(f"[Monitor] MANUAL_STOP for {label} via dashboard")
+                await _ack()
+
+            elif msg_type == "config_manual_start":
+                # Per-config manual start — clears _manual_stopped.
+                cid = msg.get("config_id")
+                bundle = orch.get_bundle(cid)
+                if bundle is None:
+                    return await _err(f"Config not found: {cid}")
+                bundle.monitor._manual_stopped = False
+                bundle.monitor._manual_stop_timestamp = 0.0
+                cfg = registry.find_config(cid)
+                g = registry.find_group_for_config(cid)
+                label = f"{g.name}/{cfg.name}" if cfg and g else cid[:8]
+                logger.info(f"[Monitor] MANUAL_START for {label} via dashboard")
+                await _ack()
+
+            elif msg_type == "config_export_all":
+                # Returns the full registry payload as the operator would see
+                # it on disk. Frontend serializes to JSON + downloads as file.
+                payload = registry.to_settings_dict()
+                await ws.send(json.dumps({
+                    "type": "config_export_response",
+                    "ok": True,
+                    "payload": payload,
+                    "exported_at": time.time(),
+                }))
+
+            elif msg_type == "config_import_all":
+                # Replaces the entire registry with the uploaded payload.
+                # The new registry is reconciled against the orchestrator —
+                # configs not in the new payload are torn down (real hedges
+                # closed first); new configs are built; existing configs are
+                # rebuilt if their settings changed.
+                payload = msg.get("payload")
+                if not isinstance(payload, dict) or "groups" not in payload:
+                    return await _err("Invalid import payload: missing 'groups'")
+                # Validate schema_version
+                if payload.get("schema_version") not in (None, 2):
+                    return await _err(
+                        f"Unsupported schema_version: {payload.get('schema_version')}"
+                    )
+                # Close real hedge positions on every existing bundle BEFORE
+                # the registry swap — otherwise teardown might race against
+                # the import.
+                for bundle in orch.all_bundles():
+                    if bundle.hedge_mode in ("testnet", "live") and bundle.hedge_manager:
+                        try:
+                            await bundle.hedge_manager.close_all_real_positions(
+                                reason="config_import"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"[Config] hedge close on import failed: {e}"
+                            )
+                # Replace registry — delete on-disk state for configs that won't
+                # exist after import (best-effort cleanup).
+                old_ids = {c.id for c in registry.iter_configs()}
+                from config_registry import ConfigRegistry as _CR
+                new_registry = _CR.from_settings_dict(payload)
+                new_ids = {c.id for c in new_registry.iter_configs()}
+                for gone_id in old_ids - new_ids:
+                    if self._state_manager:
+                        self._state_manager.clear_config(gone_id)
+                # Atomically swap the registry on the dashboard + orchestrator
+                # then rebuild the orchestrator's bundles to match.
+                self._registry = new_registry
+                orch._registry = new_registry
+                save_registry(new_registry)
+                await orch.reconcile_components()
+                self._log_all_configs_settings("config_import")
+                logger.info(
+                    f"[Config] Imported registry: "
+                    f"{len(new_registry.groups)} group(s), "
+                    f"{len(new_registry.all_configs())} config(s) "
+                    f"(was {len(old_ids)}, removed {len(old_ids - new_ids)}, added {len(new_ids - old_ids)})"
+                )
+                await _ack({
+                    "groups": len(new_registry.groups),
+                    "configs": len(new_registry.all_configs()),
+                    "added": len(new_ids - old_ids),
+                    "removed": len(old_ids - new_ids),
+                })
+
+            elif msg_type == "save_shared_execution_mode":
+                exec_mode = msg.get("execution_mode")
+                hedge_mode = msg.get("hedge_execution_mode")
+                # If multiple configs exist, force-lock to simulation
+                if len(registry.all_configs()) > 1:
+                    if exec_mode and exec_mode != "simulation":
+                        logger.warning(
+                            f"[Config] Forcing execution_mode=simulation "
+                            f"({len(registry.all_configs())} configs > 1; only super-primary "
+                            f"can use {exec_mode})"
+                        )
+                    # Allow setting it — orchestrator force-locks at component build
+                if exec_mode is not None:
+                    registry.update_shared("execution_mode", exec_mode)
+                if hedge_mode is not None:
+                    registry.update_shared("hedge_execution_mode", hedge_mode)
+                save_registry(registry)
+                # Reconcile — super-primary's bundle rebuilds with new mode
+                await orch.reconcile_components()
+                await _ack()
+
+            elif msg_type == "config_request_settings":
+                # Returns a single config's full settings blob (for copy/paste)
+                cid = msg.get("config_id")
+                cfg = registry.find_config(cid)
+                if cfg is None:
+                    return await _err(f"Config not found: {cid}")
+                await ws.send(json.dumps({
+                    "type": "config_settings_response",
+                    "config_id": cid,
+                    "name": cfg.name,
+                    "description": cfg.description,
+                    "settings": cfg.settings,
+                }))
+
+            elif msg_type == "select_config":
+                cid = msg.get("config_id")
+                bundle = orch.get_bundle(cid)
+                if bundle is None:
+                    return await _err(f"Config not found: {cid}")
+                # Swap the dashboard's references so subsequent broadcasts
+                # render the heavy slice for this bundle. Single-operator
+                # model — the latest selection wins (multi-operator racing
+                # is acceptable for current use case).
+                self._monitor = bundle.monitor
+                self._optimizer = bundle.optimizer
+                self._balance = bundle.balance
+                self._fee_manager = bundle.fee_manager
+                self._selected_config_id = cid
+                logger.info(f"[Dashboard] Selected config: {cid} ({bundle.config_name})")
+                await _ack({"selected_config_id": cid})
+
+            elif msg_type == "subscribe_logs":
+                # Per-WS log filter: stash on the websocket
+                ws._log_subscription = {
+                    "scope": msg.get("scope", "all"),  # all|universal|group|config
+                    "group_id": msg.get("group_id"),
+                    "config_id": msg.get("config_id"),
+                }
+                await _ack({"log_subscription": ws._log_subscription})
+
+            else:
+                await _err(f"Unknown config message type: {msg_type}")
+
+        except (KeyError, ValueError) as e:
+            await _err(str(e))
+        except Exception as e:
+            logger.exception(f"[Config] {msg_type} failed: {e}")
+            await _err(f"Internal error: {e}")
+
+    def _apply_settings_to_bundle(self, bundle, settings: dict) -> None:
+        """Hot-apply per-config settings against an arbitrary bundle by
+        temporarily swapping dashboard component references and reusing
+        the existing `_apply_settings` logic.
+
+        v0.31.0-beta+: total_capital is ALWAYS sourced from the bundle's
+        group, never from the passed `settings` dict. This prevents the
+        Paste / Paste-All flow from corrupting capital — pasting Group 1's
+        Config 1 settings onto a Group 2 config used to inject Group 1's
+        $1000 (or worse, fall back to the 1800 default) into Group 2's
+        bundle, even though Group 2's group capital was $2000. The capital
+        mismatch then poisoned the realized peak vs current realized
+        comparison and triggered phantom Layer A emergencies (observed in
+        S31 with realized_drawdown=50% the moment the operator clicked a
+        freshly-pasted config).
+        """
+        # Pull group capital from the registry — single source of truth.
+        registry = getattr(self, "_registry", None)
+        group_capital = None
+        if registry is not None:
+            group = registry.find_group_for_config(bundle.config_id)
+            if group is not None:
+                group_capital = float(group.initial_capital)
+        # Strip total_capital from the incoming dict (paste payloads may
+        # carry it from older flows / legacy frontend code) and inject the
+        # authoritative group capital. Done on a copy so callers' dicts
+        # aren't mutated.
+        applied = dict(settings)
+        applied.pop("total_capital", None)
+        if group_capital is not None:
+            applied["total_capital"] = group_capital
+
+        saved = (self._monitor, self._optimizer, self._balance, self._fee_manager)
+        self._monitor = bundle.monitor
+        self._optimizer = bundle.optimizer
+        self._balance = bundle.balance
+        self._fee_manager = bundle.fee_manager
+        try:
+            # log_global_dump=False: the per-bundle apply path has its own
+            # `_log_one_config_settings("settings_applied")` caller-side
+            # dump with the correct per-config + group-capital values.
+            # Letting the global dump fire here would emit a confusing
+            # second log line tagged with the bundle's prefix but
+            # showing the stale legacy `self._settings.total_capital`.
+            self._apply_settings(applied, log_global_dump=False)
+            # Realized peak invariant: after a basis change (capital was
+            # configured differently than the anomaly state's prior peak),
+            # reset peak to the current realized so we don't drag a stale
+            # high-water mark from a different capital era.
+            anomaly = getattr(bundle.monitor, "_anomaly", None)
+            if anomaly is not None and group_capital is not None:
+                peak_realized = float(getattr(anomaly, "_peak_realized_value", 0.0) or 0.0)
+                # If the recorded peak differs meaningfully from the new
+                # configured capital, the basis has shifted (paste, group
+                # capital change, restart with new capital). Reset to 0 so
+                # the next update_portfolio_value re-seeds peak from the
+                # actual current realized — not the stale value.
+                if peak_realized > 0 and abs(peak_realized - group_capital) > max(1.0, group_capital * 0.05):
+                    logger.warning(
+                        f"[Anomaly] Capital basis change on bundle: "
+                        f"peak_realized=${peak_realized:.2f} vs "
+                        f"group_capital=${group_capital:.2f} — "
+                        f"resetting realized peak to avoid phantom drawdown"
+                    )
+                    anomaly._peak_realized_value = 0.0
+                    anomaly._current_realized_drawdown_pct = 0.0
+                    anomaly._peak_portfolio_value = 0.0
+                    anomaly._current_drawdown_pct = 0.0
+                    anomaly._combined_breach_start = None
+        finally:
+            self._monitor, self._optimizer, self._balance, self._fee_manager = saved
 
     def _trigger_restart(self) -> None:
         """Restart the bot process by replacing it with a fresh one."""
@@ -1687,6 +2526,13 @@ class DashboardServer:
             self._last_auto_disable_run_date_utc = str(data.get("last_run_date_utc", ""))
             self._last_auto_disable_run_ts = float(data.get("last_run_ts", 0.0))
             self._last_manual_volumes_fetch_ts = float(data.get("last_manual_fetch_ts", 0.0))
+            cached = data.get("cached_volumes")
+            if isinstance(cached, dict):
+                # Validate shape: dict[str, dict[str, float]]
+                self._cached_volumes = {
+                    str(ex): {str(s): float(v) for s, v in (vols or {}).items() if isinstance(v, (int, float))}
+                    for ex, vols in cached.items() if isinstance(vols, dict)
+                }
             if self._last_auto_disable_run_date_utc:
                 age_hours = (time.time() - self._last_auto_disable_run_ts) / 3600.0
                 today_utc = time.strftime("%Y-%m-%d", time.gmtime(time.time()))
@@ -1740,6 +2586,9 @@ class DashboardServer:
                     diffs if diffs is not None
                     else existing.get("last_diff", {})
                 ),
+                # Cached fetched volumes — survives bot restart so the Fee
+                # Management UI keeps showing them after browser refresh.
+                "cached_volumes": self._cached_volumes,
             }
             tmp = self._auto_disable_state_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, indent=2))
@@ -1748,12 +2597,17 @@ class DashboardServer:
             logger.exception("[AutoDisable] Failed to persist state file")
 
     async def _maybe_run_auto_disable_volumes(self) -> None:
-        """Daily auto-disable of thinly-traded (exchange, symbol) combos.
+        """Hourly auto-disable of thinly-traded (exchange, symbol) combos.
 
-        Fires at the configured UTC hour:minute (default 00:01 UTC) once per
-        calendar day. If the bot was down at the trigger moment, runs on the
-        first eligible cycle after restart (still capped at once per UTC day
-        via `_last_auto_disable_run_date_utc`).
+        v0.31 update: was once-per-UTC-day; now runs every hour because
+        24h volumes shift fast (operator observed JUP volume jump 100×
+        from $205 to $25.6K in minutes once the bot's own trades flowed
+        through it). A daily cadence misses this kind of fast change.
+
+        Trigger logic:
+          - Forced first run after bot start (refreshes blocklist
+            immediately on restart so stale data doesn't persist)
+          - Otherwise fires when `last_run_ts` is older than 1 hour
 
         For each enabled exchange × each symbol in SYMBOLS:
           - Fetch live 24h USD volume from the exchange
@@ -1766,15 +2620,21 @@ class DashboardServer:
         if not bool(self._settings.get("auto_disable_volume_enabled", True)):
             return
 
-        # Trigger logic: it's at-or-after the target time today AND we haven't run today
-        now_utc = time.gmtime(time.time())
+        # Trigger logic: forced first run, or > 1 hour since last run.
+        now = time.time()
+        forced = self._auto_disable_force_run_on_start
+        if not forced:
+            if now - self._last_auto_disable_run_ts < 3600.0:
+                return  # ran less than an hour ago
+        else:
+            logger.info(
+                "[AutoDisable] Forced run on startup — refreshing blocklist "
+                "regardless of cadence (operator: 'must run on restart')"
+            )
+        # Keep `_last_auto_disable_run_date_utc` updated for the state
+        # file's audit history (operator inspects it via state file).
+        now_utc = time.gmtime(now)
         today_utc = time.strftime("%Y-%m-%d", now_utc)
-        if today_utc == self._last_auto_disable_run_date_utc:
-            return  # already ran today
-        target_h = int(self._auto_disable_target_hour_utc)
-        target_m = int(self._auto_disable_target_minute_utc)
-        if (now_utc.tm_hour, now_utc.tm_min) < (target_h, target_m):
-            return  # not yet target time today
 
         threshold = float(self._settings.get("auto_disable_volume_threshold_usd", 10000.0))
         from config import SYMBOLS
@@ -1786,10 +2646,15 @@ class DashboardServer:
         # on next start (the previous-day blocklist remains in fee_configs).
         self._last_auto_disable_run_date_utc = today_utc
         self._last_auto_disable_run_ts = time.time()
+        # Clear the force-run flag now (regardless of fetch outcome) so the
+        # broadcast loop doesn't reprime it next tick.
+        self._auto_disable_force_run_on_start = False
 
         try:
             from volume_fetcher import fetch_all_24h_volumes
             volumes = await fetch_all_24h_volumes()
+            # Cache for broadcast — daily run also feeds the Fee Mgmt UI
+            self._cached_volumes = volumes
         except Exception as e:
             logger.exception("[AutoDisable] Volume fetch failed; skipping today's run: %s", e)
             # Persist the attempt so we don't retry today even though fetch failed.
@@ -1798,19 +2663,17 @@ class DashboardServer:
             self._save_auto_disable_state(threshold=threshold)
             return
 
-        # Build per-exchange lists of symbols to auto-disable. Limit scope to
-        # bot-tracked symbols (SYMBOLS) and currently-enabled exchanges.
-        configured_symbols = set(SYMBOLS)
+        # Build per-exchange lists of symbols to auto-disable. Iterates ALL
+        # symbols on the exchange (not just our tracked SYMBOLS) to match
+        # the manual bulk-disable button behavior.
         per_exchange_disable: dict[str, list[str]] = {}
         per_exchange_kept_count: dict[str, int] = {}
         for exchange in self._fee_manager.get_enabled_exchanges():
             ex_vols = volumes.get(exchange, {})
             disable_list: list[str] = []
             keep_count = 0
-            for sym in configured_symbols:
-                vol = ex_vols.get(sym)
+            for sym, vol in ex_vols.items():
                 if vol is None:
-                    # Symbol not listed on this exchange — leave alone (not auto-managed)
                     continue
                 if vol < threshold:
                     disable_list.append(sym)
@@ -1819,8 +2682,23 @@ class DashboardServer:
             per_exchange_disable[exchange] = sorted(disable_list)
             per_exchange_kept_count[exchange] = keep_count
 
-        # Apply, then persist + log diff
-        diffs = self._fee_manager.apply_auto_disable(per_exchange_disable)
+        # The dashboard's bound `self._fee_manager` is the super-primary /
+        # default config's fee_manager (same instance). Compute its
+        # blocklist from its OWN config threshold (not the global one)
+        # so behavior matches every other config — and so a $10k-capital
+        # super-primary correctly uses $100k threshold instead of the
+        # global default $10k.
+        registry = getattr(self, "_registry", None)
+        default_cfg = registry.default_config if registry is not None else None
+        default_threshold = float(
+            default_cfg.settings.get("auto_disable_volume_threshold_usd", threshold)
+            if default_cfg is not None else threshold
+        )
+        default_blocklist = self._build_per_exchange_disable_lists(volumes, default_threshold)
+        diffs = self._fee_manager.apply_auto_disable(default_blocklist)
+
+        # Apply per-config thresholds to every OTHER bundle.
+        self._apply_auto_disable_to_other_configs(volumes, threshold)
 
         # Persist updated fee_configs to settings.json so the auto-block survives
         # restarts (matches manual disabled_symbols persistence behavior).
@@ -1829,6 +2707,20 @@ class DashboardServer:
             save_settings(self._settings)
         except Exception:
             logger.exception("[AutoDisable] Failed to persist fee_configs")
+        # Persist registry too (per-config fee_configs were updated). The
+        # default config's bundle was applied via `self._fee_manager` above
+        # but `_apply_auto_disable_to_other_configs` skipped it — so its
+        # registry settings were stale and `save_registry()` would write
+        # an empty blocklist for the super-primary, leaving it un-blocked
+        # after restart even though every other config was correctly
+        # blocked. Sync it explicitly here before save.
+        if registry is not None:
+            try:
+                if default_cfg is not None and self._fee_manager is not None:
+                    default_cfg.settings["fee_configs"] = self._fee_manager.to_settings_dict()
+                save_registry(registry)
+            except Exception:
+                logger.exception("[AutoDisable] Failed to persist registry")
 
         # Persist last-run timestamp + threshold + diff to state file so the
         # next bot start knows whether today's run already happened.
@@ -1839,7 +2731,7 @@ class DashboardServer:
         total_removed = sum(len(d.get("removed", [])) for d in diffs.values())
         total_blocked = sum(len(syms) for syms in per_exchange_disable.values())
         logger.info(
-            f"[AutoDisable] Daily run @ {time.strftime('%Y-%m-%d %H:%M:%S', now_utc)} UTC: "
+            f"[AutoDisable] Hourly run @ {time.strftime('%Y-%m-%d %H:%M:%S', now_utc)} UTC: "
             f"threshold=${threshold:,.0f}/24h, blocked={total_blocked} pairs across "
             f"{len(per_exchange_disable)} exchanges, +{total_added} added, -{total_removed} removed"
         )
@@ -1859,6 +2751,179 @@ class DashboardServer:
                 logger.info(
                     f"[AutoDisable]   {exchange}: blocked={len(disable_list)}/kept={kept} (unchanged)"
                 )
+
+    def _build_per_exchange_disable_lists(
+        self, volumes: dict[str, dict[str, float]], threshold: float
+    ) -> dict[str, list[str]]:
+        """Compute per-exchange auto-disable lists from a volumes snapshot.
+
+        Iterates ALL symbols on each exchange (not just our tracked SYMBOLS)
+        so the auto-disable matches the manual "<$10K/24h" button behavior:
+        any symbol on the exchange with vol < threshold gets blocked. This
+        keeps the per-exchange `disabled_symbols` consistent with what the
+        operator would produce by clicking the manual bulk-disable buttons.
+        """
+        out: dict[str, list[str]] = {}
+        for exchange, ex_vols in volumes.items():
+            disable_list: list[str] = []
+            for sym, vol in ex_vols.items():
+                if vol is None:
+                    continue
+                if vol < threshold:
+                    disable_list.append(sym)
+            out[exchange] = sorted(disable_list)
+        return out
+
+    def _apply_auto_disable_to_other_configs(
+        self, volumes: dict[str, dict[str, float]],
+        default_threshold: float,
+    ) -> int:
+        """Apply auto-disable to every per-config FeeManager that ISN'T
+        `self._fee_manager` (already applied by caller). Each config
+        computes its OWN blocklist from `volumes` using its OWN
+        `auto_disable_volume_threshold_usd` — so a $10k-capital config
+        can correctly use a higher threshold ($100k) than a $1k-capital
+        config ($10k). Also syncs the resulting fee_manager state back
+        into the registry Config.settings so `save_registry()` persists
+        the per-config blocklist.
+
+        Pre-fix #1: bundles got an in-memory blocklist update but the
+        registry's stored settings kept empty `auto_disabled_symbols`,
+        so a restart un-blocked everything (e.g., JUP at $205/24h on
+        Bitfinex).
+
+        Pre-fix #2: every bundle received the SAME blocklist computed
+        from `self._settings`'s global threshold, ignoring per-config
+        `auto_disable_volume_threshold_usd`. The high-capital configs
+        (intended threshold $100k+) were getting the default $10k list,
+        leaving thinly-traded pairs tradeable for them too.
+        """
+        orch = getattr(self, "_orchestrator", None)
+        if orch is None:
+            return 0
+        registry = getattr(self, "_registry", None)
+        n = 0
+        for bundle in orch.all_bundles():
+            if bundle.fee_manager is self._fee_manager:
+                continue
+            try:
+                # Look up this config's own threshold; fall back to the
+                # default if not set on the config.
+                cfg = registry.find_config(bundle.config_id) if registry is not None else None
+                cfg_threshold = default_threshold
+                if cfg is not None:
+                    cfg_threshold = float(
+                        cfg.settings.get(
+                            "auto_disable_volume_threshold_usd",
+                            default_threshold,
+                        )
+                    )
+                # Build this config's blocklist from the shared volumes.
+                cfg_disable = self._build_per_exchange_disable_lists(volumes, cfg_threshold)
+                bundle.fee_manager.apply_auto_disable(cfg_disable)
+                if cfg is not None:
+                    cfg.settings["fee_configs"] = bundle.fee_manager.to_settings_dict()
+                n += 1
+            except Exception:
+                logger.exception(
+                    f"[AutoDisable] apply to bundle {bundle.config_id[:8]}… failed"
+                )
+        return n
+
+    def _apply_auto_disable_to_all_configs(
+        self, volumes: dict[str, dict[str, float]]
+    ) -> dict:
+        """Apply auto-disable to every config's FeeManager based on the
+        provided volumes snapshot. Returns a summary dict for the WS reply
+        and logging.
+
+        Symbols below `auto_disable_volume_threshold_usd` are added to each
+        FeeManager's `auto_disabled_symbols`; symbols at/above the threshold
+        are removed (re-enabled). Manual `disabled_symbols` are never touched.
+        """
+        # Default (dashboard's bound) FeeManager uses the global threshold
+        # for backward compatibility with single-config deployments.
+        default_threshold = float(self._settings.get("auto_disable_volume_threshold_usd", 10000.0))
+
+        # Apply to default fee_manager + every per-config fee_manager.
+        # Each per-config bundle uses ITS OWN
+        # `auto_disable_volume_threshold_usd` so a $10k-capital config
+        # with $100k threshold blocks more pairs than a $1k-capital
+        # config with $10k threshold, even though both share the same
+        # `volumes` snapshot.
+        total_added = 0
+        total_removed = 0
+        configs_updated = 0
+        registry = getattr(self, "_registry", None)
+        orch = getattr(self, "_orchestrator", None)
+
+        # Resolve (label, fee_manager, threshold) for each manager to apply.
+        managers_with_thresholds: list[tuple[str, Any, float]] = []
+        if self._fee_manager:
+            managers_with_thresholds.append(("default", self._fee_manager, default_threshold))
+        if orch is not None:
+            for bundle in orch.all_bundles():
+                if not bundle.fee_manager or bundle.fee_manager is self._fee_manager:
+                    continue
+                cfg_threshold = default_threshold
+                if registry is not None:
+                    cfg = registry.find_config(bundle.config_id)
+                    if cfg is not None:
+                        cfg_threshold = float(
+                            cfg.settings.get(
+                                "auto_disable_volume_threshold_usd",
+                                default_threshold,
+                            )
+                        )
+                managers_with_thresholds.append(
+                    (bundle.config_name, bundle.fee_manager, cfg_threshold)
+                )
+
+        for label, fm, threshold in managers_with_thresholds:
+            try:
+                # Compute this manager's blocklist from the shared volumes
+                # using its specific threshold.
+                per_exchange_disable = self._build_per_exchange_disable_lists(volumes, threshold)
+                diff = fm.apply_auto_disable(per_exchange_disable)
+                added = sum(len(d.get("added", [])) for d in diff.values())
+                removed = sum(len(d.get("removed", [])) for d in diff.values())
+                total_added += added
+                total_removed += removed
+                if added or removed:
+                    configs_updated += 1
+                    logger.info(
+                        f"[AutoDisable] Manual fetch → {label} "
+                        f"(threshold=${threshold:,.0f}): +{added} disabled, -{removed} re-enabled"
+                    )
+            except Exception:
+                logger.exception(f"[AutoDisable] apply to {label} failed")
+
+        # Persist updated registry so per-config blocklists survive restart
+        if getattr(self, "_registry", None):
+            try:
+                # Sync each bundle's fee_manager state back into its config's settings
+                for bundle in orch.all_bundles() if orch else []:
+                    cfg = self._registry.find_config(bundle.config_id)
+                    if cfg and bundle.fee_manager:
+                        cfg.settings["fee_configs"] = bundle.fee_manager.to_settings_dict()
+                save_registry(self._registry)
+            except Exception:
+                logger.exception("[AutoDisable] Failed to persist registry")
+
+        # Persist legacy fee_configs in settings (default config view)
+        if self._fee_manager:
+            self._settings["fee_configs"] = self._fee_manager.to_settings_dict()
+            try:
+                save_settings(self._settings)
+            except Exception:
+                pass
+
+        return {
+            "configs_updated": configs_updated,
+            "total_added": total_added,
+            "total_removed": total_removed,
+            "threshold_usd": threshold,
+        }
 
     def _check_trade_amount_rescale_triggers(self) -> None:
         """Called from the broadcast loop. Fires hourly + on discovery transitions."""
@@ -2234,8 +3299,19 @@ class DashboardServer:
                 continue
         return entries
 
-    def _apply_settings(self, settings: dict) -> None:
-        """Apply new settings: restart discovery with updated parameters."""
+    def _apply_settings(self, settings: dict, *, log_global_dump: bool = True) -> None:
+        """Apply new settings: restart discovery with updated parameters.
+
+        `log_global_dump`: when True, ends with a `_log_all_settings(...)`
+        dump using the GLOBAL `self._settings`. This makes sense for the
+        legacy single-config save_settings path. When called via
+        `_apply_settings_to_bundle` (per-config hot-apply), pass False —
+        the per-config caller has its own `_log_one_config_settings(...)`
+        dump with the correct settings, and the global dump just adds a
+        misleading line tagged with the bundle's prefix that prints
+        `total_capital=$1000` (the legacy global value) for every config
+        regardless of the bundle's actual group capital.
+        """
         old_settings = dict(self._settings)  # snapshot for change detection
         trade_amount_pct = float(settings.get("trade_amount_pct", 0.0))
         total_capital = settings.get("total_capital", 1800.0)
@@ -2415,6 +3491,37 @@ class DashboardServer:
                 self._optimizer._fast_track_discovery_enabled = bool(settings["fast_track_discovery_enabled"])
             if "fast_track_aggressiveness" in settings:
                 self._optimizer._fast_track_aggressiveness = float(settings["fast_track_aggressiveness"])
+            # Time-based regime gating — mirrored to monitor + optimizer
+            if "regime_gating_enabled" in settings:
+                v = bool(settings["regime_gating_enabled"])
+                self._optimizer._regime_gating_enabled = v
+                if self._monitor:
+                    self._monitor._regime_gating_enabled = v
+            if "regime_strong_hours" in settings:
+                hrs = {int(h) for h in settings["regime_strong_hours"] if 0 <= int(h) <= 23}
+                self._optimizer._regime_strong_hours = hrs
+                if self._monitor:
+                    self._monitor._regime_strong_hours = hrs
+            if "regime_neutral_hours" in settings:
+                hrs = {int(h) for h in settings["regime_neutral_hours"] if 0 <= int(h) <= 23}
+                self._optimizer._regime_neutral_hours = hrs
+                if self._monitor:
+                    self._monitor._regime_neutral_hours = hrs
+            if "regime_weak_min_net_multiplier" in settings and self._monitor:
+                self._monitor._regime_weak_min_net_multiplier = float(settings["regime_weak_min_net_multiplier"])
+            if "regime_weak_disable_rebalance" in settings and self._monitor:
+                self._monitor._regime_weak_disable_rebalance = bool(settings["regime_weak_disable_rebalance"])
+            if "regime_weak_disable_demote" in settings:
+                self._optimizer._regime_weak_disable_demote = bool(settings["regime_weak_disable_demote"])
+            if "regime_weak_disable_expand" in settings:
+                self._optimizer._regime_weak_disable_expand = bool(settings["regime_weak_disable_expand"])
+            # Anti-churn bundle (A+B+C)
+            if "demotion_freq_scaling_enabled" in settings:
+                self._optimizer._demotion_freq_scaling_enabled = bool(settings["demotion_freq_scaling_enabled"])
+            if "activation_profit_horizon_multiplier" in settings:
+                self._optimizer._activation_profit_horizon_multiplier = float(settings["activation_profit_horizon_multiplier"])
+            if "quiet_period_pause_minutes" in settings and self._monitor:
+                self._monitor._quiet_period_pause_minutes = float(settings["quiet_period_pause_minutes"])
 
         # Funding-aware scoring (Phase A)
         if self._funding_monitor:
@@ -2469,6 +3576,15 @@ class DashboardServer:
             anomaly._dd_resume_pct = float(settings["drawdown_resume_pct"])
         if "drawdown_emergency_mult" in settings:
             anomaly._dd_emergency_mult = float(settings["drawdown_emergency_mult"])
+        # v0.31.0-beta+: two-layer emergency gate
+        if "realized_drawdown_emergency_pct" in settings:
+            anomaly._realized_dd_emergency_pct = float(settings["realized_drawdown_emergency_pct"])
+        if "combined_drawdown_emergency_pct" in settings:
+            anomaly._combined_dd_emergency_pct = float(settings["combined_drawdown_emergency_pct"])
+        if "combined_drawdown_sustained_seconds" in settings:
+            anomaly._combined_dd_sustained_s = float(settings["combined_drawdown_sustained_seconds"])
+        if "emergency_auto_liquidate" in settings:
+            anomaly._emergency_auto_liquidate = bool(settings["emergency_auto_liquidate"])
         if "symbol_loss_streak_threshold" in settings:
             anomaly._sls_threshold = int(settings["symbol_loss_streak_threshold"])
         if "symbol_loss_streak_cooldown" in settings:
@@ -2505,8 +3621,10 @@ class DashboardServer:
             self._distribute_enabled = True
             logger.info("[Settings] Execution mode changed to live — distribute from Bitfinex enabled")
 
-        # Log comprehensive settings snapshot with diffs
-        self._log_all_settings("settings_applied", old_settings=old_settings)
+        # Log comprehensive settings snapshot with diffs.
+        # Skipped in per-bundle hot-apply (multi-config) — see docstring.
+        if log_global_dump:
+            self._log_all_settings("settings_applied", old_settings=old_settings)
 
     def _sync_settings_on_startup(self, settings: dict) -> None:
         """Sync persisted settings to components at startup.
@@ -2653,6 +3771,37 @@ class DashboardServer:
                 self._optimizer._fast_track_discovery_enabled = bool(settings["fast_track_discovery_enabled"])
             if "fast_track_aggressiveness" in settings:
                 self._optimizer._fast_track_aggressiveness = float(settings["fast_track_aggressiveness"])
+            # Time-based regime gating — mirrored to monitor + optimizer
+            if "regime_gating_enabled" in settings:
+                v = bool(settings["regime_gating_enabled"])
+                self._optimizer._regime_gating_enabled = v
+                if self._monitor:
+                    self._monitor._regime_gating_enabled = v
+            if "regime_strong_hours" in settings:
+                hrs = {int(h) for h in settings["regime_strong_hours"] if 0 <= int(h) <= 23}
+                self._optimizer._regime_strong_hours = hrs
+                if self._monitor:
+                    self._monitor._regime_strong_hours = hrs
+            if "regime_neutral_hours" in settings:
+                hrs = {int(h) for h in settings["regime_neutral_hours"] if 0 <= int(h) <= 23}
+                self._optimizer._regime_neutral_hours = hrs
+                if self._monitor:
+                    self._monitor._regime_neutral_hours = hrs
+            if "regime_weak_min_net_multiplier" in settings and self._monitor:
+                self._monitor._regime_weak_min_net_multiplier = float(settings["regime_weak_min_net_multiplier"])
+            if "regime_weak_disable_rebalance" in settings and self._monitor:
+                self._monitor._regime_weak_disable_rebalance = bool(settings["regime_weak_disable_rebalance"])
+            if "regime_weak_disable_demote" in settings:
+                self._optimizer._regime_weak_disable_demote = bool(settings["regime_weak_disable_demote"])
+            if "regime_weak_disable_expand" in settings:
+                self._optimizer._regime_weak_disable_expand = bool(settings["regime_weak_disable_expand"])
+            # Anti-churn bundle (A+B+C)
+            if "demotion_freq_scaling_enabled" in settings:
+                self._optimizer._demotion_freq_scaling_enabled = bool(settings["demotion_freq_scaling_enabled"])
+            if "activation_profit_horizon_multiplier" in settings:
+                self._optimizer._activation_profit_horizon_multiplier = float(settings["activation_profit_horizon_multiplier"])
+            if "quiet_period_pause_minutes" in settings and self._monitor:
+                self._monitor._quiet_period_pause_minutes = float(settings["quiet_period_pause_minutes"])
 
         # Funding-aware scoring (Phase A) — startup sync
         if self._funding_monitor:
@@ -2697,6 +3846,15 @@ class DashboardServer:
             anomaly._cb_threshold = float(settings["circuit_breaker_threshold"])
         if "drawdown_threshold_pct" in settings:
             anomaly._dd_threshold_pct = float(settings["drawdown_threshold_pct"])
+        # v0.31.0-beta+: two-layer emergency gate
+        if "realized_drawdown_emergency_pct" in settings:
+            anomaly._realized_dd_emergency_pct = float(settings["realized_drawdown_emergency_pct"])
+        if "combined_drawdown_emergency_pct" in settings:
+            anomaly._combined_dd_emergency_pct = float(settings["combined_drawdown_emergency_pct"])
+        if "combined_drawdown_sustained_seconds" in settings:
+            anomaly._combined_dd_sustained_s = float(settings["combined_drawdown_sustained_seconds"])
+        if "emergency_auto_liquidate" in settings:
+            anomaly._emergency_auto_liquidate = bool(settings["emergency_auto_liquidate"])
 
         # Log sync results
         if synced:
@@ -2745,11 +3903,29 @@ class DashboardServer:
         if self._optimizer:
             self._optimizer._active_exchanges = target_active.copy()
 
-        # Update balance exchanges (list, preserve order)
+        # Update balance exchanges (list, preserve order). Initialize the
+        # per-exchange dicts (usdt, crypto, _crypto_usd) for any newly-added
+        # exchange — without this, downstream consumers like _build_state's
+        # `for ex in _exchanges: self.crypto[ex]` raise KeyError the moment
+        # an exchange is enabled mid-session (observed enabling Gate.io +
+        # KuCoin).
         if self._balance:
-            self._balance._exchanges = [
-                ex for ex in fetcher_exchanges if ex in target_active
-            ]
+            new_list = [ex for ex in fetcher_exchanges if ex in target_active]
+            symbols = list(self._balance._symbols)
+            for ex in new_list:
+                if ex not in self._balance.usdt:
+                    self._balance.usdt[ex] = 0.0
+                if ex not in self._balance.crypto:
+                    self._balance.crypto[ex] = {sym: 0.0 for sym in symbols}
+                else:
+                    # Backfill any missing symbol keys (defensive — symbols
+                    # may have been added after the per-exchange dict was
+                    # first created).
+                    for sym in symbols:
+                        self._balance.crypto[ex].setdefault(sym, 0.0)
+                if hasattr(self._balance, "_crypto_usd") and ex not in self._balance._crypto_usd:
+                    self._balance._crypto_usd[ex] = {sym: 0.0 for sym in symbols}
+            self._balance._exchanges = new_list
 
         logger.info(
             f"[Settings] Exchange state updated — "
@@ -2951,9 +4127,100 @@ class DashboardServer:
     # Backward-compat alias
     _distribute_from_bitfinex = _distribute_from_custody_hub
 
-    def _log_all_settings(self, reason: str, old_settings: dict | None = None) -> None:
-        """Log comprehensive settings snapshot. Called at session start and on change."""
-        s = self._settings
+    def _log_all_configs_settings(self, reason: str) -> None:
+        """v0.31: log every config's full settings, each wrapped in its
+        own ConfigContextVar so log lines are tagged `[Group X][Config Y]`.
+
+        Called on session start, after `config_add` / `config_clone` /
+        `config_clone_group`, so the operator can grep the log file for
+        a specific config's full state at any moment.
+        """
+        registry = getattr(self, "_registry", None)
+        if registry is None:
+            return
+        from log_context import set_config_context, reset_config_context
+        n = 0
+        for cfg in registry.iter_configs():
+            group = registry.find_group_for_config(cfg.id)
+            if group is None:
+                continue
+            # Build a flat settings view: per-config settings + shared keys
+            # + group capital, so the standard _log_all_settings produces
+            # the same shape as the legacy single-config dump.
+            flat = dict(cfg.settings)
+            flat["execution_mode"] = registry.effective_execution_mode(cfg.id)
+            flat["hedge_execution_mode"] = registry.effective_hedge_mode(cfg.id)
+            flat["total_capital"] = group.initial_capital
+            token = set_config_context(group.id, group.name, cfg.id, cfg.name)
+            try:
+                logger.info(
+                    f"[Config] === {reason}: id={cfg.id[:8]}… "
+                    f"primary={cfg.is_primary} default={cfg.is_default} "
+                    f"super_primary={cfg.id == registry.super_primary_id} "
+                    f"order={cfg.order} ==="
+                )
+                if cfg.description:
+                    logger.info(f"[Config] description: {cfg.description}")
+                self._log_all_settings(
+                    reason=f"{reason}_per_config",
+                    settings_override=flat,
+                )
+                n += 1
+            finally:
+                reset_config_context(token)
+        # Summary line (untagged so it lands in Universal)
+        logger.info(
+            f"[Config] {reason}: dumped settings for {n} config(s) "
+            f"across {len(registry.groups)} group(s)"
+        )
+
+    def _log_one_config_settings(self, config_id: str, reason: str) -> None:
+        """Log a single config's full settings (tagged via ConfigContextVar)."""
+        registry = getattr(self, "_registry", None)
+        if registry is None:
+            return
+        cfg = registry.find_config(config_id)
+        if cfg is None:
+            return
+        group = registry.find_group_for_config(config_id)
+        if group is None:
+            return
+        from log_context import set_config_context, reset_config_context
+        flat = dict(cfg.settings)
+        flat["execution_mode"] = registry.effective_execution_mode(cfg.id)
+        flat["hedge_execution_mode"] = registry.effective_hedge_mode(cfg.id)
+        flat["total_capital"] = group.initial_capital
+        token = set_config_context(group.id, group.name, cfg.id, cfg.name)
+        try:
+            logger.info(
+                f"[Config] === {reason}: id={cfg.id[:8]}… "
+                f"primary={cfg.is_primary} default={cfg.is_default} "
+                f"super_primary={cfg.id == registry.super_primary_id} ==="
+            )
+            if cfg.description:
+                logger.info(f"[Config] description: {cfg.description}")
+            self._log_all_settings(
+                reason=f"{reason}_per_config",
+                settings_override=flat,
+            )
+        finally:
+            reset_config_context(token)
+
+    def _log_all_settings(
+        self,
+        reason: str,
+        old_settings: dict | None = None,
+        settings_override: dict | None = None,
+    ) -> None:
+        """Log comprehensive settings snapshot. Called at session start and on change.
+
+        v0.31: when `settings_override` is supplied, logs against that dict
+        instead of the dashboard-bound `self._settings`. Used by the
+        multi-config logger to dump every config's full settings (each
+        wrapped in its own ConfigContextVar so the logs are tagged
+        `[Group X][Config Y]` automatically).
+        """
+        s = settings_override if settings_override is not None else self._settings
         mon = self._monitor
         opt = self._optimizer
         bal = self._balance
@@ -3178,6 +4445,46 @@ class DashboardServer:
             "session_start": opt._session_start,
         }
 
+    def _compute_bundle_portfolio_value(
+        self,
+        balance: Any,
+        monitor: Any,
+        hedge_manager: Any,
+        prices: dict[str, float],
+        fallback: float,
+    ) -> tuple[float, float]:
+        """Single source of truth for per-bundle portfolio value.
+
+        Mirrors the convention used by every consumer: spot MTM via per-
+        exchange prices when available, plus hedge unrealized PnL so the
+        metric represents net spot+futures exposure. Returns
+        (portfolio_value, hedge_pnl_usd) — both call sites need the hedge
+        component for downstream display fields.
+        """
+        if not (balance and getattr(balance, "initialized", False)):
+            return float(fallback), 0.0
+        hedge_pnl_usd = 0.0
+        if hedge_manager is not None:
+            try:
+                hedge_pnl_usd = float(
+                    hedge_manager.get_debug_state().get("total_unrealized_pnl_usd", 0.0)
+                )
+            except Exception:
+                hedge_pnl_usd = 0.0
+        try:
+            prices_per_exchange = monitor._get_per_exchange_prices() if monitor else None
+        except Exception:
+            prices_per_exchange = None
+        try:
+            portfolio_value = balance.get_portfolio_value(
+                prices,
+                hedge_pnl_usd=hedge_pnl_usd,
+                prices_per_exchange=prices_per_exchange,
+            )
+        except Exception:
+            portfolio_value = float(fallback)
+        return float(portfolio_value), hedge_pnl_usd
+
     def _build_state(self) -> dict[str, Any]:
         """Collect all system state into a JSON-serializable dict."""
         now = time.time()
@@ -3199,36 +4506,22 @@ class DashboardServer:
             if f._ws_connected and f.exchange_name in active_set
         )
 
-        # Portfolio — include hedge unrealized PnL so the metric represents
-        # net spot+futures exposure (drawdown becomes economic, not single-
-        # side noise). In shadow mode this is the simulated PnL preview;
-        # in testnet/live it's the real position PnL.
-        hedge_pnl_usd = 0.0
-        hm = getattr(self._monitor, "_hedge_manager", None)
-        if hm is not None and self._balance and self._balance.initialized:
-            try:
-                hedge_state = hm.get_debug_state()
-                hedge_pnl_usd = float(hedge_state.get("total_unrealized_pnl_usd", 0.0))
-            except Exception:
-                hedge_pnl_usd = 0.0
+        # Portfolio — single source via _compute_bundle_portfolio_value so
+        # the dashboard's selected-config view and every per-config row in
+        # the header stats bar resolve to the same number. Includes hedge
+        # unrealized PnL (shadow preview or real testnet/live position PnL)
+        # so drawdown reflects net spot+futures exposure.
         initial = self._balance._initial_investment
-        # v0.30.1+: pass per-exchange prices so crypto on each exchange is
-        # MTM-marked against THAT exchange's actual price (Fix A). Falls back
-        # to the flat `prices` dict for any (exchange, symbol) without per-
-        # exchange data.
-        try:
-            prices_per_exchange = self._monitor._get_per_exchange_prices()
-        except Exception:
-            prices_per_exchange = None
-        portfolio_value = (
-            self._balance.get_portfolio_value(
-                prices,
-                hedge_pnl_usd=hedge_pnl_usd,
-                prices_per_exchange=prices_per_exchange,
-            )
-            if self._balance.initialized else initial
+        portfolio_value, hedge_pnl_usd = self._compute_bundle_portfolio_value(
+            self._balance,
+            self._monitor,
+            getattr(self._monitor, "_hedge_manager", None),
+            prices,
+            fallback=initial,
         )
-        trading_pnl = sum(t.profit_usd for t in self._monitor._trades)
+        # Use the monitor's incremental cumulative aggregate (O(1))
+        # instead of a per-tick scan over the trades deque.
+        trading_pnl = self._monitor._cumulative_pnl
         transfer_fees = self._balance.total_transfer_fees
 
         # v0.30.1+: realized capital is what peak should ratchet against
@@ -3276,12 +4569,18 @@ class DashboardServer:
             self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
         )
         net_profit = trading_pnl - transfer_fees + credited_cashback
-        elapsed_hours = max((now - self._start_time) / 3600, 1 / 3600)
-        session_hourly_rate = net_profit / elapsed_hours
+        elapsed_s = now - self._start_time if self._start_time else 0
+        # Same warmup gate as monitor.get_net_profit_stats — without it, a tiny
+        # setup-time fee divided by a sub-second elapsed window produces a
+        # huge phantom $/hr that doesn't match the displayed Net Total.
+        WARMUP_SECONDS = 300.0
+        if len(self._monitor._trades) == 0 or elapsed_s < WARMUP_SECONDS:
+            session_hourly_rate = 0.0
+        else:
+            session_hourly_rate = net_profit / (elapsed_s / 3600)
         # For optimizer gating: use external-only fees (internal rebalances are cheap)
         external_fees = self._balance.total_external_transfer_fees
         net_profit_gating = trading_pnl - external_fees + credited_cashback
-        elapsed_s = now - self._start_time if self._start_time else 0
         grace_seconds = getattr(self._monitor, "_net_pnl_gate_grace_seconds", 1800)
         grace_active = elapsed_s < grace_seconds
         if self._optimizer:
@@ -3338,9 +4637,11 @@ class DashboardServer:
         elapsed = now - self._monitor._start_time if self._monitor._start_time else 0
         trades_per_min = total_trades / (elapsed / 60) if elapsed > 60 else 0.0
 
-        # Recent trades (last 100, newest first)
+        # Recent trades (last 100, newest first). `_trades` is a
+        # bounded deque; deque doesn't support `[-100:]` slicing, so
+        # convert to list once.
         recent_trades = []
-        for t in reversed(self._monitor._trades[-100:]):
+        for t in reversed(list(self._monitor._trades)[-100:]):
             trade_dict: dict = {
                 "timestamp": t.timestamp,
                 "symbol": t.symbol,
@@ -3384,8 +4685,9 @@ class DashboardServer:
 
         price_pnl = portfolio_value - initial - trading_pnl + transfer_fees if self._balance.initialized else 0.0
 
-        # Adaptive trade size stats
-        recent_trades_list = self._monitor._trades[-100:] if self._monitor._trades else []
+        # Adaptive trade size stats — _trades is a deque, must convert
+        # to list before slicing.
+        recent_trades_list = list(self._monitor._trades)[-100:] if self._monitor._trades else []
         trade_sizes = [t.trade_amount for t in recent_trades_list if t.trade_amount > 0]
         avg_trade_size = sum(trade_sizes) / len(trade_sizes) if trade_sizes else self._monitor._trade_amount
         min_trade_size = min(trade_sizes) if trade_sizes else 0
@@ -3414,7 +4716,7 @@ class DashboardServer:
                 "total_trades": total_trades,
                 "skipped_trades": self._balance.skipped_trades,
                 "total_transfers": len(self._balance.transfers),
-                "trades_per_minute": round(trades_per_min, 1),
+                "trades_per_minute": round(trades_per_min, 2),
                 "low_profit_skips": self._monitor._low_profit_skips,
                 "avg_trade_size": round(avg_trade_size, 2),
                 "min_trade_size": round(min_trade_size, 2),
@@ -3510,7 +4812,325 @@ class DashboardServer:
                     self._settings.get("auto_disable_volume_threshold_usd", 10000.0)
                 ),
                 "enabled": bool(self._settings.get("auto_disable_volume_enabled", True)),
+                # Cached volumes from the last fetch (manual or daily cron) —
+                # included so the Fee Management UI keeps the per-symbol
+                # blocklist data after a page refresh.
+                "cached_volumes": self._cached_volumes,
             },
+            # Multi-config (v0.31.0-beta): registry tree + per-config lite
+            # summaries + capacity stats. Heavy slice (rankings/trades/etc.)
+            # is the rest of this dict, scoped to the currently-selected
+            # config (whose components self._monitor/optimizer/etc. point to).
+            **self._build_multi_config_payload(),
+        }
+
+    def _build_multi_config_payload(self) -> dict[str, Any]:
+        """v0.31.0-beta: registry tree + per-config lite summaries + capacity.
+
+        Always included in every broadcast. The frontend renders the header
+        rows, ConfigSwitcher tree, and capacity banner from this data, while
+        the heavy state (rankings, trades, balances, etc.) reflects the
+        currently-selected config (set via `select_config` WS message).
+        """
+        registry = getattr(self, "_registry", None)
+        orch = getattr(self, "_orchestrator", None)
+        if registry is None or orch is None:
+            return {}
+
+        # Registry tree (groups + configs metadata; no settings blobs)
+        groups_dict: list[dict[str, Any]] = []
+        for g in sorted(registry.groups, key=lambda x: x.order):
+            groups_dict.append({
+                "id": g.id,
+                "name": g.name,
+                "initial_capital": g.initial_capital,
+                "order": g.order,
+                "configs": [
+                    {
+                        "id": c.id,
+                        "name": c.name,
+                        "description": c.description,
+                        "is_primary": c.is_primary,
+                        "is_default": c.is_default,
+                        "is_super_primary": (c.id == registry.super_primary_id),
+                        "order": c.order,
+                    }
+                    for c in sorted(g.configs, key=lambda x: x.order)
+                ],
+            })
+
+        # Build a global flat prices dict ONCE so each per-config
+        # `get_portfolio_value` can MTM-mark crypto correctly. Without prices,
+        # crypto held on the books is valued at $0 and configs all show the
+        # same USDT-only value (looks "shared" — see v0.31 user feedback).
+        global_prices: dict[str, float] = {}
+        for fetcher in self._fetchers:
+            try:
+                state = fetcher.get_state()
+            except Exception:
+                continue
+            for sym, ps in state.items():
+                if ps and ps.bid:
+                    try:
+                        bid_f = float(ps.bid)
+                        if bid_f > 0 and sym not in global_prices:
+                            global_prices[sym] = bid_f
+                    except (ValueError, TypeError):
+                        continue
+
+        # Per-config lite summaries
+        configs_lite: list[dict[str, Any]] = []
+        for bundle in orch.all_bundles():
+            # Read names + flags LIVE from the registry — bundle.config_name
+            # is captured at build time and would go stale on rename.
+            cfg = registry.find_config(bundle.config_id)
+            group = registry.find_group_for_config(bundle.config_id)
+            if cfg is None or group is None:
+                continue
+            # Pre-discovery, BalanceTracker.initialize_crypto() hasn't
+            # converted USD allocations into crypto quantities yet, so the
+            # helper falls back to _initial_investment so the user sees the
+            # group capital they configured. Same helper as _build_state to
+            # guarantee the dashboard's selected-config view and this row
+            # resolve to the same number (single source of truth).
+            fallback = float(
+                getattr(bundle.balance, "_initial_investment", 0.0)
+                or group.initial_capital
+            )
+            portfolio_value, bundle_hedge_pnl = self._compute_bundle_portfolio_value(
+                bundle.balance,
+                bundle.monitor,
+                bundle.hedge_manager,
+                global_prices,
+                fallback=fallback,
+            )
+            try:
+                profit_stats = bundle.monitor.get_net_profit_stats()
+                net_pnl = float(profit_stats.get("net_profit", 0.0))
+                hourly_rate = float(profit_stats.get("hourly_rate", 0.0))
+                session_hourly_rate = float(profit_stats.get("session_hourly_rate", hourly_rate))
+                trading_pnl = float(profit_stats.get("trading_pnl", 0.0))
+                transfer_fees = float(profit_stats.get("transfer_fees", 0.0))
+                credited_cashback = float(profit_stats.get("credited_cashback", 0.0))
+            except Exception:
+                net_pnl = 0.0
+                hourly_rate = 0.0
+                session_hourly_rate = 0.0
+                trading_pnl = 0.0
+                transfer_fees = 0.0
+                credited_cashback = 0.0
+            # Per-config deficit gate: update each bundle's optimizer with
+            # its OWN rotation_budget_ok state. Pre-fix this was only
+            # called on the dashboard's bound config (the selected one),
+            # so the 53 non-selected configs traded as if always profitable
+            # — defeating the whole point of the deficit-protection logic
+            # at multi-config scale. Now every config maintains its own
+            # rotation budget state correctly.
+            try:
+                bundle_external_fees = (
+                    bundle.balance.total_external_transfer_fees
+                    if bundle.balance else 0.0
+                )
+                # Same external-only-fees gating semantics as the legacy path
+                bundle_net_for_gating = trading_pnl - bundle_external_fees + credited_cashback
+                bundle_start_t = float(getattr(bundle.monitor, "_start_time", 0.0) or 0.0)
+                bundle_elapsed = (time.time() - bundle_start_t) if bundle_start_t > 0 else 0.0
+                bundle_grace_s = float(getattr(bundle.monitor, "_net_pnl_gate_grace_seconds", 1800))
+                bundle_grace_active = bundle_elapsed < bundle_grace_s
+                bundle.optimizer.update_profit_state(
+                    bundle_net_for_gating,
+                    session_hourly_rate,
+                    bundle_grace_active,
+                )
+            except Exception:
+                pass
+
+            # Per-config anomaly portfolio update. Pre-fix this only ran
+            # for the selected config — the other 53 had no drawdown
+            # peak ratcheting, no Layer A/B gate evaluation, no per-symbol
+            # drawdown blocks. Effectively zero anomaly protection for
+            # non-selected configs. Each bundle's anomaly now sees its
+            # own portfolio_value every broadcast tick.
+            try:
+                # Compute realized capital for THIS bundle (not the selected one)
+                bundle_credited_cb = (
+                    bundle.fee_manager._total_credited_cashback if bundle.fee_manager else 0.0
+                )
+                bundle_realized = (
+                    bundle.balance.get_realized_capital(
+                        trading_pnl=trading_pnl,
+                        credited_cashback=bundle_credited_cb,
+                    )
+                    if bundle.balance and bundle.balance.initialized
+                    else float(group.initial_capital)
+                )
+                # Crypto-symbols set for the per-symbol drawdown block path
+                bundle_crypto_syms: set[str] = set()
+                if bundle.balance and bundle.balance.initialized:
+                    for ex in bundle.balance._exchanges:
+                        for sym, qty in bundle.balance.crypto.get(ex, {}).items():
+                            if qty > 0 and global_prices.get(sym, 0) > 0:
+                                bundle_crypto_syms.add(sym)
+                bundle.monitor._anomaly.update_portfolio_value(
+                    portfolio_value,
+                    realized_value=bundle_realized,
+                    context={
+                        "portfolio_value": portfolio_value,
+                        "realized_value": bundle_realized,
+                        "mtm_offset": portfolio_value - bundle_realized,
+                        "active_symbols": len(bundle.optimizer._active_symbols)
+                        if bundle.optimizer else 0,
+                        "crypto_symbols": sorted(bundle_crypto_syms),
+                    },
+                )
+            except Exception:
+                pass
+
+            # Per-config trade_amount rescale. Pre-fix only the selected
+            # config's trade_amount auto-scaled with capital — non-selected
+            # configs stayed locked at startup-time trade_amount even when
+            # their portfolio doubled. For "Maximize Profits" configs that
+            # rely on trade_amount_pct, this defeated the entire feature.
+            try:
+                bundle_pct = float(cfg.settings.get("trade_amount_pct", 0.0))
+                if bundle_pct > 0 and bundle.balance and bundle.balance.initialized:
+                    new_amt = round(portfolio_value * bundle_pct, 2)
+                    cur_amt = float(bundle.monitor._trade_amount)
+                    if new_amt > 0 and abs(new_amt - cur_amt) > 0.01:
+                        bundle.monitor._trade_amount = new_amt
+                        if bundle.optimizer:
+                            bundle.optimizer._trade_amount = new_amt
+            except Exception:
+                pass
+            try:
+                drawdown_pct = float(getattr(bundle.monitor._anomaly, "_current_drawdown_pct", 0.0))
+            except Exception:
+                drawdown_pct = 0.0
+            initial_capital = float(group.initial_capital)
+            # Trades-per-minute, transfers, skipped — same fields as the
+            # global Stats bar (computed from per-config monitor + balance)
+            try:
+                total_trades = len(bundle.monitor._trades)
+                start_t = float(getattr(bundle.monitor, "_start_time", 0.0) or 0.0)
+                if start_t > 0:
+                    elapsed_min = max(1e-6, (time.time() - start_t) / 60.0)
+                    # 2-decimal precision so low-activity configs (e.g.,
+                    # 1 trade per ~30 min) don't all round down to 0.0
+                    trades_per_minute = round(total_trades / elapsed_min, 2)
+                else:
+                    trades_per_minute = 0.0
+                total_transfers = len(bundle.balance.transfers)
+                skipped_trades = int(getattr(bundle.balance, "skipped_trades", 0))
+            except Exception:
+                total_trades = len(bundle.monitor._trades)
+                trades_per_minute = 0.0
+                total_transfers = len(bundle.balance.transfers)
+                skipped_trades = 0
+            # Hedge state from the bundle's hedge manager
+            try:
+                hm_state = bundle.hedge_manager.get_debug_state() if bundle.hedge_manager else {}
+                hedge_enabled = bool(hm_state.get("enabled", False))
+                hedge_open_count = int(hm_state.get("open_count", 0))
+                hedge_total_notional_usd = float(hm_state.get("total_notional_usd", 0.0))
+                hedge_total_unrealized_pnl_usd = float(hm_state.get("total_unrealized_pnl_usd", 0.0))
+                hedge_cumulative_funding_usd = float(hm_state.get("cumulative_funding_usd", 0.0))
+                hedge_executor_errors = int(hm_state.get("total_executor_errors", 0))
+                hedge_safety_paused = bool(hm_state.get("safety_paused", False))
+            except Exception:
+                hedge_enabled = False
+                hedge_open_count = 0
+                hedge_total_notional_usd = 0.0
+                hedge_total_unrealized_pnl_usd = 0.0
+                hedge_cumulative_funding_usd = 0.0
+                hedge_executor_errors = 0
+                hedge_safety_paused = False
+            configs_lite.append({
+                "id": bundle.config_id,
+                "group_id": bundle.group_id,
+                "name": cfg.name,            # live from registry
+                "group_name": group.name,    # live from registry
+                "is_primary": cfg.is_primary,
+                "is_default": cfg.is_default,
+                "is_super_primary": (bundle.config_id == registry.super_primary_id),
+                "execution_mode": bundle.execution_mode,
+                "hedge_mode": bundle.hedge_mode,
+                "portfolio_value": float(portfolio_value),
+                "initial_capital": initial_capital,
+                "net_pnl": net_pnl,
+                "hourly_rate": hourly_rate,
+                "session_hourly_rate": session_hourly_rate,
+                "drawdown_pct": drawdown_pct,
+                "trades_count": total_trades,
+                "trades_per_minute": trades_per_minute,
+                "total_transfers": total_transfers,
+                "skipped_trades": skipped_trades,
+                "trading_pnl": trading_pnl,
+                "transfer_fees": transfer_fees,
+                "credited_cashback": credited_cashback,
+                "hedge_enabled": hedge_enabled,
+                "hedge_open_count": hedge_open_count,
+                "hedge_total_notional_usd": hedge_total_notional_usd,
+                "hedge_total_unrealized_pnl_usd": hedge_total_unrealized_pnl_usd,
+                "hedge_cumulative_funding_usd": hedge_cumulative_funding_usd,
+                "hedge_executor_errors": hedge_executor_errors,
+                "hedge_safety_paused": hedge_safety_paused,
+                "anomaly_paused": bool(getattr(bundle.monitor, "_anomaly_paused", False)),
+                "manual_stopped": bool(getattr(bundle.monitor, "_manual_stopped", False)),
+            })
+
+        cap = orch.capacity_snapshot()
+        capacity = {
+            "avg_sweep_ms": cap.avg_sweep_ms,
+            "p95_sweep_ms": cap.p95_sweep_ms,
+            "last_sweep_ms": cap.last_sweep_ms,
+            "config_count": cap.config_count,
+            "over_budget": cap.over_budget,
+            "severity": cap.severity,
+            "budget_ms": cap.budget_ms,
+        }
+
+        # Per-config anomaly state — full snapshot for the AnomalyDetailsModal
+        # to show severity-grouped details across every config.
+        configs_anomaly: list[dict[str, Any]] = []
+        for bundle in orch.all_bundles():
+            cfg = registry.find_config(bundle.config_id)
+            group = registry.find_group_for_config(bundle.config_id)
+            if cfg is None or group is None:
+                continue
+            try:
+                ano = bundle.monitor._anomaly
+                ano_dict = ano.to_broadcast_dict().get("anomaly_protection", {})
+            except Exception:
+                ano_dict = {}
+            configs_anomaly.append({
+                "config_id": bundle.config_id,
+                "group_id": bundle.group_id,
+                "name": cfg.name,
+                "group_name": group.name,
+                "is_super_primary": (bundle.config_id == registry.super_primary_id),
+                "is_primary": cfg.is_primary,
+                "is_default": cfg.is_default,
+                "manual_stopped": bool(getattr(bundle.monitor, "_manual_stopped", False)),
+                **ano_dict,
+            })
+
+        return {
+            "registry": {
+                "groups": groups_dict,
+                "super_primary_config_id": registry.super_primary_id,
+                "default_config_id": registry.default_config.id if registry.default_config else None,
+                "shared": {
+                    "execution_mode": registry.shared.get("execution_mode", "simulation"),
+                    "hedge_execution_mode": registry.shared.get(
+                        "hedge_execution_mode", "simulation"
+                    ),
+                },
+            },
+            "configs_lite": configs_lite,
+            "configs_anomaly": configs_anomaly,
+            "selected_config_id": getattr(self, "_selected_config_id", None)
+                or (registry.default_config.id if registry.default_config else None),
+            "capacity": capacity,
         }
 
     def _build_hourly_pnl(self) -> list[dict[str, Any]]:
@@ -3701,7 +5321,7 @@ class DashboardServer:
                 "transfer_allowed": trades_to_recoup <= 50,
             }
 
-        recent = monitor._trades[-100:] if monitor._trades else []
+        recent = list(monitor._trades)[-100:] if monitor._trades else []
         sizes = [t.trade_amount for t in recent if t.trade_amount > 0]
 
         return {
