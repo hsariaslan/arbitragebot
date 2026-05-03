@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import type { ConfigSnapshot, DailyPnlEntry, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, FundingRateInfo, HedgeState, HourlyPnlEntry, OptimizerState, ProfitStats, WatchlistEntry, Portfolio, Simulation, Trade, Transfer } from '../types';
+import type { ConfigSnapshot, DailyPnlEntry, DemoDiscrepancy, ExchangeFeeConfig, ExchangeTransferConfig, FundingRateInfo, HedgeState, HourlyPnlEntry, OptimizerState, ProfitStats, WatchlistEntry, Portfolio, Simulation, Trade, Transfer, RegistryView, ConfigLite } from '../types';
 import { exportXlsx } from '../utils/exportXlsx';
 import { exportRankingsMarkdown } from '../utils/exportMarkdown';
 import PerformanceCharts from './PerformanceCharts';
+import ConfigSwitcher from './ConfigSwitcher';
 
 interface RankingPageProps {
   optimizer: OptimizerState;
@@ -22,6 +23,10 @@ interface RankingPageProps {
   hedges?: HedgeState;
   fundingRates?: Record<string, FundingRateInfo>;
   defaultView?: 'rolling' | 'historical';
+  registry?: RegistryView;
+  configsLite?: ConfigLite[];
+  selectedConfigId?: string | null;
+  onSendMessage?: (msg: object) => void;
 }
 
 function ProfitBar({ value, maxValue }: { value: number; maxValue: number }) {
@@ -831,7 +836,7 @@ function HistoricalView({ optimizer }: { optimizer: OptimizerState }) {
 // Main Component
 // ══════════════════════════════════════════════════════════════════════════════
 
-export default function RankingPage({ optimizer, tickCount, portfolio, simulation, allTrades, allTransfers, allConfigHistory, demoDiscrepancies, feeConfigs, transferConfigs, profitStats, hourlyPnl, dailyPnl, hedges, fundingRates, defaultView }: RankingPageProps) {
+export default function RankingPage({ optimizer, tickCount, portfolio, simulation, allTrades, allTransfers, allConfigHistory, demoDiscrepancies, feeConfigs, transferConfigs, profitStats, hourlyPnl, dailyPnl, hedges, fundingRates, defaultView, registry, configsLite, selectedConfigId, onSendMessage }: RankingPageProps) {
   const location = useLocation();
   const view: 'rolling' | 'historical' = defaultView || (location.pathname.endsWith('/historical') ? 'historical' : 'rolling');
   const windowMinutes = Math.round(optimizer.scoring_window / 60);
@@ -843,6 +848,15 @@ export default function RankingPage({ optimizer, tickCount, portfolio, simulatio
 
   return (
     <div className="space-y-3 sm:space-y-5">
+      {onSendMessage && (
+        <ConfigSwitcher
+          registry={registry}
+          configsLite={configsLite}
+          selectedConfigId={selectedConfigId}
+          onSendMessage={onSendMessage}
+          scope="rankings"
+        />
+      )}
       {/* Header with toggle */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>

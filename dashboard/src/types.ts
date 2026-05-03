@@ -185,6 +185,11 @@ export interface Settings {
   drawdown_threshold_pct?: number;
   drawdown_resume_pct?: number;
   drawdown_emergency_mult?: number;
+  // Two-layer emergency gate (v0.31)
+  realized_drawdown_emergency_pct?: number;
+  combined_drawdown_emergency_pct?: number;
+  combined_drawdown_sustained_seconds?: number;
+  emergency_auto_liquidate?: boolean;
   symbol_loss_streak_threshold?: number;
   symbol_loss_streak_cooldown?: number;
   warning_pnl_pct?: number;
@@ -461,6 +466,11 @@ export interface BotLogEntry {
   level: string;
   component: string;
   message: string;
+  // v0.31.0-beta: multi-config tagging (null/undefined for shared subsystems)
+  config_group_id?: string | null;
+  config_id?: string | null;
+  config_group_name?: string | null;
+  config_name?: string | null;
 }
 
 // ── Demo/Testnet Comparison ──────────────────────────────────────────
@@ -587,6 +597,8 @@ export interface AutoDisableState {
   last_manual_fetch_ts: number;     // unix epoch seconds — operator's last "Fetch 24h Volumes" click
   threshold_used_usd: number;       // current setting (live, not snapshot)
   enabled: boolean;
+  /** Cached 24h volumes from the last fetch (manual or daily cron). */
+  cached_volumes?: Record<string, Record<string, number>>;
 }
 
 // ── Transfer Fee Management ─────────────────────────────────────────
@@ -675,4 +687,95 @@ export interface DashboardState {
   distribute_enabled?: boolean;
   custody_hub_exchange?: string;
   custody_hub_network?: string;
+  // ── Multi-config (v0.31.0-beta) ───────────────────────────────────
+  registry?: RegistryView;
+  configs_lite?: ConfigLite[];
+  configs_anomaly?: ConfigAnomaly[];
+  selected_config_id?: string | null;
+  capacity?: CapacitySnapshot;
+}
+
+export interface ConfigAnomaly extends AnomalyProtectionState {
+  config_id: string;
+  group_id: string;
+  name: string;
+  group_name: string;
+  is_super_primary: boolean;
+  is_primary: boolean;
+  is_default: boolean;
+  manual_stopped: boolean;
+}
+
+// ── Multi-config types (v0.31.0-beta) ─────────────────────────────────
+
+export interface ConfigMeta {
+  id: string;
+  name: string;
+  description: string;
+  is_primary: boolean;
+  is_default: boolean;
+  is_super_primary: boolean;
+  order: number;
+}
+
+export interface GroupMeta {
+  id: string;
+  name: string;
+  initial_capital: number;
+  order: number;
+  configs: ConfigMeta[];
+}
+
+export interface RegistryView {
+  groups: GroupMeta[];
+  super_primary_config_id: string | null;
+  default_config_id: string | null;
+  shared: {
+    execution_mode: string;
+    hedge_execution_mode: string;
+  };
+}
+
+export interface ConfigLite {
+  id: string;
+  group_id: string;
+  name: string;
+  group_name: string;
+  is_primary: boolean;
+  is_default: boolean;
+  is_super_primary: boolean;
+  execution_mode: string;
+  hedge_mode: string;
+  portfolio_value: number;
+  initial_capital: number;
+  net_pnl: number;
+  hourly_rate: number;
+  session_hourly_rate: number;
+  drawdown_pct: number;
+  trades_count: number;
+  trades_per_minute: number;
+  total_transfers: number;
+  skipped_trades: number;
+  trading_pnl: number;
+  transfer_fees: number;
+  credited_cashback: number;
+  hedge_enabled: boolean;
+  hedge_open_count: number;
+  hedge_total_notional_usd: number;
+  hedge_total_unrealized_pnl_usd: number;
+  hedge_cumulative_funding_usd: number;
+  hedge_executor_errors: number;
+  hedge_safety_paused: boolean;
+  anomaly_paused: boolean;
+  manual_stopped: boolean;
+}
+
+export interface CapacitySnapshot {
+  avg_sweep_ms: number;
+  p95_sweep_ms: number;
+  last_sweep_ms: number;
+  config_count: number;
+  over_budget: boolean;
+  severity: "ok" | "warn" | "critical";
+  budget_ms: number;
 }

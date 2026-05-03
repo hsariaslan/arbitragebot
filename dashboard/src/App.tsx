@@ -13,11 +13,14 @@ import HedgesPanel from './components/HedgesPanel';
 import RotationLog from './components/RotationLog';
 import RankingPage from './components/RankingPage';
 import SettingsPage from './components/SettingsPage';
+import WalletsOverview from './components/WalletsOverview';
 import LoginPage from './components/LoginPage';
 import LogsPage from './components/LogsPage';
 import DemoComparison from './components/DemoComparison';
+import ConfigSwitcher from './components/ConfigSwitcher';
+import { ToastProvider } from './components/ToastContext';
 
-function DashboardPage({ state }: { state: DashboardState }) {
+function DashboardPage({ state, onSendMessage }: { state: DashboardState; onSendMessage: (msg: object) => void }) {
   const balanceEntries = Object.values(state.balances);
   const symbols = balanceEntries.length > 0
     ? Object.keys(balanceEntries[0].crypto)
@@ -25,6 +28,13 @@ function DashboardPage({ state }: { state: DashboardState }) {
 
   return (
     <div className="space-y-3 sm:space-y-5">
+      <ConfigSwitcher
+        registry={state.registry}
+        configsLite={state.configs_lite}
+        selectedConfigId={state.selected_config_id}
+        onSendMessage={onSendMessage}
+        scope="dashboard"
+      />
       {state.optimizer?.discovery_mode && (
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 text-center">
           <p className="text-amber-300 font-medium">
@@ -166,14 +176,28 @@ export default function App() {
   }
 
   const handleSaveSettings = (settings: Settings) => {
-    send({ type: 'save_settings', settings });
+    // v0.31: route per-config settings to the currently-selected config so
+    // the General/Fee tabs edit the visible config. Falls back to legacy
+    // path if no registry is loaded yet.
+    const cid = state.selected_config_id ?? state.registry?.default_config_id;
+    if (cid) {
+      send({ type: 'config_apply_settings', config_id: cid, settings });
+    } else {
+      send({ type: 'save_settings', settings });
+    }
   };
 
   const handleApplySettings = (settings: Settings) => {
-    send({ type: 'apply_settings', settings });
+    const cid = state.selected_config_id ?? state.registry?.default_config_id;
+    if (cid) {
+      send({ type: 'config_apply_settings', config_id: cid, settings });
+    } else {
+      send({ type: 'apply_settings', settings });
+    }
   };
 
   return (
+    <ToastProvider>
     <HashRouter>
       <div className="min-h-screen flex flex-col">
         <Header
@@ -191,12 +215,17 @@ export default function App() {
           manualStopTimestamp={state.manual_stop_timestamp}
           hedges={state.hedges}
           onLogout={logout}
+          configsLite={state.configs_lite}
+          configsAnomaly={state.configs_anomaly}
+          registry={state.registry}
+          capacity={state.capacity}
+          onSendMessage={send}
         />
 
         <main className="flex-1 p-3 sm:p-6 pb-20 sm:pb-20 md:pb-6 w-full">
           <Routes>
             <Route path="/" element={
-              <DashboardPage state={state} />
+              <DashboardPage state={state} onSendMessage={send} />
             } />
             <Route path="/rankings" element={
               <RankingPage
@@ -215,6 +244,10 @@ export default function App() {
                 dailyPnl={state.daily_pnl}
                 hedges={state.hedges}
                 fundingRates={state.funding_rates}
+                registry={state.registry}
+                configsLite={state.configs_lite}
+                selectedConfigId={state.selected_config_id}
+                onSendMessage={send}
               />
             } />
             <Route path="/rankings/historical" element={
@@ -245,14 +278,14 @@ export default function App() {
                 onSendMessage={send}
                 onSendWithCallback={sendWithCallback}
                 feeConfigs={state.fee_configs}
-                feeRealMode={state.fee_real_mode}
-                feeStats={state.fee_stats}
-                autoDisableState={state.auto_disable_state}
                 transferConfigs={state.transfer_configs}
-                anomalyProtection={state.anomaly_protection}
+                autoDisableState={state.auto_disable_state}
                 manualStopped={state.manual_stopped}
                 balances={state.balances}
                 distributeEnabled={state.distribute_enabled}
+                registry={state.registry}
+                configsLite={state.configs_lite}
+                selectedConfigId={state.selected_config_id}
               />
             } />
             <Route path="/settings/:subTab" element={
@@ -263,14 +296,22 @@ export default function App() {
                 onSendMessage={send}
                 onSendWithCallback={sendWithCallback}
                 feeConfigs={state.fee_configs}
-                feeRealMode={state.fee_real_mode}
-                feeStats={state.fee_stats}
-                autoDisableState={state.auto_disable_state}
                 transferConfigs={state.transfer_configs}
-                anomalyProtection={state.anomaly_protection}
+                autoDisableState={state.auto_disable_state}
                 manualStopped={state.manual_stopped}
                 balances={state.balances}
                 distributeEnabled={state.distribute_enabled}
+                registry={state.registry}
+                configsLite={state.configs_lite}
+                selectedConfigId={state.selected_config_id}
+              />
+            } />
+            <Route path="/wallets" element={
+              <WalletsOverview
+                configsLite={state.configs_lite}
+                registry={state.registry}
+                selectedConfigId={state.selected_config_id}
+                onSendMessage={send}
               />
             } />
             <Route path="/logs" element={
@@ -280,6 +321,7 @@ export default function App() {
                 authLogs={state.auth_logs ?? []}
                 sendWithCallback={sendWithCallback}
                 uptimeSeconds={state.uptime_seconds}
+                registry={state.registry}
               />
             } />
             <Route path="/logs/:subTab" element={
@@ -289,6 +331,7 @@ export default function App() {
                 authLogs={state.auth_logs ?? []}
                 sendWithCallback={sendWithCallback}
                 uptimeSeconds={state.uptime_seconds}
+                registry={state.registry}
               />
             } />
             <Route path="*" element={<Navigate to="/" replace />} />
@@ -296,5 +339,6 @@ export default function App() {
         </main>
       </div>
     </HashRouter>
+    </ToastProvider>
   );
 }

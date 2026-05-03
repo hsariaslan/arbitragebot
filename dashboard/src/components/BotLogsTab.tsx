@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import type { BotLogEntry } from '../types';
+import type { BotLogEntry, RegistryView } from '../types';
 import ExportLogsModal from './ExportLogsModal';
 
 interface BotLogsTabProps {
@@ -7,7 +7,10 @@ interface BotLogsTabProps {
   totalCount: number;
   sendWithCallback: (msg: object, callback: (data: any) => void) => void;
   uptimeSeconds: number;
+  registry?: RegistryView;
 }
+
+type ScopeFilter = 'all' | 'universal' | 'group' | 'config';
 
 const LEVEL_OPTIONS = [
   { value: 'all', label: 'All Levels' },
@@ -74,8 +77,24 @@ function formatFullTimestamp(ts: number): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
 
-function applyBotLogFilters(logs: BotLogEntry[], level: string, component: string, search: string): BotLogEntry[] {
+function applyBotLogFilters(
+  logs: BotLogEntry[],
+  level: string,
+  component: string,
+  search: string,
+  scope: ScopeFilter = 'all',
+  groupId: string | null = null,
+  configId: string | null = null,
+): BotLogEntry[] {
   let result = logs;
+  // Multi-config scope filter (v0.31.0-beta)
+  if (scope === 'universal') {
+    result = result.filter(l => !l.config_id);
+  } else if (scope === 'group' && groupId) {
+    result = result.filter(l => l.config_group_id === groupId);
+  } else if (scope === 'config' && configId) {
+    result = result.filter(l => l.config_id === configId);
+  }
   if (level !== 'all') {
     result = result.filter(l => l.level === level);
   }
@@ -102,7 +121,7 @@ function downloadFile(filename: string, content: string, mime: string) {
   URL.revokeObjectURL(url);
 }
 
-export default function BotLogsTab({ logs, totalCount, sendWithCallback, uptimeSeconds }: BotLogsTabProps) {
+export default function BotLogsTab({ logs, totalCount, sendWithCallback, uptimeSeconds, registry }: BotLogsTabProps) {
   const [levelFilter, setLevelFilter] = useState('all');
   const [componentFilter, setComponentFilter] = useState('all');
   const [search, setSearch] = useState('');
@@ -110,10 +129,32 @@ export default function BotLogsTab({ logs, totalCount, sendWithCallback, uptimeS
   const [showExportModal, setShowExportModal] = useState(false);
   const [allSessionLogs, setAllSessionLogs] = useState<BotLogEntry[] | null>(null);
   const [fetchingAll, setFetchingAll] = useState(false);
+  // Multi-config scope cascading filter (v0.31.0-beta)
+  const [scopeFilter, setScopeFilter] = useState<ScopeFilter>('all');
+  const [groupFilter, setGroupFilter] = useState<string | null>(null);
+  const [configFilter, setConfigFilter] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastFetchedTotal = useRef(0);
 
-  const hasActiveFilters = levelFilter !== 'all' || componentFilter !== 'all' || search.trim() !== '';
+  const hasActiveFilters =
+    levelFilter !== 'all' ||
+    componentFilter !== 'all' ||
+    search.trim() !== '' ||
+    scopeFilter !== 'all';
+
+  // Reset dependent dropdowns when scope or group changes
+  useEffect(() => {
+    if (scopeFilter !== 'group' && scopeFilter !== 'config') {
+      setGroupFilter(null);
+      setConfigFilter(null);
+    } else if (scopeFilter === 'group') {
+      setConfigFilter(null);
+    }
+  }, [scopeFilter]);
+
+  useEffect(() => {
+    setConfigFilter(null);
+  }, [groupFilter]);
 
   // Build dynamic component options from base list + any extra components seen in logs
   const componentOptions = useMemo(() => {
@@ -168,9 +209,79 @@ export default function BotLogsTab({ logs, totalCount, sendWithCallback, uptimeS
   const sourceLogs = hasActiveFilters && allSessionLogs ? allSessionLogs : logs;
 
   const filtered = useMemo(
-    () => applyBotLogFilters(sourceLogs, levelFilter, componentFilter, search),
-    [sourceLogs, levelFilter, componentFilter, search]
+    () => applyBotLogFilters(sourceLogs, levelFilter, componentFilter, search, scopeFilter, groupFilter, configFilter),
+    [sourceLogs, levelFilter, componentFilter, search, scopeFilter, groupFilter, configFilter]
   );
+
+  // Cascading group → config dropdown options.
+  //
+  // Sourced from the live registry PLUS historical (group_id, config_id)
+  // pairs harvested from log entries that no longer exist in the registry.
+  // Without the historical pass, removing a config/group hides ALL filter
+  // access to its prior log lines — the entries stay in memory + on disk
+  // but the dropdown can't surface them. With it, removed groups/configs
+  // appear in the dropdown tagged "(removed)" so the operator can still
+  // grep the log history.
+  type HistGroup = { id: string; name: string; configs: { id: string; name: string }[]; removed: boolean };
+  const groupOptions = useMemo<HistGroup[]>(() => {
+    const live: HistGroup[] = (registry?.groups ?? []).map((g) => ({
+      id: g.id,
+      name: g.name,
+      configs: g.configs.map((c) => ({ id: c.id, name: c.name })),
+      removed: false,
+    }));
+    const liveGroupIds = new Set(live.map((g) => g.id));
+    const liveConfigIds = new Set(
+      live.flatMap((g) => g.configs.map((c) => c.id)),
+    );
+    // Walk all in-memory log entries; collect any (group_id, config_id)
+    // tuple whose group OR config isn't in the live registry.
+    const histGroups = new Map<string, HistGroup>();
+    for (const e of sourceLogs) {
+      if (!e.config_group_id || !e.config_id) continue;
+      const gname = e.config_group_name ?? '(unknown group)';
+      const cname = e.config_name ?? '(unknown config)';
+      const groupRemoved = !liveGroupIds.has(e.config_group_id);
+      const configRemoved = !liveConfigIds.has(e.config_id);
+      if (!groupRemoved && !configRemoved) continue;
+      // Add the group entry (either historical or augmenting a live group
+      // with a removed config).
+      let target = histGroups.get(e.config_group_id);
+      if (!target) {
+        // If the group is live, copy its live configs first so the live
+        // ones still appear, and we just add the missing config below.
+        const liveGroup = live.find((g) => g.id === e.config_group_id);
+        target = liveGroup
+          ? {
+              id: e.config_group_id,
+              name: liveGroup.name,
+              configs: [...liveGroup.configs],
+              removed: false,
+            }
+          : { id: e.config_group_id, name: gname, configs: [], removed: true };
+        histGroups.set(e.config_group_id, target);
+      }
+      if (configRemoved && !target.configs.find((c) => c.id === e.config_id)) {
+        target.configs.push({ id: e.config_id, name: `${cname} (removed)` });
+      }
+    }
+    // Final list: live groups (augmented if any of their configs were
+    // removed) + fully-removed groups.
+    const merged: HistGroup[] = live.map((g) => {
+      const aug = histGroups.get(g.id);
+      return aug ? { ...g, configs: aug.configs } : g;
+    });
+    for (const [gid, hg] of histGroups) {
+      if (!liveGroupIds.has(gid)) merged.push({ ...hg, name: `${hg.name} (removed)` });
+    }
+    return merged;
+  }, [registry, sourceLogs]);
+
+  const configOptions = useMemo(() => {
+    if (!groupFilter) return [];
+    const g = groupOptions.find((g) => g.id === groupFilter);
+    return g?.configs ?? [];
+  }, [groupFilter, groupOptions]);
 
   const sessionStart = Math.floor(Date.now() / 1000) - uptimeSeconds;
 
@@ -209,6 +320,48 @@ export default function BotLogsTab({ logs, totalCount, sendWithCallback, uptimeS
 
       {/* Filters row */}
       <div className="flex items-center gap-3 flex-wrap">
+        {/* Multi-config scope cascading filter (v0.31.0-beta).
+            Shown when there's any live OR historical (removed-but-logged)
+            group, so the operator can still grep removed configs' lines. */}
+        {groupOptions.length > 0 && (
+          <>
+            <select
+              value={scopeFilter}
+              onChange={e => setScopeFilter(e.target.value as ScopeFilter)}
+              className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500"
+              title="Scope: All / Universal (shared subsystems) / Group / Config"
+            >
+              <option value="all">All Scopes</option>
+              <option value="universal">Universal (shared)</option>
+              <option value="group">By Group</option>
+              <option value="config">By Config</option>
+            </select>
+            {(scopeFilter === 'group' || scopeFilter === 'config') && (
+              <select
+                value={groupFilter ?? ''}
+                onChange={e => setGroupFilter(e.target.value || null)}
+                className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500"
+              >
+                <option value="">— Select Group —</option>
+                {groupOptions.map(g => (
+                  <option key={g.id} value={g.id}>{g.name}</option>
+                ))}
+              </select>
+            )}
+            {scopeFilter === 'config' && groupFilter && (
+              <select
+                value={configFilter ?? ''}
+                onChange={e => setConfigFilter(e.target.value || null)}
+                className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500"
+              >
+                <option value="">— Select Config —</option>
+                {configOptions.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            )}
+          </>
+        )}
         <select
           value={levelFilter}
           onChange={e => setLevelFilter(e.target.value)}
@@ -282,6 +435,14 @@ export default function BotLogsTab({ logs, totalCount, sendWithCallback, uptimeS
                   <span className={`whitespace-nowrap shrink-0 w-16 ${style.text}`}>
                     [{log.level}]
                   </span>
+                  {log.config_group_name && log.config_name && (
+                    <span
+                      className="text-cyan-400 whitespace-nowrap shrink-0 text-[10px]"
+                      title="Config that emitted this log"
+                    >
+                      [{log.config_group_name}/{log.config_name}]
+                    </span>
+                  )}
                   {log.component && (
                     <span className="text-blue-400 whitespace-nowrap shrink-0">
                       [{log.component}]

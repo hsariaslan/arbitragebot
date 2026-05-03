@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
 import { NavLink, useParams } from 'react-router-dom';
-import type { Settings, ExchangeFeeConfig, ExchangeTransferConfig, FeeStats, AnomalyProtectionState, ExchangeBalance, AutoDisableState } from '../types';
-import FeeManagementTab from './FeeManagementTab';
+import type { Settings, ExchangeFeeConfig, ExchangeTransferConfig, ExchangeBalance, RegistryView, ConfigLite } from '../types';
 import TransferFeeManagementTab from './TransferFeeManagementTab';
+import ConfigGroupsTab from './ConfigGroupsTab';
+import ConfirmModal from './ConfirmModal';
 import Tooltip from './Tooltip';
+import { useToast } from './ToastContext';
 
 interface SettingsPageProps {
   currentSettings: Settings;
@@ -12,21 +14,111 @@ interface SettingsPageProps {
   onSendMessage: (msg: object) => void;
   onSendWithCallback: (msg: object, callback: (data: any) => void) => void;
   feeConfigs?: Record<string, ExchangeFeeConfig>;
-  feeRealMode?: boolean;
-  feeStats?: FeeStats;
-  autoDisableState?: AutoDisableState;
   transferConfigs?: Record<string, ExchangeTransferConfig>;
-  anomalyProtection?: AnomalyProtectionState;
+  autoDisableState?: import('../types').AutoDisableState;
   manualStopped?: boolean;
   balances?: Record<string, ExchangeBalance>;
   distributeEnabled?: boolean;
+  registry?: RegistryView;
+  configsLite?: ConfigLite[];
+  selectedConfigId?: string | null;
 }
 
-type SettingsSubTab = 'general' | 'fees' | 'transfers';
+type SettingsSubTab = 'config-groups' | 'general' | 'transfers';
 
-export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage, onSendWithCallback, feeConfigs, feeRealMode, feeStats, autoDisableState, transferConfigs, anomalyProtection, manualStopped, balances, distributeEnabled }: SettingsPageProps) {
+function ExecutionModeSection({
+  registry,
+  configsLite,
+  onSendMessage,
+}: {
+  registry: RegistryView;
+  configsLite?: ConfigLite[];
+  onSendMessage: (msg: object) => void;
+}) {
+  const toast = useToast();
+  const sharedExec = registry.shared.execution_mode;
+  const sharedHedge = registry.shared.hedge_execution_mode;
+  const superPrimary = configsLite?.find((l) => l.is_super_primary);
+
+  const save = (execMode?: string, hedgeMode?: string) => {
+    onSendMessage({
+      type: 'save_shared_execution_mode',
+      execution_mode: execMode ?? sharedExec,
+      hedge_execution_mode: hedgeMode ?? sharedHedge,
+    });
+    toast.show('Execution mode updated', 'success');
+  };
+
+  return (
+    <div className="bg-slate-800/50 rounded-lg p-4 space-y-3">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-1">
+          Execution Mode (super-primary only)
+        </h3>
+        <p className="text-xs text-slate-500">
+          These settings apply <span className="text-amber-400">only to the super-primary config</span>:{' '}
+          <span className="text-amber-300 font-medium">
+            {superPrimary ? `${superPrimary.group_name} / ${superPrimary.name}` : '(none)'}
+          </span>. Every other config is force-locked to{' '}
+          <span className="font-mono">simulation</span> regardless of these values.
+        </p>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="flex items-center text-xs text-slate-500 mb-1">
+            <span>Spot execution mode</span>
+            <span className="ml-1.5 text-slate-600 font-mono text-[10px]">(execution_mode)</span>
+            <Tooltip text="Spot trade execution mode for the super-primary config. simulation = no real orders. demo = real demo/testnet orders alongside simulation. demo_only = only demo orders (skips simulation). live = real mainnet orders (post-validation only). Multi-config force-locks others to simulation. Config key: shared.execution_mode" />
+          </label>
+          <select
+            value={sharedExec}
+            onChange={(e) => save(e.target.value, undefined)}
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="simulation">simulation</option>
+            <option value="demo">demo (sim + demo orders)</option>
+            <option value="demo_only">demo_only (skip sim)</option>
+            <option value="live">live (real mainnet)</option>
+          </select>
+          <p className="text-xs text-slate-500 mt-1 italic">
+            Currently active for super-primary:{' '}
+            <span className="text-slate-300 font-mono">{superPrimary?.execution_mode ?? sharedExec}</span>
+          </p>
+        </div>
+        <div>
+          <label className="flex items-center text-xs text-slate-500 mb-1">
+            <span>Hedge execution mode</span>
+            <span className="ml-1.5 text-slate-600 font-mono text-[10px]">(hedge_execution_mode)</span>
+            <Tooltip text="Binance Futures hedge execution mode for the super-primary config. simulation = shadow tracking only. testnet = real Binance Futures testnet positions. live = real mainnet Futures (real margin/liquidation risk). Multi-config force-locks others to simulation. Config key: shared.hedge_execution_mode" />
+          </label>
+          <select
+            value={sharedHedge}
+            onChange={(e) => save(undefined, e.target.value)}
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
+          >
+            <option value="simulation">simulation (shadow)</option>
+            <option value="testnet">testnet (real testnet positions)</option>
+            <option value="live">live (real mainnet)</option>
+          </select>
+          <p className="text-xs text-slate-500 mt-1 italic">
+            Currently active for super-primary:{' '}
+            <span className="text-slate-300 font-mono">{superPrimary?.hedge_mode ?? sharedHedge}</span>
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function SettingsPage({ currentSettings, onSave, onApply, onSendMessage, onSendWithCallback, feeConfigs, transferConfigs, autoDisableState, balances, distributeEnabled, registry, configsLite, selectedConfigId }: SettingsPageProps) {
   const { subTab } = useParams<{ subTab?: string }>();
-  const activeSubTab: SettingsSubTab = subTab === 'fees' ? 'fees' : subTab === 'transfers' ? 'transfers' : 'general';
+  // v0.31: Config Groups is the default landing tab. /settings → config-groups.
+  // Per-config General + Fee Mgmt are now edited inside the per-config modal.
+  // /settings/general remains as a legacy editor for the default config.
+  const activeSubTab: SettingsSubTab =
+    subTab === 'general' ? 'general'
+    : subTab === 'transfers' ? 'transfers'
+    : 'config-groups';
   const [tradeAmount, setTradeAmount] = useState(currentSettings.trade_amount_usd);
   const [tradeAmountPct, setTradeAmountPct] = useState(currentSettings.trade_amount_pct ?? 0);
   const [totalCapital, setTotalCapital] = useState(currentSettings.total_capital ?? 1800);
@@ -106,12 +198,97 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [ddThreshold, setDdThreshold] = useState(currentSettings.drawdown_threshold_pct ?? 5.0);
   const [ddResumePct, setDdResumePct] = useState(currentSettings.drawdown_resume_pct ?? 3.0);
   const [ddEmergencyMult, setDdEmergencyMult] = useState(currentSettings.drawdown_emergency_mult ?? 2.0);
+  // v0.31.0-beta+: two-layer emergency gate
+  const [realizedDdEmergencyPct, setRealizedDdEmergencyPct] = useState(
+    currentSettings.realized_drawdown_emergency_pct ?? 15.0,
+  );
+  const [combinedDdEmergencyPct, setCombinedDdEmergencyPct] = useState(
+    currentSettings.combined_drawdown_emergency_pct ?? 25.0,
+  );
+  const [combinedDdSustainedSec, setCombinedDdSustainedSec] = useState(
+    currentSettings.combined_drawdown_sustained_seconds ?? 300,
+  );
+  const [emergencyAutoLiquidate, setEmergencyAutoLiquidate] = useState(
+    currentSettings.emergency_auto_liquidate ?? false,
+  );
   const [lsThreshold, setLsThreshold] = useState(currentSettings.symbol_loss_streak_threshold ?? 4);
   const [lsCooldown, setLsCooldown] = useState(currentSettings.symbol_loss_streak_cooldown ?? 300);
   const [warningPnlPct, setWarningPnlPct] = useState(currentSettings.warning_pnl_pct ?? 0.5);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [securityStatus, setSecurityStatus] = useState<string | null>(null);
   const [showRestartConfirm, setShowRestartConfirm] = useState(false);
+  const [showRestartAllConfirm, setShowRestartAllConfirm] = useState(false);
+  const toast = useToast();
+  // v0.31: 24h volumes are fetched globally from this Global tab and propagated
+  // to per-config Fee Management modals via prop drilling. Persists across the
+  // Settings page lifetime so re-opening a config's modal still has volume data.
+  // v0.31: volumes are server-cached and broadcast — `auto_disable_state.cached_volumes`
+  // survives page refresh + bot restart. Local state is only used to show the
+  // optimistic "fetched just now" feedback before the next broadcast tick.
+  const cachedFromServer = autoDisableState?.cached_volumes ?? null;
+  const [globalVolumesLocal, setGlobalVolumesLocal] = useState<Record<string, Record<string, number>> | null>(null);
+  const globalVolumes = globalVolumesLocal ?? cachedFromServer;
+  const [globalVolumesLoading, setGlobalVolumesLoading] = useState(false);
+  const [globalVolumesError, setGlobalVolumesError] = useState<string | null>(null);
+
+  const handleFetchGlobalVolumes = () => {
+    if (!onSendWithCallback) return;
+    setGlobalVolumesLoading(true);
+    setGlobalVolumesError(null);
+    onSendWithCallback({ type: 'fetch_volumes' }, (data: any) => {
+      setGlobalVolumesLoading(false);
+      if (data?.ok && data.volumes) {
+        setGlobalVolumesLocal(data.volumes);
+        const summary = data.auto_disable_summary;
+        if (summary) {
+          toast.show(
+            `Volumes fetched: +${summary.total_added} disabled, -${summary.total_removed} re-enabled across ${summary.configs_updated} config(s)`,
+            'success',
+            4000,
+          );
+        } else {
+          toast.show('24h volumes fetched', 'success');
+        }
+      } else {
+        setGlobalVolumesError(data?.error || 'Unknown error');
+        toast.show('Volume fetch failed', 'error');
+      }
+    });
+  };
+
+  const globalVolumeFetcher = (
+    <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-4">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="flex-1 min-w-[240px]">
+          <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-1">
+            24h Volume Fetcher
+          </h3>
+          <p className="text-xs text-slate-500">
+            Pull live 24h USD volumes from each exchange. Volumes are cached for the page lifetime
+            and feed every config's <span className="text-cyan-400">Fee Management</span> tab inside
+            its Edit modal — used by the per-symbol blocklist UI to bulk-disable thinly-traded pairs.
+          </p>
+        </div>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            onClick={handleFetchGlobalVolumes}
+            disabled={globalVolumesLoading || !onSendWithCallback}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-lg text-sm font-medium transition-colors"
+          >
+            {globalVolumesLoading ? 'Fetching…' : globalVolumes ? 'Refresh 24h Volumes' : 'Fetch 24h Volumes'}
+          </button>
+          {globalVolumesError && (
+            <span className="text-xs text-rose-400">{globalVolumesError}</span>
+          )}
+          {globalVolumes && !globalVolumesError && (
+            <span className="text-xs text-emerald-400">
+              {Object.keys(globalVolumes).length} exchange(s) loaded
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
   const [showHardStop, setShowHardStop] = useState(false);
   const [hardStopBitfinex, setHardStopBitfinex] = useState(true);
   const [hardStopConfirmText, setHardStopConfirmText] = useState('');
@@ -197,6 +374,10 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setDdThreshold(currentSettings.drawdown_threshold_pct ?? 5.0);
       setDdResumePct(currentSettings.drawdown_resume_pct ?? 3.0);
       setDdEmergencyMult(currentSettings.drawdown_emergency_mult ?? 2.0);
+      setRealizedDdEmergencyPct(currentSettings.realized_drawdown_emergency_pct ?? 15.0);
+      setCombinedDdEmergencyPct(currentSettings.combined_drawdown_emergency_pct ?? 25.0);
+      setCombinedDdSustainedSec(currentSettings.combined_drawdown_sustained_seconds ?? 300);
+      setEmergencyAutoLiquidate(currentSettings.emergency_auto_liquidate ?? false);
       setLsThreshold(currentSettings.symbol_loss_streak_threshold ?? 4);
       setLsCooldown(currentSettings.symbol_loss_streak_cooldown ?? 300);
       setWarningPnlPct(currentSettings.warning_pnl_pct ?? 0.5);
@@ -276,6 +457,10 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     drawdown_threshold_pct: ddThreshold,
     drawdown_resume_pct: ddResumePct,
     drawdown_emergency_mult: ddEmergencyMult,
+    realized_drawdown_emergency_pct: realizedDdEmergencyPct,
+    combined_drawdown_emergency_pct: combinedDdEmergencyPct,
+    combined_drawdown_sustained_seconds: combinedDdSustainedSec,
+    emergency_auto_liquidate: emergencyAutoLiquidate,
     symbol_loss_streak_threshold: lsThreshold,
     symbol_loss_streak_cooldown: lsCooldown,
     warning_pnl_pct: warningPnlPct,
@@ -296,16 +481,14 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     setTimeout(() => setSaveStatus(null), 2000);
   };
 
-  const d = (fn: (v: number) => void, fallback: number) =>
-    (e: React.ChangeEvent<HTMLInputElement>) => { const v = Number(e.target.value); setDirty(true); fn(Number.isNaN(v) ? fallback : v); };
 
   return (
-    <div className="space-y-4 sm:space-y-6 max-w-3xl">
+    <div className="space-y-4 sm:space-y-6">
       {/* Sub-tab navigation */}
       <div className="flex gap-1 bg-slate-800/50 rounded-lg p-1">
         {([
-          ['/settings', 'General'],
-          ['/settings/fees', 'Fee Management'],
+          ['/settings', 'Config Groups'],
+          ['/settings/general', 'Global'],
           ['/settings/transfers', 'Transfer Fees'],
         ] as const).map(([to, label]) => (
           <NavLink key={to} to={to} end
@@ -319,14 +502,14 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         ))}
       </div>
 
-      {activeSubTab === 'fees' ? (
-        <FeeManagementTab
-          feeConfigs={feeConfigs}
-          feeRealMode={feeRealMode}
-          feeStats={feeStats}
-          autoDisableState={autoDisableState}
+      {activeSubTab === 'config-groups' ? (
+        <ConfigGroupsTab
+          registry={registry}
+          configsLite={configsLite}
+          selectedConfigId={selectedConfigId}
           onSendMessage={onSendMessage}
           onSendWithCallback={onSendWithCallback}
+          globalVolumes={globalVolumes}
         />
       ) : activeSubTab === 'transfers' ? (
         <TransferFeeManagementTab
@@ -335,933 +518,39 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         />
       ) : (
       <>
-      {/* Capital */}
-      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Capital</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      {/* v0.31: per-config settings now live inside the per-config Edit modal.
+          The Global tab keeps only shared concerns (24h volume fetcher,
+          security/IP whitelist, danger zone). The per-config form sections
+          below are kept hidden as `{false && ...}` so the legacy code is
+          available for follow-up cleanup without losing it. */}
+      <div className="bg-slate-800/40 border border-slate-700/50 rounded-lg p-4 text-sm text-slate-400">
+        <div className="flex items-start gap-3">
+          <span className="text-cyan-400 text-base leading-none mt-0.5">ⓘ</span>
           <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Total Capital ($)
-              <Tooltip text="Total USD capital distributed across all exchanges. Used for per-symbol allocation and adaptive trade sizing. Default: $1800. Config key: total_capital" />
-            </label>
-            <input type="number" value={totalCapital} min={100} onChange={d(setTotalCapital, 1800)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Trade Amount
-              <Tooltip text="Base USD amount per trade before multipliers. 'Fixed $' sets a static amount. '% of Capital' auto-scales with total capital (e.g., 1% of $3000 = $30). With adaptive mode: actual size = trade_amount x symbol_multiplier x net%_factor. Config key: trade_amount_usd / trade_amount_pct" />
-            </label>
-            {/* Mode toggle */}
-            <div className="flex items-center gap-1 mb-2">
-              <button onClick={() => { setDirty(true); setTradeAmountPct(0); }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                  tradeAmountPct === 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                }`}>
-                Fixed $
-              </button>
-              <button onClick={() => { setDirty(true); if (tradeAmountPct === 0) setTradeAmountPct(0.01); }}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                  tradeAmountPct > 0 ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                }`}>
-                % of Capital
-              </button>
-            </div>
-            {tradeAmountPct > 0 ? (
-              <>
-                <div className="flex items-center gap-2">
-                  {[0.005, 0.01, 0.02, 0.05].map(pct => (
-                    <button key={pct} onClick={() => { setDirty(true); setTradeAmountPct(pct); }}
-                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                        tradeAmountPct === pct ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                      }`}>
-                      {(pct * 100).toFixed(1)}%
-                    </button>
-                  ))}
-                </div>
-                <input type="number" value={Math.round(tradeAmountPct * 10000) / 100} min={0.1} max={50} step={0.1}
-                  onChange={e => { setDirty(true); setTradeAmountPct(Math.max(0.001, (Number(e.target.value) || 1) / 100)); }}
-                  className="w-full mt-2 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                <div className="text-xs text-slate-400 mt-1">
-                  = <span className="text-green-400 font-medium">${(totalCapital * tradeAmountPct).toFixed(2)}</span> per trade ({(tradeAmountPct * 100).toFixed(1)}% of ${totalCapital.toLocaleString()})
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex items-center gap-2">
-                  {[10, 50, 100, 200].map(amt => (
-                    <button key={amt} onClick={() => { setDirty(true); setTradeAmount(amt); }}
-                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                        tradeAmount === amt ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                      }`}>
-                      ${amt}
-                    </button>
-                  ))}
-                </div>
-                <input type="number" value={tradeAmount} min={1} onChange={d(setTradeAmount, 10)}
-                  className="w-full mt-2 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-              </>
-            )}
-          </div>
-        </div>
-        <div className="mt-4">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" checked={adaptiveMode}
-              onChange={e => { setDirty(true); setAdaptiveMode(e.target.checked); }}
-              className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
-            <span className="text-sm text-slate-300">Enable Adaptive Mode</span>
-            <Tooltip text="Dynamically adjusts trade sizes, rebalance amounts, and thresholds based on real-time market conditions and available capital. Recommended for small capital (<$5k). Default: enabled. Config key: adaptive_mode" />
-          </label>
-        </div>
-        <div className="mt-4">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" checked={netPctSizingEnabled}
-              onChange={e => { setDirty(true); setNetPctSizingEnabled(e.target.checked); }}
-              className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
-            <span className="text-sm text-slate-300">Enable Net% Sizing</span>
-            <Tooltip text="Scale trade size based on current tick's net profitability. Higher net% spreads get larger trades (up to cap). Tiers: <0.03%=0.5x, 0.03-0.08%=1.0x, 0.08-0.15%=1.5x, 0.15-0.25%=2.0x, >0.25%=2.5x. Multiplies with score-based multiplier. Default: enabled. Config key: net_pct_sizing_enabled" />
-          </label>
-        </div>
-        <div className="mt-4">
-          <label className="flex items-center text-xs text-slate-500 mb-1">
-            Net% Multiplier Cap
-            <Tooltip text="Maximum net%-based trade size multiplier. Caps the upside of net% scaling to prevent over-concentration on single ticks. Combined with score multiplier, final size is still limited by available balance. Range: 1.0-10.0. Default: 2.5. Config key: net_pct_multiplier_cap" />
-          </label>
-          <input type="number" value={netPctMultiplierCap} min={1.0} max={10.0} step={0.1}
-            onChange={d(setNetPctMultiplierCap, 2.5)}
-            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-        </div>
-        <div className="mt-4">
-          <label className="flex items-center text-sm text-slate-300 mb-1">
-            Execution Mode
-            <Tooltip text="Simulation: no real orders (default). Demo + Simulation: places real orders on Binance/OKX/Bybit testnets alongside simulation on all 9 exchanges — useful for broad market coverage with partial demo validation. Demo Only: restricts trading to only Binance/OKX/Bybit (the 3 demo-capable exchanges) — every trade gets demo orders for comprehensive sim-vs-demo comparison. Requires API keys in .env. Restart required to take effect. Config key: execution_mode" />
-          </label>
-          <select value={executionMode}
-            onChange={e => { setDirty(true); setExecutionMode(e.target.value); }}
-            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
-            <option value="simulation">Simulation</option>
-            <option value="demo">Demo + Simulation</option>
-            <option value="demo_only">Demo Only (Binance/OKX/Bybit)</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Auto-Rotation */}
-      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Auto-Rotation</h2>
-        <div className="space-y-4">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" checked={autoRotate}
-              onChange={e => { setDirty(true); setAutoRotate(e.target.checked); }}
-              className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
-            <span className="text-sm text-slate-300">Enable automatic symbol rotation</span>
-            <Tooltip text="When enabled, the optimizer automatically swaps underperforming symbols for better candidates. When disabled, only the initial symbol set is traded. Default: enabled. Config key: auto_rotate" />
-          </label>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div>
-              <label className="flex items-center text-xs text-slate-500 mb-1">
-                Min Active Symbols
-                <Tooltip text="Starting number of active symbols after discovery. More symbols spread capital thinner but increase diversification. Default: 3. Config key: num_active_symbols" />
-              </label>
-              <input type="number" value={numActiveSymbols} min={1} max={20} onChange={d(setNumActiveSymbols, 3)}
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            </div>
-            <div>
-              <label className="flex items-center text-xs text-slate-500 mb-1">
-                Max Active Symbols
-                <Tooltip text="Maximum symbols that can be active simultaneously. Expansion happens when strong candidates appear. Higher values need more capital. Default: 8. Config key: max_active_symbols" />
-              </label>
-              <input type="number" value={maxActiveSymbols} min={1} max={30} onChange={d(setMaxActiveSymbols, 8)}
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            </div>
-            <div>
-              <label className="flex items-center text-xs text-slate-500 mb-1">
-                Scoring Window (s)
-                <Tooltip text="Rolling time window (in seconds) for scoring symbol profitability. Longer windows are more stable but slower to react. Default: 1800s (30 min). Config key: scoring_window" />
-              </label>
-              <input type="number" value={scoringWindow} min={60} onChange={d(setScoringWindow, 1800)}
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            </div>
-            <div>
-              <label className="flex items-center text-xs text-slate-500 mb-1">
-                Eval Interval (s)
-                <Tooltip text="How often the optimizer evaluates rotations, expansions, and demotions. Shorter intervals react faster but cause more churn. Default: 300s (5 min). Config key: evaluation_interval" />
-              </label>
-              <input type="number" value={evaluationInterval} min={30} onChange={d(setEvaluationInterval, 300)}
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            </div>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="flex items-center text-xs text-slate-500 mb-1">
-                Discovery Duration (s)
-                <Tooltip text="Base duration of the discovery phase where the bot scans all symbols for opportunities before activating. Auto-extends up to 3600s if no symbols qualify. Early exit after 60s if any symbol reaches trading threshold. Default: 300s (5 min). Config key: discovery_duration" />
-              </label>
-              <input type="number" value={discoveryDuration} min={30} max={3600} onChange={d(setDiscoveryDuration, 300)}
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Advanced Optimizer */}
-      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Advanced Optimizer</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Safety Multiplier
-              <Tooltip text="For rotation: estimated hourly gain of new symbol must exceed safety_multiplier x switching cost. Higher values prevent frequent rotations. Default: 2.0. Config key: safety_multiplier" />
-            </label>
-            <input type="number" value={safetyMultiplier} min={1} step={0.5} onChange={d(setSafetyMultiplier, 2.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Min Rebalance Score
-              <Tooltip text="Symbols below this score won't trigger rebalancing. Prevents wasting transfer fees on low-performing symbols. Default: 0.0001. Config key: min_rebalance_score" />
-            </label>
-            <input type="number" value={minRebalanceScore} min={0} step={0.0001}
-              onChange={d(setMinRebalanceScore, 0.0001)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Confirmation Period (s)
-              <Tooltip text="How long a candidate symbol must sustain a high score before it's eligible for activation. Prevents short-lived spikes from triggering rotations. Default: 300s (5 min). Config key: confirmation_period" />
-            </label>
-            <input type="number" value={confirmationPeriod} min={0} onChange={d(setConfirmationPeriod, 300)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Score Stability (s)
-              <Tooltip text="Minimum observation time before a candidate can be confirmed. Even very strong symbols must wait this long. Tracks score trend for cliff drops and declining patterns. Set to 0 to disable. Default: 120s. Config key: score_stability_seconds" />
-            </label>
-            <input type="number" value={scoreStabilitySeconds} min={0} max={3600} onChange={d(setScoreStabilitySeconds, 120)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Stability Factor
-              <Tooltip text="Reject candidate if current score drops below peak score x this factor (cliff drop detection). E.g., 0.5 means reject if score fell more than 50% from its peak. Set to 0 to disable cliff drop check. Default: 0.5. Config key: score_stability_factor" />
-            </label>
-            <input type="number" value={scoreStabilityFactor} min={0} max={1} step={0.01} onChange={d(setScoreStabilityFactor, 0.5)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Promotion Threshold
-              <Tooltip text="Minimum score for a symbol to enter the watchlist as a candidate. Symbols below this are ignored for promotion. Default: 0.0001. Config key: promotion_threshold" />
-            </label>
-            <input type="number" value={promotionThreshold} min={0} step={0.0001}
-              onChange={d(setPromotionThreshold, 0.0001)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Demotion Threshold
-              <Tooltip text="Score below which the demotion timer starts. A symbol must stay below this for the full demotion period to be removed. Set to 0 to only demote at exactly zero. Default: 0.0. Config key: demotion_threshold" />
-            </label>
-            <input type="number" value={demotionThreshold} min={0} step={0.0001}
-              onChange={d(setDemotionThreshold, 0.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Demotion Period (s)
-              <Tooltip text="How long a symbol must stay below demotion threshold before being deactivated. Tiered: weaker scores are demoted faster. Default: 600s (10 min). Config key: demotion_period" />
-            </label>
-            <input type="number" value={demotionPeriod} min={0} onChange={d(setDemotionPeriod, 600)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Min Net Profit %
-              <Tooltip text="Minimum net spread (after fees) required to execute a trade. Higher values skip marginal opportunities. Set lower for high-frequency, low-spread strategies. Default: 0.02%. Config key: min_net_profit_pct" />
-            </label>
-            <input type="number" value={minNetProfitPct} min={0} step={0.01}
-              onChange={d(setMinNetProfitPct, 0.02)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Rebalance Cooldown (s)
-              <Tooltip text="Minimum seconds between rebalances for the same exchange/direction pair. Prevents rapid-fire transfers. Default: 30s. Config key: rebalance_cooldown" />
-            </label>
-            <input type="number" value={rebalanceCooldown} min={0} onChange={d(setRebalanceCooldown, 30)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Miss Streak Before Rebalance
-              <Tooltip text="Consecutive missed trades (due to insufficient balance) before triggering a rebalance. Dynamic in adaptive mode: adjusts 10-30 based on trade frequency. Default: 15. Config key: min_misses_before_rebalance" />
-            </label>
-            <input type="number" value={minMissesBeforeRebalance} min={1} max={100} step={1}
-              onChange={d(setMinMissesBeforeRebalance, 15)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Rebalance ROI Horizon (s)
-              <Tooltip text="Maximum time to recoup the cost of a rebalance transfer. If estimated recovery time exceeds this, the rebalance is blocked. Default: 1800s (30 min). Config key: rebalance_roi_horizon" />
-            </label>
-            <input type="number" value={rebalanceRoiHorizon} min={0} onChange={d(setRebalanceRoiHorizon, 1800)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-
-        {/* Score Thresholds */}
-        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-3">Score Thresholds</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Trading Threshold
-              <Tooltip text="Minimum score to allow trading and rebalancing for a symbol. Below this, the symbol gets trade_multiplier = 0 (no trading). Default: 0.01. Config key: trading_score_threshold" />
-            </label>
-            <input type="number" value={tradingScoreThreshold} min={0.001} max={0.5} step={0.001}
-              onChange={d(setTradingScoreThreshold, 0.01)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Fee Threshold Multiplier
-              <Tooltip text="Scales activation threshold based on exchange pair fees. Higher values make expensive pairs (non-Bitfinex) harder to activate. Formula: threshold = base + (pair_fee - cheapest_fee) × multiplier. 0 = disabled (all pairs use base threshold). Default: 0.5. Config key: fee_threshold_multiplier" />
-            </label>
-            <input type="number" value={feeThresholdMultiplier} min={0} max={5.0} step={0.1}
-              onChange={d(setFeeThresholdMultiplier, 0.5)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Strong Threshold
-              <Tooltip text="Score for the Strong tier. Strong symbols get 2-3x trade multiplier and up to 2 exchanges per direction. Default: 0.1. Config key: strong_score_threshold" />
-            </label>
-            <input type="number" value={strongScoreThreshold} min={0.01} max={1.0} step={0.01}
-              onChange={d(setStrongScoreThreshold, 0.1)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Very Strong Threshold
-              <Tooltip text="Score for the Very Strong tier. Very Strong symbols get 3-4x trade multiplier and up to 3 exchanges per direction. Default: 0.3. Config key: very_strong_score_threshold" />
-            </label>
-            <input type="number" value={veryStrongScoreThreshold} min={0.05} max={2.0} step={0.05}
-              onChange={d(setVeryStrongScoreThreshold, 0.3)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-
-        {/* Net P&L Gate */}
-        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-3">Net P&L Gate</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Warmup Trades
-              <Tooltip text="Number of trades before the net P&L gate activates. During warmup, rebalancing is always allowed. Prevents premature blocking from a few early bad trades. Default: 10. Config key: net_pnl_gate_warmup_trades" />
-            </label>
-            <input type="number" value={netPnlGateWarmupTrades} min={1} max={200} step={1}
-              onChange={d(setNetPnlGateWarmupTrades, 10)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Grace Period (s)
-              <Tooltip text="Time after bot start before the net P&L gate activates. During grace period, rebalancing is always allowed regardless of profitability. Default: 1800s (30 min). Config key: net_pnl_gate_grace_seconds" />
-            </label>
-            <input type="number" value={netPnlGateGraceSeconds} min={60} max={7200} step={60}
-              onChange={d(setNetPnlGateGraceSeconds, 1800)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              ROI Gate Divisor
-              <Tooltip text="Controls rebalancing sensitivity. ROI threshold = fee_rate / divisor. Higher values (5-10) allow rebalancing at lower expected profit, good for small capital. Default: 3. Config key: rebalance_roi_divisor" />
-            </label>
-            <input type="number" value={rebalanceRoiDivisor} min={2} max={20} step={1}
-              onChange={d(setRebalanceRoiDivisor, 3)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-
-        {/* Profitability Controls */}
-        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-3">Profitability Controls</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Reallocation Cost Horizon (h)
-              <Tooltip text="Hours of estimated profit a symbol must generate to justify the cost of switching its dominant exchange pair. Higher values prevent expensive re-allocations for marginal improvements. Default: 2.0. Config key: reallocation_cost_horizon" />
-            </label>
-            <input type="number" value={reallocationCostHorizon} min={0.5} max={24} step={0.5}
-              onChange={d(setReallocationCostHorizon, 2.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Demotion Cooldown Multiplier
-              <Tooltip text="Cooldown after demotion = demotion_period x this multiplier. Higher values prevent symbols from churning in and out. With default 5.0 and 600s period: 50 min cooldown. Default: 5.0. Config key: demotion_cooldown_multiplier" />
-            </label>
-            <input type="number" value={demotionCooldownMultiplier} min={1} max={20} step={0.5}
-              onChange={d(setDemotionCooldownMultiplier, 5.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Hourly External Transfer Cap ($)
-              <Tooltip text="Maximum USD spent on external withdrawal fees per rolling hour. Internal rebalances (crypto sell/buy on same exchange) are not limited. Set to 0 to disable. Default: $2.00. Config key: hourly_external_transfer_cap" />
-            </label>
-            <input type="number" value={hourlyExternalTransferCap} min={0} max={100} step={0.5}
-              onChange={d(setHourlyExternalTransferCap, 2.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-
-        {/* Capital Hub & Trading Float (v0.30+) */}
-        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mt-6 mb-1">Capital Hub & Trading Float</h3>
-        <p className="text-[11px] text-slate-500 mb-3">
-          Bulk USDT lives on the custody hub (third-party PoR audited). A small trading float is kept on Bitfinex for the 0%-taker buy leg. Float is bounded by trade size, not capital — Bitfinex exposure stays flat as capital grows.
-        </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Custody Hub Exchange
-              <Tooltip text="Where bulk idle USDT lives. Default: Bybit (third-party PoR audited, $1.5B stress-tested in 2025). Must be an enabled exchange with free or near-free withdrawals on the configured custody network. Config key: custody_hub_exchange" />
-            </label>
-            <select value={custodyHubExchange}
-              onChange={e => setCustodyHubExchange(e.target.value)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
-              <option value="Bybit">Bybit</option>
-              <option value="Binance">Binance</option>
-              <option value="OKX">OKX</option>
-              <option value="MEXC">MEXC</option>
-              <option value="Bitget">Bitget</option>
-            </select>
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Custody → Trading Float Network
-              <Tooltip text="Network used to route USDT from custody hub to Bitfinex trading float (and back for overflow). Default: Aptos ($0 on Bybit, supported by all 6 active exchanges with the same canonical Tether contract). Config key: custody_hub_network" />
-            </label>
-            <select value={custodyHubNetwork}
-              onChange={e => setCustodyHubNetwork(e.target.value)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
-              <option value="Aptos">Aptos</option>
-              <option value="Plasma">Plasma</option>
-              <option value="Arbitrum">Arbitrum</option>
-              <option value="BEP20">BEP20</option>
-            </select>
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Trading Float Multiplier (× trade_amount)
-              <Tooltip text="Bitfinex trading float target = trade_amount × this. Default: 8 (covers 8 trades at full size before depleting). Lower (3-5) = minimal Bitfinex exposure but more replenish round-trips. Higher (12-20) = better for fast strategies but more Bitfinex custody exposure. Hot-applied — change anytime. Config key: trading_float_multiplier" />
-            </label>
-            <input type="number" value={tradingFloatMultiplier} min={2} max={50} step={0.5}
-              onChange={d(setTradingFloatMultiplier, 8.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Replenish Trigger (× trade_amount)
-              <Tooltip text="Replenish trading float from custody hub when balance falls below trade_amount × this. Default: 3.0 (refill when 3 trades' worth remains). Must be less than the multiplier. Config key: trading_float_replenish_trigger" />
-            </label>
-            <input type="number" value={tradingFloatReplenishTrigger} min={0.5} max={50} step={0.5}
-              onChange={d(setTradingFloatReplenishTrigger, 3.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Overflow Multiplier (× target)
-              <Tooltip text="Sweep excess back to custody hub when Bitfinex USDT > target × this. Default: 1.5 (overflow when float reaches 150% of target). Config key: trading_float_overflow_multiplier" />
-            </label>
-            <input type="number" value={tradingFloatOverflowMultiplier} min={1.1} max={5} step={0.1}
-              onChange={d(setTradingFloatOverflowMultiplier, 1.5)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-      </div>
-
-      {/* Simulation Realism */}
-      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Simulation Realism</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Spread Persistence Ticks
-              <Tooltip text="Number of consecutive ticks a spread must persist before executing. Simulates execution latency — real orders take ~1s to reach exchanges. 0 = instant (legacy), 1 = spread must exist on 2 consecutive ticks (~1s), 2 = 3 ticks (~2s). Range: 0-5. Default: 1. Config key: spread_persistence_ticks" />
-            </label>
-            <input type="number" value={spreadPersistenceTicks} min={0} max={5} step={1}
-              onChange={d(setSpreadPersistenceTicks, 1)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Event-Driven Seller Penalty %
-              <Tooltip text="Scoring penalty applied when event-driven exchanges (e.g. Bitfinex) are sellers. Their bids update every 10-20s (vs ~100ms for streaming exchanges), so the bid may be stale by the time your order arrives. This deprioritizes event-driven sellers unless their bid is meaningfully better. 0 = disabled. Default: 0.05%. Config key: event_driven_seller_penalty_pct" />
-            </label>
-            <input type="number" value={evdSellerPenalty} min={0} max={1.0} step={0.01}
-              onChange={d(setEvdSellerPenalty, 0.05)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              One-Leg Failure Rate
-              <Tooltip text="Probability of simulated one-legged failure per trade. When triggered, one leg of the arbitrage fails and the unwind cost (taker fee + slippage) is deducted from profit. Simulates real-world partial execution failures. 0 = disabled. Default: 0.02 (2%). Config key: one_leg_failure_rate" />
-            </label>
-            <input type="number" value={oneLegFailureRate} min={0} max={0.20} step={0.01}
-              onChange={d(setOneLegFailureRate, 0.02)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Unwind Slippage Multiplier
-              <Tooltip text="Multiplier on estimated slippage for emergency unwind trades after a one-legged failure. Higher values simulate the urgency premium of unwinding a naked position quickly. Range: 1.0-5.0. Default: 1.5. Config key: one_leg_unwind_slippage_mult" />
-            </label>
-            <input type="number" value={oneLegUnwindSlippageMult} min={1.0} max={5.0} step={0.1}
-              onChange={d(setOneLegUnwindSlippageMult, 1.5)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Max Position Multiplier
-              <Tooltip text="Maximum accumulated crypto value per symbol per buyer exchange, as a multiple of trade_amount. Prevents flash-crash exposure from large accumulated positions. 0 = unlimited. For $30 trades with 5x cap: max $150 of any symbol on any buyer exchange. Range: 0-50. Default: 5.0. Config key: max_position_multiplier" />
-            </label>
-            <input type="number" value={maxPositionMultiplier} min={0} max={50} step={0.5}
-              onChange={d(setMaxPositionMultiplier, 5.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-      </div>
-
-      {/* Diversification Floor (S21 follow-up — relax activation when understaffed) */}
-      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Diversification Floor</h2>
-        <p className="text-xs text-slate-500 mb-3">
-          When the bot is understaffed (active symbols below the configured minimum), multiply the activation threshold by this multiplier so a 2nd or 3rd marginal candidate can clear the gate. Pair with the momentum filter to avoid activating bleeders. Session #21 produced 187 unsuccessful auto-expand attempts — this addresses that.
-        </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="flex items-center gap-2">
-            <label className="flex items-center cursor-pointer">
-              <input type="checkbox" checked={diversificationFloorEnabled}
-                onChange={e => setDiversificationFloorEnabled(e.target.checked)}
-                className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
-              <span className="text-sm text-slate-300">Enable Diversification Floor</span>
-            </label>
-            <Tooltip text="When active < num_active_symbols, the activation threshold is multiplied by the floor multiplier (default 0.7×). Default: enabled. Config key: diversification_floor_enabled" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Floor Multiplier
-              <Tooltip text="Multiplier applied to the activation threshold when active count is below minimum. Default: 0.7 (= 30% easier to clear). Lower = more aggressive activation. Range: 0.1-1.0. Config key: diversification_floor_multiplier" />
-            </label>
-            <input type="number" value={diversificationFloorMultiplier} min={0.1} max={1.0} step={0.05}
-              onChange={d(setDiversificationFloorMultiplier, 0.7)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-      </div>
-
-      {/* Fast-Track Discovery Exit (S29 follow-up — trajectory-aware exit) */}
-      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Fast-Track Discovery Exit</h2>
-        <p className="text-xs text-slate-500 mb-3">
-          Trajectory-aware early exit. Standard discovery waits <code>scoring_window // 2</code> (15 min default) — too long for already-stable candidates. Fast-track classifies the candidate's recent trajectory (rising / stable / declining) using moving-average comparison plus peak-resilience for noise tolerance, then applies tier-aware time requirements. The strong+ tier also requires the last N samples to all be at the tier threshold (prevents activating on single-tick spikes).
-        </p>
-        <div className="text-xs text-slate-400 mb-3 bg-slate-900/40 rounded p-3 font-mono">
-          <div>strong+rising:  30s × aggressiveness</div>
-          <div>strong+stable:  60s × aggressiveness</div>
-          <div>normal+rising: 240s × aggressiveness</div>
-          <div>normal+stable: 300s × aggressiveness</div>
-          <div>any +declining: full standard wait (scoring_window // 2)</div>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="flex items-center gap-2">
-            <label className="flex items-center cursor-pointer">
-              <input type="checkbox" checked={fastTrackDiscoveryEnabled}
-                onChange={e => setFastTrackDiscoveryEnabled(e.target.checked)}
-                className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
-              <span className="text-sm text-slate-300">Enable Fast-Track Discovery</span>
-            </label>
-            <Tooltip text="When enabled, candidates exit discovery via trajectory-aware tier-based timing. Standard 15-min wait still applies for declining candidates and as a fallback. Default: enabled. Config key: fast_track_discovery_enabled" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Aggressiveness Multiplier
-              <Tooltip text="Multiplies all fast-track wait times. 1.0 = baseline (e.g., strong+rising = 30s); 0.5 = halve (15s); 2.0 = double (60s). Lower = faster activation but less confirmation; higher = more cautious. Range: 0.1-3.0. Default: 1.0. Config key: fast_track_aggressiveness" />
-            </label>
-            <input type="number" value={fastTrackAggressiveness} min={0.1} max={3.0} step={0.1}
-              onChange={d(setFastTrackAggressiveness, 1.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-      </div>
-
-      {/* Auto-Disable by Volume (daily 00:01 UTC volume sweep) */}
-      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Auto-Disable Thinly-Traded Pairs</h2>
-        <p className="text-xs text-slate-500 mb-3">
-          Every day at 00:01 UTC, the bot fetches live 24h USD volumes from each enabled exchange and auto-disables any (exchange, symbol) combo whose volume is below the threshold. Manual blocklists set in Fee Management are never touched. Symbols whose volume rises back above the threshold are auto-re-enabled on the next daily run.
-        </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="flex items-center gap-2">
-            <label className="flex items-center cursor-pointer">
-              <input type="checkbox" checked={autoDisableVolumeEnabled}
-                onChange={e => setAutoDisableVolumeEnabled(e.target.checked)}
-                className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
-              <span className="text-sm text-slate-300">Enable Daily Auto-Disable</span>
-            </label>
-            <Tooltip text="When enabled, the bot runs at 00:01 UTC every day, fetches 24h USD volumes from each enabled exchange, and auto-disables (exchange, symbol) combos below the volume threshold. Operator-set manual blocklists in Fee Management are never affected. Default: enabled. Config key: auto_disable_volume_enabled" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Volume Threshold (24h USD)
-              <Tooltip text={"Minimum 24h USD volume for a symbol to remain enabled on an exchange. Symbols below this on any exchange are auto-blocked there only (not globally). REMINDER: increase this value as your capital and trade size grow — at $1k capital, $10k/24h is fine for $20-40 trades; at $10k capital aim for $100k+. Rule of thumb: threshold ≈ 250× max trade size. Default: $10,000. Config key: auto_disable_volume_threshold_usd"} />
-            </label>
-            <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">$</span>
-              <input type="number" value={autoDisableVolumeThreshold} min={0} step={1000}
-                onChange={d(setAutoDisableVolumeThreshold, 10000)}
-                className="w-full bg-slate-700 border border-slate-600 rounded-lg pl-7 pr-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-            </div>
-            <p className="text-[11px] text-amber-500/80 mt-1">
-              Increase as capital grows — rule of thumb: threshold ≈ 250× max trade size
+            <div className="text-slate-300 font-medium mb-1">Per-config settings moved</div>
+            <p className="text-xs">
+              Trade sizing, scoring, anomaly protection, hedging, and all other per-config
+              parameters now live inside each config's <span className="text-cyan-400">Edit</span> modal
+              (Settings → <NavLink to="/settings" className="text-cyan-400 hover:underline">Config Groups</NavLink>).
+              This Global tab keeps only shared settings: 24h volume fetcher, IP whitelist, and the
+              Danger Zone (process/all-config restarts).
             </p>
           </div>
         </div>
       </div>
 
-      {/* Funding-Aware Scoring (Phase A — read-only foundation for spot-futures hedging) */}
-      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Funding-Aware Scoring</h2>
-        <p className="text-xs text-slate-500 mb-3">
-          Phase A. Live Binance Futures funding rates boost scores for symbols with positive funding (short hedge would earn) and penalize symbols with negative funding (short hedge would pay). Read-only — no positions opened.
-        </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div className="flex items-center gap-2 sm:col-span-2 lg:col-span-3">
-            <label className="flex items-center cursor-pointer">
-              <input type="checkbox" checked={fundingAwareEnabled}
-                onChange={e => setFundingAwareEnabled(e.target.checked)}
-                className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
-              <span className="text-sm text-slate-300">Enable Funding-Aware Scoring</span>
-            </label>
-            <Tooltip text="When enabled, each symbol's score is multiplied by a funding-aware factor: clamp(1.0 + annualized_short_pct/100, min_factor, max_factor). Positive funding → boost (short hedge earns), negative → penalty. When funding is below the skip threshold, the multiplier is floored at min_factor (effectively disqualifies the symbol). Default: enabled. Config key: funding_aware_scoring_enabled" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Skip Threshold 4h Symbols (% per period)
-              <Tooltip text="When the live funding rate for a 4h-funding symbol is worse than this threshold, the score multiplier is floored at min_factor — effectively disqualifying the symbol from activation/expansion until funding recovers. Default: -0.05% (= -0.30%/day, ~-110%/yr cost as short). Config key: funding_skip_threshold_4h_pct" />
-            </label>
-            <input type="number" value={fundingSkip4h} min={-1.0} max={1.0} step={0.01}
-              onChange={d(setFundingSkip4h, -0.05)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Skip Threshold 8h Symbols (% per period)
-              <Tooltip text="When the live funding rate for an 8h-funding symbol is worse than this threshold, the score multiplier is floored at min_factor. Default: -0.05% (= -0.15%/day, ~-55%/yr cost as short). Config key: funding_skip_threshold_8h_pct" />
-            </label>
-            <input type="number" value={fundingSkip8h} min={-1.0} max={1.0} step={0.01}
-              onChange={d(setFundingSkip8h, -0.05)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Score Min Factor
-              <Tooltip text="Floor for the funding score multiplier. When funding is severely negative or below the skip threshold, the multiplier is clamped to this value. Lower values = more aggressive penalty for bad-funding symbols. Range: 0.05-1.0. Default: 0.3 (= 70% score cut). Config key: funding_score_min_factor" />
-            </label>
-            <input type="number" value={fundingScoreMin} min={0.05} max={1.0} step={0.05}
-              onChange={d(setFundingScoreMin, 0.3)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Score Max Factor
-              <Tooltip text="Ceiling for the funding score multiplier. When funding is strongly positive (short would earn), the multiplier is capped to this value. Higher = more aggressive boost for good-funding symbols. Range: 1.0-5.0. Default: 1.5 (= 50% score boost). Config key: funding_score_max_factor" />
-            </label>
-            <input type="number" value={fundingScoreMax} min={1.0} max={5.0} step={0.05}
-              onChange={d(setFundingScoreMax, 1.5)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Poll Interval (seconds)
-              <Tooltip text="How often the bot polls Binance Futures /premiumIndex for live funding rates. One API call covers all 60 symbols (rate-limit weight 10, no key required). Default: 60s. Range: 30-600. Config key: funding_poll_interval_seconds" />
-            </label>
-            <input type="number" value={fundingPollInterval} min={30} max={600} step={10}
-              onChange={d(setFundingPollInterval, 60.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-      </div>
+      {/* Execution Mode (super-primary inheritance) */}
+      {registry && (
+        <ExecutionModeSection
+          registry={registry}
+          configsLite={configsLite}
+          onSendMessage={onSendMessage}
+        />
+      )}
 
-      {/* Spot-Futures Hedging (Phase C: shadow mode; Phase D: testnet; Phase G: live) */}
-      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Spot-Futures Hedging</h2>
-        <p className="text-xs text-slate-500 mb-3">
-          Phase C — shadow mode. Bot computes target hedge size from spot inventory and logs decisions, but does not place real futures orders. Phase D wires the Binance Futures executor.
-        </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div className="flex items-center gap-2 sm:col-span-2 lg:col-span-3">
-            <label className="flex items-center cursor-pointer">
-              <input type="checkbox" checked={hedgingEnabled}
-                onChange={e => setHedgingEnabled(e.target.checked)}
-                className="w-4 h-4 mr-2 rounded bg-slate-700 border-slate-600" />
-              <span className="text-sm text-slate-300">Enable Hedging</span>
-            </label>
-            <Tooltip text="When enabled, the hedge manager evaluates target hedge sizes and (in testnet/live modes) places futures orders. Phase C: shadow only — no real orders regardless of execution mode. Default: enabled. Config key: hedging_enabled" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Execution Mode
-              <Tooltip text="simulation = shadow only (Phase C, current); testnet = Binance Futures testnet (Phase D); live = mainnet (Phase G, post-30-day validation). Changing requires restart in v1. Default: simulation. Config key: hedge_execution_mode" />
-            </label>
-            <select value={hedgeExecutionMode}
-              onChange={e => setHedgeExecutionMode(e.target.value as 'simulation' | 'testnet' | 'live')}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500">
-              <option value="simulation">Simulation (shadow)</option>
-              <option value="testnet">Testnet</option>
-              <option value="live">Live (mainnet)</option>
-            </select>
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Dust Threshold (USD)
-              <Tooltip text="Minimum spot inventory notional to bother opening a hedge. Below this threshold, the funding/fees would exceed the price-protection benefit. Default: $20. Range: $1–$10,000. Config key: hedge_dust_threshold_usd" />
-            </label>
-            <input type="number" value={hedgeDustThreshold} min={1} max={10000} step={1}
-              onChange={d(setHedgeDustThreshold, 20.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Evaluation Interval (s)
-              <Tooltip text="How often the hedge manager evaluates target hedge sizes. Lower = more responsive but more API calls. Default: 300s (5 min). Range: 30–7200s. Config key: hedge_evaluation_interval_seconds" />
-            </label>
-            <input type="number" value={hedgeEvalInterval} min={30} max={7200} step={30}
-              onChange={d(setHedgeEvalInterval, 300.0)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Margin Buffer
-              <Tooltip text="Required free margin as a fraction of position size, even at 1× leverage. Prevents liquidation from brief mark-price spikes. Default: 0.20 (= 20% buffer; $500 margin can hedge max $400 position). Config key: hedge_margin_buffer_pct" />
-            </label>
-            <input type="number" value={hedgeMarginBuffer} min={0} max={1.0} step={0.05}
-              onChange={d(setHedgeMarginBuffer, 0.20)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-          <div>
-            <label className="flex items-center text-xs text-slate-500 mb-1">
-              Adjust Threshold
-              <Tooltip text="Drift between current hedge size and target before triggering an adjustment. Lower = more frequent re-balancing (more fees). Default: 0.10 (= 10% drift). Range: 0.01–1.0. Config key: hedge_adjust_threshold_pct" />
-            </label>
-            <input type="number" value={hedgeAdjustThreshold} min={0.01} max={1.0} step={0.01}
-              onChange={d(setHedgeAdjustThreshold, 0.10)}
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-          </div>
-        </div>
-      </div>
+      {/* 24h Volume Fetcher (universal) */}
+      {globalVolumeFetcher}
 
-      {/* Anomaly Protection */}
-      <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
-        <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3">Anomaly Protection</h2>
-
-        {/* Status banner */}
-        {anomalyProtection?.paused && (
-          <div className="mb-4 p-3 bg-red-950/50 border border-red-900/50 rounded-lg">
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="text-red-400 font-medium text-sm">Trading Paused</span>
-                <span className="text-slate-400 text-xs ml-2">({anomalyProtection.pause_layer})</span>
-                <p className="text-slate-400 text-xs mt-1">{anomalyProtection.pause_reason}</p>
-              </div>
-              <button onClick={() => onSendMessage({ type: 'anomaly_resume' })}
-                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium transition-colors">
-                Resume Trading
-              </button>
-            </div>
-          </div>
-        )}
-        {anomalyProtection?.warning_active && !anomalyProtection?.paused && (
-          <div className="mb-4 p-3 bg-amber-950/30 border border-amber-900/50 rounded-lg">
-            <span className="text-amber-400 font-medium text-sm">Warning Active</span>
-            <span className="text-slate-400 text-xs ml-2">(trade size x0.5)</span>
-            <p className="text-slate-400 text-xs mt-1">{anomalyProtection.warning_reason}</p>
-          </div>
-        )}
-
-        {/* Live stats */}
-        {anomalyProtection && (
-          <div className="mb-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-            <div className="bg-slate-700/50 rounded-lg p-2">
-              <div className="text-slate-500">Rolling P&L</div>
-              <div className={`font-mono font-medium ${anomalyProtection.rolling_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                ${anomalyProtection.rolling_pnl.toFixed(2)}
-              </div>
-            </div>
-            <div className="bg-slate-700/50 rounded-lg p-2">
-              <div className="text-slate-500">Drawdown</div>
-              <div className={`font-mono font-medium ${anomalyProtection.current_drawdown_pct > 2 ? 'text-amber-400' : 'text-slate-300'}`}>
-                {anomalyProtection.current_drawdown_pct.toFixed(2)}%
-              </div>
-            </div>
-            <div className="bg-slate-700/50 rounded-lg p-2">
-              <div className="text-slate-500">Pauses / Warnings</div>
-              <div className="text-slate-300 font-mono">{anomalyProtection.total_pauses}p / {anomalyProtection.total_warnings}w</div>
-            </div>
-            <div className="bg-slate-700/50 rounded-lg p-2">
-              <div className="text-slate-500">Symbol Blocks</div>
-              <div className="text-slate-300 font-mono">{anomalyProtection.total_symbol_blocks}</div>
-            </div>
-          </div>
-        )}
-
-        {/* Blocked symbols */}
-        {anomalyProtection && Object.keys(anomalyProtection.symbol_blocks).length > 0 && (
-          <div className="mb-4 p-3 bg-slate-700/30 rounded-lg">
-            <div className="text-xs text-slate-500 mb-1">Blocked Symbols</div>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(anomalyProtection.symbol_blocks).map(([sym, until]) => (
-                <span key={sym} className="px-2 py-0.5 bg-red-950/50 border border-red-900/50 rounded text-xs text-red-400">
-                  {sym} <span className="text-slate-500">({Math.max(0, Math.round((until - Date.now() / 1000)))}s)</span>
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div className="space-y-4">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input type="checkbox" checked={anomalyEnabled}
-              onChange={e => { setDirty(true); setAnomalyEnabled(e.target.checked); }}
-              className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500" />
-            <span className="text-sm text-slate-300">Enable Anomaly Protection</span>
-            <Tooltip text="Master toggle for the 3-layer anomaly protection system: circuit breaker (rolling P&L), drawdown protection (peak-to-trough), and per-symbol loss streak detection. When disabled, no anomaly checks run. Default: enabled. Config key: anomaly_protection_enabled" />
-          </label>
-
-          {anomalyEnabled && (
-            <>
-            {/* Layer 1: Circuit Breaker */}
-            <div className="border-l-2 border-blue-600/50 pl-4 space-y-3">
-              <h3 className="text-xs font-semibold text-blue-400 uppercase tracking-wider">Layer 1: Circuit Breaker (Rolling P&L)</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="flex items-center text-xs text-slate-500 mb-1">
-                    Window (seconds)
-                    <Tooltip text="Rolling time window for P&L tracking. Only trades within this window count toward the threshold. Shorter windows react faster but may false-trigger. Range: 60-7200. Default: 900 (15 min). Config key: circuit_breaker_window" />
-                  </label>
-                  <input type="number" value={cbWindow} min={60} max={7200} step={60}
-                    onChange={d(setCbWindow, 900)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                </div>
-                <div>
-                  <label className="flex items-center text-xs text-slate-500 mb-1">
-                    Threshold ($)
-                    <Tooltip text="If rolling P&L drops below this value, all trading is paused. For $1000 capital, -$5 means -0.5% loss in the window. Must be negative. Range: -1000 to 0. Default: -$5.00. Config key: circuit_breaker_threshold" />
-                  </label>
-                  <input type="number" value={cbThreshold} min={-1000} max={0} step={0.5}
-                    onChange={d(setCbThreshold, -5.0)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                </div>
-                <div>
-                  <label className="flex items-center text-xs text-slate-500 mb-1">
-                    Resume %
-                    <Tooltip text="Auto-resume when rolling P&L recovers above threshold x resume%. At 0.5 with -$5 threshold, resumes when P&L > -$2.50. Range: 0.1-1.0. Default: 0.5. Config key: circuit_breaker_resume_pct" />
-                  </label>
-                  <input type="number" value={cbResumePct} min={0.1} max={1.0} step={0.1}
-                    onChange={d(setCbResumePct, 0.5)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                </div>
-                <div>
-                  <label className="flex items-center text-xs text-slate-500 mb-1">
-                    Cooldown (seconds)
-                    <Tooltip text="Minimum wait time before auto-resuming after circuit breaker triggers. Even if P&L recovers quickly, trading won't resume until cooldown expires. Range: 30-3600. Default: 300 (5 min). Config key: circuit_breaker_cooldown" />
-                  </label>
-                  <input type="number" value={cbCooldown} min={30} max={3600} step={30}
-                    onChange={d(setCbCooldown, 300)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                </div>
-              </div>
-            </div>
-
-            {/* Layer 2: Drawdown */}
-            <div className="border-l-2 border-amber-600/50 pl-4 space-y-3">
-              <h3 className="text-xs font-semibold text-amber-400 uppercase tracking-wider">Layer 2: Drawdown Protection (Peak-to-Trough)</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                <div>
-                  <label className="flex items-center text-xs text-slate-500 mb-1">
-                    Threshold (%)
-                    <Tooltip text="If portfolio drops this % from session peak, all trading is paused. For $1000 capital at 5%: pause at -$50. Accounts for crypto positions' market value. Range: 0.5-20.0. Default: 5.0%. Config key: drawdown_threshold_pct" />
-                  </label>
-                  <input type="number" value={ddThreshold} min={0.5} max={20.0} step={0.5}
-                    onChange={d(setDdThreshold, 5.0)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                </div>
-                <div>
-                  <label className="flex items-center text-xs text-slate-500 mb-1">
-                    Resume (%)
-                    <Tooltip text="Auto-resume when drawdown recovers below this %. Must be lower than threshold. Range: 0.1-10.0. Default: 3.0%. Config key: drawdown_resume_pct" />
-                  </label>
-                  <input type="number" value={ddResumePct} min={0.1} max={10.0} step={0.5}
-                    onChange={d(setDdResumePct, 3.0)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                </div>
-                <div>
-                  <label className="flex items-center text-xs text-slate-500 mb-1">
-                    Emergency Multiplier
-                    <Tooltip text="At threshold x multiplier drawdown, triggers EMERGENCY sell-all. With 5% threshold and 2.0x mult: emergency at 10%. Sells all crypto positions immediately. Requires manual resume. Range: 1.5-5.0. Default: 2.0. Config key: drawdown_emergency_mult" />
-                  </label>
-                  <input type="number" value={ddEmergencyMult} min={1.5} max={5.0} step={0.5}
-                    onChange={d(setDdEmergencyMult, 2.0)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                </div>
-              </div>
-            </div>
-
-            {/* Layer 3: Per-Symbol Loss Streak */}
-            <div className="border-l-2 border-purple-600/50 pl-4 space-y-3">
-              <h3 className="text-xs font-semibold text-purple-400 uppercase tracking-wider">Layer 3: Per-Symbol Loss Streak</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="flex items-center text-xs text-slate-500 mb-1">
-                    Streak Threshold
-                    <Tooltip text="Number of consecutive losing trades on the SAME symbol before blocking it. Only that symbol is blocked — other symbols keep trading. Resets on a profitable trade. Range: 2-20. Default: 4. Config key: symbol_loss_streak_threshold" />
-                  </label>
-                  <input type="number" value={lsThreshold} min={2} max={20} step={1}
-                    onChange={d(setLsThreshold, 4)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                </div>
-                <div>
-                  <label className="flex items-center text-xs text-slate-500 mb-1">
-                    Block Cooldown (seconds)
-                    <Tooltip text="How long a symbol stays blocked after hitting the loss streak threshold. After cooldown, the streak resets and the symbol can trade again. Range: 60-3600. Default: 300 (5 min). Config key: symbol_loss_streak_cooldown" />
-                  </label>
-                  <input type="number" value={lsCooldown} min={60} max={3600} step={30}
-                    onChange={d(setLsCooldown, 300)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                </div>
-              </div>
-            </div>
-
-            {/* Warning */}
-            <div className="border-l-2 border-slate-600/50 pl-4 space-y-3">
-              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Warning (Pre-Pause Trade Size Reduction)</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="flex items-center text-xs text-slate-500 mb-1">
-                    Warning P&L %
-                    <Tooltip text="When rolling P&L drops below threshold x warning%, trade size is reduced to 0.5x as a precaution. At 0.5 with -$5 threshold: warning at -$2.50. Early defensive measure before full pause. Range: 0.1-1.0. Default: 0.5. Config key: warning_pnl_pct" />
-                  </label>
-                  <input type="number" value={warningPnlPct} min={0.1} max={1.0} step={0.1}
-                    onChange={d(setWarningPnlPct, 0.5)}
-                    className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500" />
-                </div>
-              </div>
-            </div>
-            </>
-          )}
-        </div>
-      </div>
 
       {/* Security */}
       <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
@@ -1310,52 +599,43 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       <div className="bg-red-950/30 border border-red-900/50 rounded-lg p-3 sm:p-5">
         <h2 className="text-sm font-semibold text-red-400 uppercase tracking-wider mb-3">Danger Zone</h2>
         <div className="space-y-4">
-          {/* Manual Stop/Start */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <p className="text-sm text-slate-300">Manual Trading Control</p>
-              <p className="text-xs mt-0.5">
-                {manualStopped
-                  ? <span className="text-red-400">Trading is STOPPED</span>
-                  : <span className="text-emerald-400">Trading is ACTIVE</span>
-                }
-              </p>
-            </div>
-            {manualStopped ? (
-              <button onClick={() => onSendMessage({ type: 'manual_start' })}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition-colors">
-                Start Trading
-              </button>
-            ) : (
-              <button onClick={() => setShowStopConfirm(true)}
-                className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors">
-                Stop Trading
-              </button>
-            )}
-          </div>
-          <div className="border-t border-red-900/30" />
-          {/* Hard Stop */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <p className="text-sm text-slate-300">Hard Stop — Convert All Crypto to USDT</p>
-              <p className="text-xs text-slate-500 mt-0.5">Sell all crypto positions across all exchanges. Stops trading automatically.</p>
-            </div>
-            <button onClick={() => { setShowHardStop(true); setHardStopConfirmText(''); setHardStopResult(null); }}
-              className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
-              Hard Stop
-            </button>
-          </div>
-          <div className="border-t border-red-900/30" />
-          {/* Distribute from custody hub (v0.30+: dynamic label) */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <p className="text-sm text-slate-300">Distribute USDT from {currentSettings.custody_hub_exchange ?? 'Bybit'}</p>
-              <p className="text-xs text-slate-500 mt-0.5">
-                {distributeEnabled
-                  ? `Distribute ${currentSettings.custody_hub_exchange ?? 'Bybit'} USDT to exchanges based on symbol profitability.`
-                  : 'Enabled after Hard Stop with Transfer to Bitfinex, or switching to live mode.'}
-              </p>
-            </div>
+          {/* v0.31: Manual Trading Control moved per-config — each config in
+              the Config Groups tab now has its own Stop / Resume button. */}
+          {/* Hard Stop — affects ONLY the selected config. The label
+              shows which config to make the scope explicit. */}
+          {(() => {
+            const selectedCfgName =
+              configsLite?.find((l) => l.id === selectedConfigId)?.name
+              ?? 'Selected Config';
+            return (
+              <>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm text-slate-300">
+                      Hard Stop <span className="text-amber-400 font-medium">{selectedCfgName}</span> — Convert Crypto to USDT
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Sells all crypto in <span className="text-amber-400 font-medium">{selectedCfgName}</span>'s wallet across all exchanges. Stops trading automatically. Other configs are unaffected.
+                    </p>
+                  </div>
+                  <button onClick={() => { setShowHardStop(true); setHardStopConfirmText(''); setHardStopResult(null); }}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
+                    Hard Stop {selectedCfgName}
+                  </button>
+                </div>
+                <div className="border-t border-red-900/30" />
+                {/* Distribute from custody hub — also scoped to selected config */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm text-slate-300">
+                      Distribute USDT from {currentSettings.custody_hub_exchange ?? 'Bybit'} <span className="text-amber-400 font-medium">({selectedCfgName})</span>
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {distributeEnabled
+                        ? <>Distribute {currentSettings.custody_hub_exchange ?? 'Bybit'} USDT to exchanges in <span className="text-amber-400 font-medium">{selectedCfgName}</span>'s wallet based on symbol profitability.</>
+                        : 'Enabled after Hard Stop with Transfer to Bitfinex, or switching to live mode.'}
+                    </p>
+                  </div>
             <button
               onClick={() => { setShowDistribute(true); setDistributeConfirmText(''); setDistributeResult(null); }}
               disabled={!distributeEnabled}
@@ -1366,17 +646,33 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
               }`}>
               Distribute USDT
             </button>
-          </div>
+                </div>
+              </>
+            );
+          })()}
           <div className="border-t border-red-900/30" />
-          {/* Restart Bot */}
+          {/* Restart All Configs (v0.31) */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <p className="text-sm text-slate-300">Restart Bot</p>
-              <p className="text-xs text-slate-500 mt-0.5">Discard all session data and start fresh with ${totalCapital}.</p>
+              <p className="text-sm text-slate-300">Restart All Configs</p>
+              <p className="text-xs text-slate-500 mt-0.5">Reset every config's per-config state (trades, balance, optimizer) without restarting the bot process. Use this to start a fresh session for all variations simultaneously.</p>
+            </div>
+            <button
+              onClick={() => setShowRestartAllConfirm(true)}
+              className="px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white rounded-lg text-sm font-medium transition-colors">
+              Restart All Configs
+            </button>
+          </div>
+          <div className="border-t border-red-900/30" />
+          {/* Restart Process (was Restart Bot) */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <p className="text-sm text-slate-300">Restart Process</p>
+              <p className="text-xs text-slate-500 mt-0.5">Re-execute the Python process (used after deploying code changes). Discards all session data and starts fresh.</p>
             </div>
             <button onClick={() => setShowRestartConfirm(true)}
               className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition-colors">
-              Restart Bot
+              Restart Process
             </button>
           </div>
         </div>
@@ -1422,29 +718,49 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         </div>
       )}
 
-      {/* Restart Confirmation Modal */}
+      {/* Restart Process Confirmation Modal */}
       {showRestartConfirm && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-slate-800 rounded-xl p-6 max-w-md w-full mx-4 border border-red-900/50">
-            <h3 className="text-lg font-semibold text-white mb-2">Restart Bot?</h3>
-            <p className="text-slate-400 text-sm mb-4">
-              Are you sure? This will discard all current session data and start fresh with ${totalCapital}.
-            </p>
-            <div className="flex gap-3 justify-end">
-              <button onClick={() => setShowRestartConfirm(false)}
-                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-sm">
-                Cancel
-              </button>
-              <button onClick={() => {
-                onSendMessage({ type: 'restart' });
-                setShowRestartConfirm(false);
-              }}
-                className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium">
-                Restart
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmModal
+          title="Restart Process?"
+          message={
+            <>
+              This re-executes the Python process and discards all current session
+              data. Use this after deploying code changes. The bot will reload
+              from <span className="text-white font-medium">settings.json</span>.
+            </>
+          }
+          confirmLabel="Restart Process"
+          destructive
+          onConfirm={() => {
+            onSendMessage({ type: 'restart' });
+            setShowRestartConfirm(false);
+            toast.show('Restart requested — reconnecting…', 'info', 4000);
+          }}
+          onCancel={() => setShowRestartConfirm(false)}
+        />
+      )}
+
+      {/* Restart All Configs Confirmation Modal */}
+      {showRestartAllConfirm && (
+        <ConfirmModal
+          title="Restart All Configs?"
+          message={
+            <>
+              This resets per-config state (trades, balance, optimizer rankings)
+              for <span className="text-white font-medium">every config</span>.
+              The bot process keeps running. Use this to start a fresh session
+              for all variations simultaneously.
+            </>
+          }
+          confirmLabel="Restart All"
+          destructive
+          onConfirm={() => {
+            onSendMessage({ type: 'config_restart_all' });
+            setShowRestartAllConfirm(false);
+            toast.show('All configs restarted', 'success');
+          }}
+          onCancel={() => setShowRestartAllConfirm(false)}
+        />
       )}
 
       {/* Hard Stop Modal */}
@@ -1452,7 +768,10 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div className="bg-slate-800 rounded-xl max-w-lg w-full mx-4 border border-red-900/50 overflow-hidden">
             <div className="bg-red-900/60 px-6 py-3">
-              <h3 className="text-lg font-semibold text-red-200">Hard Stop — Convert All Crypto to USDT</h3>
+              <h3 className="text-lg font-semibold text-red-200">
+                Hard Stop {configsLite?.find((l) => l.id === selectedConfigId)?.name ?? 'Selected Config'} — Convert Crypto to USDT
+              </h3>
+              <p className="text-xs text-red-300/70 mt-0.5">Affects only this config's wallet. Other configs continue trading.</p>
             </div>
             <div className="p-6">
               {hardStopResult ? (

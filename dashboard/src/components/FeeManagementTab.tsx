@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { ExchangeFeeConfig, FeeStats, AutoDisableState } from '../types';
 
 // Default configs matching config.py DEFAULT_FEE_CONFIGS
@@ -81,6 +81,16 @@ interface FeeManagementTabProps {
   autoDisableState?: AutoDisableState;
   onSendMessage: (msg: object) => void;
   onSendWithCallback?: (msg: object, callback: (data: unknown) => void) => void;
+  /** Hide the "Fetch 24h Volumes" banner+button (used inside the per-config modal — volumes are fetched globally from the Global tab). */
+  hideVolumeFetcher?: boolean;
+  /** Externally-provided 24h volumes (set by the Global tab). When supplied, overrides this component's local fetch state. */
+  volumesGlobal?: Record<string, Record<string, number>> | null;
+  /** Hide the internal "Save Fee Settings" button (modal renders its own Save in the footer). */
+  hideInternalSaveButton?: boolean;
+  /** External save trigger — increment to fire the same save handler the internal button does. */
+  saveSignal?: number;
+  /** Notifies the parent when the dirty flag changes (so modal can enable/disable its Save button). */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 type EditableConfig = {
@@ -182,7 +192,7 @@ function computeEffective(cfg: EditableConfig): { effective: number; afterReferr
   return { effective, afterReferral: afterRef };
 }
 
-export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, autoDisableState, onSendMessage, onSendWithCallback }: FeeManagementTabProps) {
+export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, autoDisableState, onSendMessage, onSendWithCallback, hideVolumeFetcher, volumesGlobal, hideInternalSaveButton, saveSignal, onDirtyChange }: FeeManagementTabProps) {
   const serverConfigs = feeConfigs ?? {};
   const [configs, setConfigs] = useState<Record<string, EditableConfig>>(() => {
     const initial: Record<string, EditableConfig> = {};
@@ -194,11 +204,19 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, au
   const [dirty, setDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
+  // Notify parent on dirty changes (used by modal to enable/disable footer Save)
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+
   // Volume-fetch state — `volumes` map is local (the data itself isn't broadcast,
   // re-fetch on demand). The "last fetched" timestamp comes from the backend via
   // `autoDisableState.last_manual_fetch_ts` so it survives component remount,
   // WebSocket reconnect, browser refresh, and bot restart.
-  const [volumes, setVolumes] = useState<Record<string, Record<string, number>> | null>(null);
+  const [volumesLocal, setVolumesLocal] = useState<Record<string, Record<string, number>> | null>(null);
+  // External (Global tab) volumes take precedence when provided
+  const volumes = volumesGlobal ?? volumesLocal;
+  const setVolumes = setVolumesLocal;
   const [volumesLoading, setVolumesLoading] = useState(false);
   const [volumesError, setVolumesError] = useState<string | null>(null);
   const [expandedBlocklist, setExpandedBlocklist] = useState<Record<string, boolean>>({});
@@ -309,11 +327,23 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, au
     setTimeout(() => setSaveStatus(null), 3000);
   };
 
+  // External save trigger — modal footer Save button increments saveSignal
+  // to fire the same handler the internal button does. Skip the very first
+  // render so we don't auto-save on mount.
+  const lastSaveSignal = useRef<number | undefined>(saveSignal);
+  useEffect(() => {
+    if (saveSignal === undefined) return;
+    if (lastSaveSignal.current === saveSignal) return;
+    lastSaveSignal.current = saveSignal;
+    handleSave();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saveSignal]);
+
   const inputCls = 'w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500';
   const selectCls = 'bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none focus:border-blue-500';
 
   return (
-    <div className="space-y-4 sm:space-y-5 max-w-3xl">
+    <div className="space-y-4 sm:space-y-5 w-full">
       {/* Real mode banner */}
       {feeRealMode && (
         <div className="bg-blue-900/30 border border-blue-700/50 rounded-lg px-4 py-3">
@@ -323,7 +353,10 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, au
         </div>
       )}
 
-      {/* 24h Volume fetch banner — feeds the per-exchange symbol blocklist UI */}
+      {/* 24h Volume fetch banner — feeds the per-exchange symbol blocklist UI.
+          Hidden inside the per-config modal (volumes are fetched globally
+          from the Global tab and propagated via `volumesGlobal` prop). */}
+      {!hideVolumeFetcher && (
       <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg px-4 py-3">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex-1 min-w-[200px]">
@@ -423,6 +456,7 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, au
           </div>
         </div>
       </div>
+      )}
 
       {/* Cashback stats */}
       {feeStats && (feeStats.pending_count > 0 || feeStats.credited_cashback_total > 0) && (
@@ -474,8 +508,20 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, au
         </div>
       )}
 
-      {/* Per-exchange cards */}
-      {EXCHANGE_ORDER.map(exchange => {
+      {/* Per-exchange cards — 1/2/3 columns by viewport (1 per cell).
+          Disabled exchanges sort to the end so the enabled ones stay
+          visually together at the top. Within each group (enabled vs
+          disabled), the original EXCHANGE_ORDER is preserved. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4">
+      {(() => {
+        const ordered = [...EXCHANGE_ORDER].sort((a, b) => {
+          const aEn = configs[a]?.enabled ? 0 : 1;
+          const bEn = configs[b]?.enabled ? 0 : 1;
+          if (aEn !== bEn) return aEn - bEn;
+          return EXCHANGE_ORDER.indexOf(a) - EXCHANGE_ORDER.indexOf(b);
+        });
+        return ordered;
+      })().map(exchange => {
         const cfg = configs[exchange];
         if (!cfg) return null;
         const { effective, afterReferral } = computeEffective(cfg);
@@ -797,13 +843,16 @@ export default function FeeManagementTab({ feeConfigs, feeRealMode, feeStats, au
           </div>
         );
       })}
+      </div>
 
-      {/* Save Button */}
+      {/* Save Button — hidden inside modal (modal footer renders its own Save) */}
       <div className="flex items-center gap-3">
-        <button onClick={handleSave}
-          className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-colors">
-          Save Fee Settings
-        </button>
+        {!hideInternalSaveButton && (
+          <button onClick={handleSave}
+            className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-colors">
+            Save Fee Settings
+          </button>
+        )}
         {saveStatus && (
           <span className="text-emerald-400 text-sm font-medium">{saveStatus}</span>
         )}

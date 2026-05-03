@@ -1,5 +1,5 @@
 import { NavLink, useParams } from 'react-router-dom';
-import type { BotLogEntry, AuthLogEntry } from '../types';
+import type { BotLogEntry, AuthLogEntry, RegistryView } from '../types';
 import BotLogsTab from './BotLogsTab';
 import AuthLogPage from './AuthLogPage';
 
@@ -9,6 +9,7 @@ interface LogsPageProps {
   authLogs: AuthLogEntry[];
   sendWithCallback: (msg: object, callback: (data: any) => void) => void;
   uptimeSeconds: number;
+  registry?: RegistryView;
 }
 
 const tabClass = ({ isActive }: { isActive: boolean }) =>
@@ -18,7 +19,7 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
       : 'border-transparent text-slate-400 hover:text-slate-200'
   }`;
 
-export default function LogsPage({ botLogs, botLogsTotal, authLogs, sendWithCallback, uptimeSeconds }: LogsPageProps) {
+export default function LogsPage({ botLogs, botLogsTotal, authLogs, sendWithCallback, uptimeSeconds, registry }: LogsPageProps) {
   const { subTab } = useParams<{ subTab?: string }>();
   const activeSubTab = subTab === 'auth' ? 'auth' : 'bot';
 
@@ -32,7 +33,7 @@ export default function LogsPage({ botLogs, botLogsTotal, authLogs, sendWithCall
 
       {/* Sub-tab content */}
       {activeSubTab === 'bot' ? (
-        <BotLogsTab logs={botLogs} totalCount={botLogsTotal} sendWithCallback={sendWithCallback} uptimeSeconds={uptimeSeconds} />
+        <BotLogsTab logs={botLogs} totalCount={botLogsTotal} sendWithCallback={sendWithCallback} uptimeSeconds={uptimeSeconds} registry={registry} />
       ) : (
         <AuthLogPage authLogs={authLogs} sendWithCallback={sendWithCallback} uptimeSeconds={uptimeSeconds} />
       )}
