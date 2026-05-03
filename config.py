@@ -6,7 +6,7 @@ All symbols, exchange settings, and operational parameters.
 
 import os
 
-__version__ = "0.30.7-beta"
+__version__ = "0.31.0-beta"
 
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
@@ -130,8 +130,8 @@ BITFINEX_EXCHANGE_NAME: str = "Bitfinex"
 MONITOR_INTERVAL_SECONDS: float = 1.0
 
 # Simulation settings
-TRADE_AMOUNT_USD: float = 100.0  # Simulated trade size
-TRADE_AMOUNT_PCT: float = 0.0  # 0 = disabled, >0 = fraction of total_capital (e.g. 0.01 = 1%)
+TRADE_AMOUNT_USD: float = 40.0  # Simulated trade size
+TRADE_AMOUNT_PCT: float = 0.04  # 0 = disabled, >0 = fraction of total_capital (e.g. 0.01 = 1%)
 
 # Exchange taker fees (used for both buy and sell in simulation)
 # Rates reflect available token-based discounts where applicable
@@ -243,7 +243,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_paid_in": "same_as_fee",
         "referrer_commission_pct": 0.0,  # 0% referrer (full 20% pool given to invitee)
         "zero_fee_pairs": [],
-        "enabled": True,
+        "enabled": False,  # disabled by default per VPS config (low priority for Bitfinex+MEXC route)
     },
     "Gate.io": {
         "base_taker_rate": 0.001,
@@ -257,7 +257,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_paid_in": "same_as_fee",
         "referrer_commission_pct": 0.10,  # 10% referrer (40% pool - 30% invitee)
         "zero_fee_pairs": ["BTCUSDT"],
-        "enabled": True,
+        "enabled": False,  # disabled by default per VPS config
     },
     "Pionex": {
         "base_taker_rate": 0.0005,  # 0.05% base (VIP tiers exist but volume-gated)
@@ -271,7 +271,7 @@ DEFAULT_FEE_CONFIGS: dict[str, dict] = {
         "referral_paid_in": "same_as_fee",
         "referrer_commission_pct": 0.0,  # 0% referrer (full 20% pool given to invitee)
         "zero_fee_pairs": [],
-        "enabled": True,
+        "enabled": False,  # disabled by default (~50-60% of book aggregated from Binance)
     },
     "Bitfinex": {
         "base_taker_rate": 0.0,  # 0.00% permanent since Dec 17, 2025
@@ -301,43 +301,43 @@ ACTIVE_SYMBOLS: list[str] = ["SNXUSDT", "DYDXUSDT", "PENDLEUSDT", "AXSUSDT"]
 SETTINGS_FILE: str = "settings.json"
 
 # Symbol optimizer (auto-rotation)
-NUM_ACTIVE_SYMBOLS: int = 3
+NUM_ACTIVE_SYMBOLS: int = 4
 SCORING_WINDOW_SECONDS: int = 1800        # 30-minute rolling window
-EVALUATION_INTERVAL_SECONDS: int = 300    # Check rotation every 5 minutes
+EVALUATION_INTERVAL_SECONDS: int = 120    # Check rotation every 5 minutes
 MIN_WARMUP_TICKS: int = 30               # Wait 30s before first evaluation
 ROTATION_SAFETY_MULTIPLIER: float = 2.0  # Hourly gain must exceed 2× switching cost
 AUTO_ROTATE: bool = True
 DISCOVERY_DURATION_SECONDS: int = 300    # 5-minute discovery stage at startup
-MAX_ACTIVE_SYMBOLS: int = 8             # Upper bound for dynamic expansion
+MAX_ACTIVE_SYMBOLS: int = 6             # Upper bound for dynamic expansion
 MIN_REBALANCE_SCORE: float = 0.0001     # Min score to justify transfer fees
-CONFIRMATION_PERIOD_SECONDS: int = 300   # How long a candidate must sustain high score
-SCORE_STABILITY_SECONDS: int = 120      # Min observation time before activation
+CONFIRMATION_PERIOD_SECONDS: int = 120   # How long a candidate must sustain high score
+SCORE_STABILITY_SECONDS: int = 180      # Min observation time before activation
 SCORE_STABILITY_FACTOR: float = 0.5     # Reject if current < peak × this
 PROMOTION_THRESHOLD: float = 0.0001      # Min score to enter watchlist
 DEMOTION_THRESHOLD: float = 0.0          # Score below which demotion timer starts
-DEMOTION_PERIOD_SECONDS: int = 600       # How long below threshold before demotion
-MIN_NET_PROFIT_PCT: float = 0.02         # Min net% to execute a trade (filter marginal)
-REBALANCE_COOLDOWN_SECONDS: float = 30   # Seconds between rebalances per exchange/direction
+DEMOTION_PERIOD_SECONDS: int = 1800       # How long below threshold before demotion
+MIN_NET_PROFIT_PCT: float = 0.01         # Min net% to execute a trade (filter marginal)
+REBALANCE_COOLDOWN_SECONDS: float = 10   # Seconds between rebalances per exchange/direction
 REBALANCE_ROI_HORIZON: int = 1800        # Max seconds to recoup rebalance cost
 ADAPTIVE_MODE: bool = True               # Enable adaptive trade sizing and smart rebalancing
 NET_PCT_SIZING_ENABLED: bool = True      # Scale trade size based on current tick net%
 NET_PCT_MULTIPLIER_CAP: float = 2.5      # Max net%-based trade size multiplier
 
 # Score thresholds (configurable via settings page)
-TRADING_SCORE_THRESHOLD: float = 0.01    # Min score to trade/rebalance
+TRADING_SCORE_THRESHOLD: float = 0.003    # Min score to trade/rebalance
 STRONG_SCORE_THRESHOLD: float = 0.1      # Strong tier threshold
 VERY_STRONG_SCORE_THRESHOLD: float = 0.3 # Very strong tier threshold
-FEE_THRESHOLD_MULTIPLIER: float = 0.5    # Activation threshold scales with pair fee excess
+FEE_THRESHOLD_MULTIPLIER: float = 0.2    # Activation threshold scales with pair fee excess
 
 # Net P&L gate params (configurable via settings page)
 NET_PNL_GATE_WARMUP_TRADES: int = 10     # Min trades before net P&L gate activates
 NET_PNL_GATE_GRACE_SECONDS: int = 1800   # Grace period (seconds) before gate activates
-REBALANCE_ROI_DIVISOR: int = 3           # ROI threshold = fee_rate / divisor (higher = easier rebalance)
+REBALANCE_ROI_DIVISOR: int = 5           # ROI threshold = fee_rate / divisor (higher = easier rebalance)
 
 # Profitability controls (configurable via settings page)
-REALLOCATION_COST_HORIZON: float = 2.0    # Hours of profit to justify reallocation cost
-DEMOTION_COOLDOWN_MULTIPLIER: float = 5.0 # Cooldown after demotion = period × multiplier
-HOURLY_EXTERNAL_TRANSFER_CAP: float = 2.0 # Max external withdrawal fees per hour ($), 0=disabled
+REALLOCATION_COST_HORIZON: float = 4.0    # Hours of profit to justify reallocation cost
+DEMOTION_COOLDOWN_MULTIPLIER: float = 7.0 # Cooldown after demotion = period × multiplier
+HOURLY_EXTERNAL_TRANSFER_CAP: float = 5.0 # Max external withdrawal fees per hour ($), 0=disabled
 BITFINEX_RESERVE_PCT: float = 0.15        # DEPRECATED v0.30 — use TRADING_FLOAT_MULTIPLIER instead. Kept for migration only.
 BITFINEX_RESERVE_HARD_FLOOR: float = 0.05 # DEPRECATED v0.30 — use TRADING_FLOAT_REPLENISH_TRIGGER instead.
 
@@ -349,13 +349,13 @@ BITFINEX_RESERVE_HARD_FLOOR: float = 0.05 # DEPRECATED v0.30 — use TRADING_FLO
 # This keeps Bitfinex exposure bounded in dollars regardless of capital growth.
 CUSTODY_HUB_EXCHANGE: str = "Bybit"        # Where bulk idle USDT lives
 CUSTODY_HUB_NETWORK: str = "Aptos"         # Free-withdrawal network for replenishment
-TRADING_FLOAT_MULTIPLIER: float = 8.0      # Bitfinex float target = trade_amount × this (operator-tunable)
+TRADING_FLOAT_MULTIPLIER: float = 6.7      # Bitfinex float target = trade_amount × this (operator-tunable)
 TRADING_FLOAT_REPLENISH_TRIGGER: float = 3.0  # Replenish when float < trade_amount × this
 TRADING_FLOAT_OVERFLOW_MULTIPLIER: float = 1.5  # Overflow→custody when float > target × this
 
 # Simulation realism (configurable via settings page)
 SPREAD_PERSISTENCE_TICKS: int = 1           # Consecutive ticks spread must persist before executing (0=instant)
-EVENT_DRIVEN_SELLER_PENALTY_PCT: float = 0.05  # Scoring penalty % when event-driven exchange is seller
+EVENT_DRIVEN_SELLER_PENALTY_PCT: float = 0.02  # Scoring penalty % when event-driven exchange is seller
 ONE_LEG_FAILURE_RATE: float = 0.02          # Probability of simulated one-legged failure per trade (0=disabled)
 ONE_LEG_UNWIND_SLIPPAGE_MULT: float = 1.5   # Slippage multiplier for emergency unwind trades
 MAX_POSITION_MULTIPLIER: float = 3.0        # Max accumulated crypto per symbol per buyer exchange (× trade_amount, 0=unlimited). Lowered from 5.0 in v0.27 (S20 showed 76% pos_cap skip rate at 2.0).
@@ -385,7 +385,7 @@ AUTO_EXPAND_ON_UNDERSTAFF: bool = True
 # rather than the bot sitting idle. Pair with the momentum filter to avoid
 # activating bleeders. See SESSIONS_2.md Session #21 for rationale.
 DIVERSIFICATION_FLOOR_ENABLED: bool = True
-DIVERSIFICATION_FLOOR_MULTIPLIER: float = 0.7  # 30% easier to clear when understaffed
+DIVERSIFICATION_FLOOR_MULTIPLIER: float = 0.5  # 30% easier to clear when understaffed
 
 # Fast-track discovery exit (S29 follow-up). When a candidate's trajectory
 # is healthy (rising or stable, not declining) and it clears the activation
@@ -434,7 +434,7 @@ HEDGING_ENABLED: bool = True
 # Execution mode: "simulation" (Phase C — shadow only, no orders),
 # "testnet" (Phase D — Binance Futures testnet), "live" (Phase G — mainnet).
 HEDGE_EXECUTION_MODE: str = "simulation"
-HEDGE_DUST_THRESHOLD_USD: float = 20.0        # min spot notional to hedge
+HEDGE_DUST_THRESHOLD_USD: float = 10.0        # min spot notional to hedge
 HEDGE_EVALUATION_INTERVAL_SECONDS: float = 300.0  # 5 min between hedge eval cycles
 HEDGE_MARGIN_BUFFER_PCT: float = 0.20         # keep margin >= 1.2× position size
 HEDGE_ADJUST_THRESHOLD_PCT: float = 0.10      # only adjust if drift > 10% of size
@@ -445,7 +445,7 @@ CIRCUIT_BREAKER_WINDOW: int = 900            # Rolling P&L window in seconds (15
 CIRCUIT_BREAKER_THRESHOLD: float = -5.0      # Global pause if rolling P&L < -$5
 CIRCUIT_BREAKER_RESUME_PCT: float = 0.5      # Auto-resume at 50% of threshold
 CIRCUIT_BREAKER_COOLDOWN: int = 300          # Min seconds before auto-resume (5min)
-DRAWDOWN_THRESHOLD_PCT: float = 5.0          # Global pause at 5% drawdown from peak
+DRAWDOWN_THRESHOLD_PCT: float = 15.0          # Global pause at 5% drawdown from peak
 DRAWDOWN_RESUME_PCT: float = 3.0             # Auto-resume when drawdown recovers to 3%
 DRAWDOWN_EMERGENCY_MULT: float = 2.0         # Emergency sell-all at 2× threshold (10%)
 SYMBOL_LOSS_STREAK_THRESHOLD: int = 4        # Block symbol after 4 consecutive losses
@@ -456,7 +456,7 @@ WARNING_PNL_PCT: float = 0.5                 # Warning (trade size ×0.5) at 50%
 EXECUTION_MODE: str = "simulation"
 
 # Balance management
-TOTAL_CAPITAL: float = 1800.0               # Total capital across all exchanges
+TOTAL_CAPITAL: float = 1000.0               # Total capital across all exchanges
 INITIAL_BALANCE_PER_SYMBOL: float = 160.0  # $160 per symbol per exchange (split 50/50)
 REBALANCE_AMOUNT: float = 200.0            # Transfer $200 when rebalancing (2× trade size)
 REBALANCE_THRESHOLD: float = 50.0          # Trigger rebalance when below $50 buffer

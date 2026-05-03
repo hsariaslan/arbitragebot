@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-ArbitrageBot Real-Time Price Fetcher
+ArbitrageBot v0.31.0-beta — multi-config orchestrator entrypoint.
 
-Connects to exchange WebSocket feeds, stores price snapshots to CSV
-every second, and prints cross-exchange arbitrage comparison to console.
+Boots SHARED resources once (fetchers, ExchangeInfoManager,
+TransferFeeManager, FundingMonitor, futures executor, demo fetcher,
+DashboardServer) and constructs PER-CONFIG bundles (BalanceTracker,
+ArbitrageMonitor, SymbolOptimizer, FeeManager, HedgeManager, optional
+DemoExecutor) via the Orchestrator.
 
-Usage:
-    python run.py
+The Orchestrator's `run()` coroutine round-robin sweeps every config each
+tick (~1Hz) instead of spawning a per-component task graph. Single-config
+operation is the same code path as multi-config — the registry just has
+one entry.
 
-Press Ctrl+C to stop gracefully.
+Press Ctrl+C to stop gracefully (saves state per config).
 """
 
 import asyncio
@@ -18,7 +23,6 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 
@@ -36,11 +40,9 @@ def load_env() -> None:
 # Load .env BEFORE importing config (which reads os.environ at module level)
 load_env()
 
-from balance import BalanceTracker
-from config import ACTIVE_SYMBOLS, MIN_WARMUP_TICKS, SYMBOLS
-from exchange_info import ExchangeInfoManager
-from fee_manager import FeeManager
+from config import ACTIVE_SYMBOLS, SYMBOLS, __version__
 from dashboard_server import DashboardLogHandler, DashboardServer
+from exchange_info import ExchangeInfoManager
 from fetchers.binance import BinanceFetcher
 from fetchers.bitget import BitgetFetcher
 from fetchers.bybit import BybitFetcher
@@ -50,14 +52,43 @@ from fetchers.mexc import MEXCFetcher
 from fetchers.okx import OKXFetcher
 from fetchers.pionex import PionexFetcher
 from fetchers.bitfinex import BitfinexFetcher
-from monitor import ArbitrageMonitor
-from optimizer import SymbolOptimizer
-from settings import load_settings
+from log_context import ConfigPrefixFilter
+from orchestrator import CapacityMonitor, ConfigFactory, Orchestrator
+from settings import load_registry
 from state_manager import StateManager
 
 
-def setup_logging() -> tuple[Path, DashboardLogHandler]:
-    """Configure logging to console, daily-rotating file (UTC), and dashboard handler."""
+def setup_logging() -> tuple[Path, DashboardLogHandler, "logging.handlers.QueueListener"]:
+    """Configure async logging via QueueHandler + QueueListener.
+
+    v0.31.0-beta+: every `logger.info(...)` call from the orchestrator's
+    per-config tick used to do synchronous I/O — format the record, run
+    filters, write to the rotating file, append to the dashboard buffer,
+    extract component via regex. At 48+ configs, that's measurable
+    contribution to sweep time.
+
+    New pipeline:
+      - The HOT PATH (logger.info from any thread/task) only does:
+          1. Run ConfigPrefixFilter (stamps prefix from ConfigContextVar
+             — MUST run synchronously to capture per-task context)
+          2. Enqueue the LogRecord onto an unbounded Queue (microseconds)
+      - A daemon thread (QueueListener) drains the queue and dispatches
+        to the real handlers (file, console, dashboard buffer). All
+        blocking I/O happens off the orchestrator tick path.
+
+    The unbounded queue is intentional. Logging back-pressure on the
+    orchestrator would be far worse than memory growth: a normal session
+    produces ~10 records/sec and the listener drains as fast as I/O
+    allows. If the disk catastrophically backs up, the queue grows but
+    the bot keeps trading; we'd notice via Bot Logs / file truncation
+    long before memory becomes a real concern.
+
+    Returns the listener so the caller can `listener.stop()` on shutdown
+    to flush any queued records before exit.
+    """
+    import queue
+    import logging.handlers
+
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
     log_file = logs_dir / "arbitragebot.log"
@@ -67,8 +98,15 @@ def setup_logging() -> tuple[Path, DashboardLogHandler]:
 
     console = logging.StreamHandler()
     console.setFormatter(fmt)
+    # Console only surfaces WARNING+ERROR. The file + dashboard buffer
+    # still capture every INFO/DEBUG record. Without this cap, every
+    # per-tick log line would print to stderr — noisy when running under
+    # tmux/SSH and slow when the terminal is hooked into a logger
+    # daemon. WARNING+ERROR are the things you actually want to see live
+    # without grep'ing the file (anomaly triggers, capacity warnings,
+    # fatal startup errors).
+    console.setLevel(logging.WARNING)
 
-    # Daily rotation at 00:00 UTC, keep 30 days
     file_h = logging.handlers.TimedRotatingFileHandler(
         log_file, when="midnight", utc=True, backupCount=30,
     )
@@ -77,41 +115,83 @@ def setup_logging() -> tuple[Path, DashboardLogHandler]:
 
     dashboard_h = DashboardLogHandler(maxlen=2000)
 
+    # Build the async pipeline.
+    #
+    # ConfigPrefixFilter MUST run synchronously on the calling thread so
+    # it can read ConfigContextVar (set by the orchestrator's per-config
+    # sweep). The listener thread doesn't share contextvars, so a filter
+    # there would always see ctx=None and fail to prefix records. Install
+    # the filter on the QueueHandler — it fires once on enqueue, the
+    # prefix is baked into record.msg, and the listener's handlers see
+    # the already-prefixed record.
+    log_queue: queue.Queue = queue.Queue(-1)  # unbounded
+    queue_handler = logging.handlers.QueueHandler(log_queue)
+    queue_handler.addFilter(ConfigPrefixFilter())
+
+    listener = logging.handlers.QueueListener(
+        log_queue,
+        console,
+        file_h,
+        dashboard_h,
+        respect_handler_level=True,
+    )
+
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    root.addHandler(console)
-    root.addHandler(file_h)
-    root.addHandler(dashboard_h)
-    return log_file, dashboard_h
+    # Idempotent: strip any handlers a previous setup_logging() left on
+    # the root logger (test re-runs, hot reloads).
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.addHandler(queue_handler)
+
+    # Start the listener thread. Daemon=True so it exits with the process
+    # if shutdown is missed; cooperative .stop() is preferred and flushes
+    # remaining records.
+    listener.start()
+    return log_file, dashboard_h, listener
 
 
 async def main() -> None:
-    """Run all exchange fetchers and arbitrage monitor concurrently."""
-    log_file, log_handler = setup_logging()
+    log_file, log_handler, log_listener = setup_logging()
     logger = logging.getLogger(__name__)
+    logger.info(f"ArbitrageBot v{__version__} starting — log: {log_file}")
 
-    # Load settings from settings.json (or create defaults)
-    settings = load_settings()
-    trade_amount_pct = float(settings.get("trade_amount_pct", 0.0))
-    total_capital = settings.get("total_capital", 1800.0)
-    if trade_amount_pct > 0:
-        trade_amount = round(total_capital * trade_amount_pct, 2)
-    else:
-        trade_amount = settings["trade_amount_usd"]
-    adaptive_mode = settings.get("adaptive_mode", True)
-
-    # Initialize FeeManager from settings (backward compatible — empty → defaults)
-    fee_manager = FeeManager.from_settings_dict(
-        settings.get("fee_configs", {}),
-        real_mode=settings.get("fee_real_mode", False),
+    # GC tuning — at 48 configs the bot accumulates millions of long-lived
+    # SymbolTick / aggregate / state objects in optimizer/monitor/balance.
+    # Default thresholds (700, 10, 10) cause gen2 GC to fire every ~70K
+    # allocations — at our allocation rate that's roughly 3-4 times per
+    # minute. Each gen2 scan walks ALL tracked containers in the heap,
+    # taking 100ms+ once 2M+ objects accumulate. Those pauses happen
+    # synchronously inside `optimizer.tick_once`, inflating sweep time.
+    # Raising gen2 to 100 means it fires ~10× less often, cutting total
+    # GC pause time per minute by ~10× without changing correctness
+    # (gen0/gen1 still collect normally so short-lived objects are
+    # reclaimed promptly).
+    import gc
+    gc.set_threshold(700, 100, 100)
+    logger.info(
+        f"[Config] GC thresholds: {gc.get_threshold()} "
+        f"(raised gen1+gen2 from default 10 to reduce stop-the-world pauses)"
     )
 
-    # Initialize TransferFeeManager from settings (backward compatible — empty → defaults)
+    # ── Load multi-config registry (auto-migrates v1 → v2) ────────────
+    registry = load_registry()
+    n_configs = len(registry.all_configs())
+    n_groups = len(registry.groups)
+    sp = registry.super_primary_config
+    sp_label = f"{sp.name} (in {registry.find_group_for_config(sp.id).name})" if sp else "(none)"
+    logger.info(
+        f"[Config] Loaded {n_groups} group(s) / {n_configs} config(s); "
+        f"super-primary: {sp_label}"
+    )
+
+    # ── SHARED: TransferFeeManager (lives in registry.shared) ─────────
     from transfer_fee_manager import TransferFeeManager
     transfer_fee_manager = TransferFeeManager.from_settings_dict(
-        settings.get("transfer_configs", {}),
+        registry.shared.get("transfer_configs", {}),
     )
 
+    # ── SHARED: Fetchers ──────────────────────────────────────────────
     fetchers = [
         BinanceFetcher(),
         OKXFetcher(),
@@ -124,235 +204,83 @@ async def main() -> None:
         BitfinexFetcher(),
     ]
 
-    # Derive active exchanges from fetchers, filtering out disabled ones
-    enabled_set = set(fee_manager.get_enabled_exchanges())
-    active_exchanges = [
-        f.exchange_name for f in fetchers
-        if f.exchange_name in enabled_set
-    ]
-    if not active_exchanges:
-        # Safety: if all are disabled, fall back to all
-        active_exchanges = [f.exchange_name for f in fetchers]
-        logger.warning("[Config] All exchanges disabled — falling back to all 9")
-
-    # Demo-only mode: restrict to exchanges with demo executors
-    execution_mode = settings.get("execution_mode", "simulation")
-    if execution_mode == "demo_only":
-        demo_only_exchanges = {"Binance", "OKX", "Bybit"}
-        active_exchanges = [ex for ex in active_exchanges if ex in demo_only_exchanges]
-        if not active_exchanges:
-            logger.warning("[Config] Demo-only mode but no demo exchanges enabled — falling back to all")
-            active_exchanges = [f.exchange_name for f in fetchers]
-        else:
-            logger.info(f"[Executor] Demo-only mode: active exchanges restricted to {active_exchanges}")
-
-    active_symbols = list(ACTIVE_SYMBOLS)  # from config.py, discovery may override
-
-    # Compute uniform initial allocations from total_capital
-    per_exchange = total_capital / len(active_exchanges)
-    num_positions = 1 + len(active_symbols)  # USDT + each symbol
-    per_position = per_exchange / num_positions
-    allocations = {
-        ex: {"usdt": per_position, "crypto": {sym: per_position for sym in active_symbols}}
-        for ex in active_exchanges
-    }
-
-    logger.info(f"ArbitrageBot starting — log: {log_file}")
-    logger.info(
-        f"{len(active_exchanges)} exchanges, ${total_capital:.0f} capital, "
-        f"${trade_amount}/trade"
-    )
-
-    # Fetch exchange trading rules (lot sizes, tick sizes, min notionals)
-    # before any trading starts. Addresses D-01, D-02, D-03.
-    exchange_info = ExchangeInfoManager(exchanges=active_exchanges)
+    # ── SHARED: ExchangeInfoManager ───────────────────────────────────
+    # Always fetch info for all 9 exchanges (configs may enable any subset)
+    all_exchanges = [f.exchange_name for f in fetchers]
+    exchange_info = ExchangeInfoManager(exchanges=all_exchanges)
     await exchange_info.fetch_all()
-
-    # D-16: Validate USDT withdrawal fees against live exchange data
     await exchange_info.validate_withdrawal_fees(transfer_fee_manager)
 
-    balance = BalanceTracker(
-        exchanges=active_exchanges,
-        symbols=active_symbols,
-        allocations=allocations,
-        rebalance_cooldown=settings.get("rebalance_cooldown", 30.0),
-        trade_amount=trade_amount,
-        adaptive_mode=adaptive_mode,
-        exchange_info=exchange_info,
-        fee_manager=fee_manager,
-        transfer_fee_manager=transfer_fee_manager,
-        hourly_external_transfer_cap=settings.get("hourly_external_transfer_cap", 2.0),
-        bitfinex_reserve_pct=settings.get("bitfinex_reserve_pct", 0.15),
-        bitfinex_reserve_hard_floor=settings.get("bitfinex_reserve_hard_floor", 0.05),
-    )
-    monitor = ArbitrageMonitor(
-        fetchers,
-        balance=balance,
-        symbols=active_symbols,
-        exchanges=active_exchanges,
-        trade_amount=trade_amount,
-        min_net_profit_pct=settings.get("min_net_profit_pct", 0.02),
-        min_misses_before_rebalance=int(settings.get("min_misses_before_rebalance", 15)),
-        rebalance_roi_horizon=settings.get("rebalance_roi_horizon", 1800),
-        total_capital=total_capital,
-        adaptive_mode=adaptive_mode,
-        log_file=log_file,
-        exchange_info=exchange_info,
-        fee_manager=fee_manager,
-        net_pct_sizing_enabled=settings.get("net_pct_sizing_enabled", True),
-        net_pct_multiplier_cap=settings.get("net_pct_multiplier_cap", 2.5),
-    )
-    optimizer = SymbolOptimizer(
-        fetchers=fetchers,
-        monitor=monitor,
-        balance=balance,
-        active_exchanges=active_exchanges,
-        active_symbols=active_symbols,
-        all_symbols=SYMBOLS,
-        trade_amount=trade_amount,
-        total_capital=total_capital,
-        fee_manager=fee_manager,
-        num_active_symbols=settings.get("num_active_symbols", 3),
-        scoring_window=settings.get("scoring_window", 1800),
-        evaluation_interval=settings.get("evaluation_interval", 300),
-        safety_multiplier=settings.get("safety_multiplier", 2.0),
-        auto_rotate=settings.get("auto_rotate", True),
-        discovery_duration=settings.get("discovery_duration", 300),
-        max_active_symbols=settings.get("max_active_symbols", 8),
-        min_rebalance_score=settings.get("min_rebalance_score", 0.0001),
-        confirmation_period=settings.get("confirmation_period", 300),
-        score_stability_seconds=settings.get("score_stability_seconds", 120),
-        score_stability_factor=settings.get("score_stability_factor", 0.5),
-        promotion_threshold=settings.get("promotion_threshold", 0.0001),
-        demotion_threshold=settings.get("demotion_threshold", 0.0),
-        demotion_period=settings.get("demotion_period", 600),
-        demotion_cooldown_multiplier=settings.get("demotion_cooldown_multiplier", 5.0),
-        reallocation_cost_horizon=settings.get("reallocation_cost_horizon", 2.0),
-        min_warmup_ticks=MIN_WARMUP_TICKS,
-    )
-    # Apply configurable score thresholds and gate params from settings
-    if "trading_score_threshold" in settings:
-        optimizer._trading_threshold = float(settings["trading_score_threshold"])
-    if "strong_score_threshold" in settings:
-        optimizer._strong_threshold = float(settings["strong_score_threshold"])
-    if "very_strong_score_threshold" in settings:
-        optimizer._very_strong_threshold = float(settings["very_strong_score_threshold"])
-    if "net_pnl_gate_warmup_trades" in settings:
-        monitor._net_pnl_gate_warmup_trades = int(settings["net_pnl_gate_warmup_trades"])
-    if "net_pnl_gate_grace_seconds" in settings:
-        monitor._net_pnl_gate_grace_seconds = int(settings["net_pnl_gate_grace_seconds"])
-    if "rebalance_roi_divisor" in settings:
-        monitor._rebalance_roi_divisor = int(settings["rebalance_roi_divisor"])
-
-    monitor.set_optimizer(optimizer)
-    monitor.record_config_snapshot("initial")
-
-    # Funding-rate monitor (Phase A: read-only, scoring multiplier only).
-    # Polls Binance Futures /premiumIndex every 60s; optimizer reads
-    # get_funding_factor(symbol) each scoring tick.
+    # ── SHARED: FundingMonitor (used for scoring + super-primary hedge) ─
     from funding_monitor import FundingMonitor
-
+    # Funding settings come from the default config (any config could change
+    # them, but they're a global subscription — 1 poll covers all configs)
+    default_cfg = registry.default_config
+    s = default_cfg.settings if default_cfg else {}
     funding_monitor = FundingMonitor(
         symbols=SYMBOLS,
         history_path="state/funding_history.json",
-        poll_interval_seconds=settings.get("funding_poll_interval_seconds", 60.0),
-        scoring_enabled=settings.get("funding_aware_scoring_enabled", True),
-        skip_threshold_4h_pct=settings.get("funding_skip_threshold_4h_pct", -0.05),
-        skip_threshold_8h_pct=settings.get("funding_skip_threshold_8h_pct", -0.05),
-        score_min_factor=settings.get("funding_score_min_factor", 0.3),
-        score_max_factor=settings.get("funding_score_max_factor", 1.5),
-    )
-    optimizer.set_funding_monitor(funding_monitor)
-
-    # Hedge manager (Phase C: shadow; Phase D: testnet/live via executor).
-    from hedge_manager import HedgeManager
-
-    hedge_execution_mode = settings.get("hedge_execution_mode", "simulation")
-    futures_executor = None
-    if hedge_execution_mode in ("testnet", "live"):
-        from executors.binance_futures_exec import BinanceFuturesExecutor
-        futures_executor = BinanceFuturesExecutor(
-            exchange_info=exchange_info,
-            mode=hedge_execution_mode,
-        )
-        if not futures_executor._credentials_ok():
-            logger.warning(
-                f"[Hedge] execution_mode={hedge_execution_mode} but Binance Futures "
-                f"credentials are not set — falling back to simulation. "
-                f"Set BINANCE_FUTURES_TESTNET_API_KEY/SECRET (testnet) or "
-                f"BINANCE_FUTURES_API_KEY/SECRET (live) in .env."
-            )
-            hedge_execution_mode = "simulation"
-            futures_executor = None
-
-    hedge_manager = HedgeManager(
-        balance=balance,
-        funding_monitor=funding_monitor,
-        optimizer=optimizer,
-        executor=futures_executor,
-        enabled=settings.get("hedging_enabled", True),
-        execution_mode=hedge_execution_mode,
-        dust_threshold_usd=settings.get("hedge_dust_threshold_usd", 20.0),
-        evaluation_interval_seconds=settings.get("hedge_evaluation_interval_seconds", 300.0),
-        margin_buffer_pct=settings.get("hedge_margin_buffer_pct", 0.20),
-        adjust_threshold_pct=settings.get("hedge_adjust_threshold_pct", 0.10),
-    )
-    monitor.set_hedge_manager(hedge_manager)
-    logger.info(
-        f"[Config] trade_amount=${trade_amount} capital=${total_capital:.0f} "
-        f"adaptive={adaptive_mode} min_net={settings.get('min_net_profit_pct', 0.02):.2f}% "
-        f"rebalance_cooldown={settings.get('rebalance_cooldown', 30.0):.0f}s "
-        f"max_symbols={settings.get('max_active_symbols', 8)} "
-        f"execution_mode={settings.get('execution_mode', 'simulation')}"
+        poll_interval_seconds=float(s.get("funding_poll_interval_seconds", 60.0)),
+        scoring_enabled=bool(s.get("funding_aware_scoring_enabled", True)),
+        skip_threshold_4h_pct=float(s.get("funding_skip_threshold_4h_pct", -0.05)),
+        skip_threshold_8h_pct=float(s.get("funding_skip_threshold_8h_pct", -0.05)),
+        score_min_factor=float(s.get("funding_score_min_factor", 0.3)),
+        score_max_factor=float(s.get("funding_score_max_factor", 1.5)),
     )
 
+    # ── SHARED: per-process state manager (Phase 3 will partition) ────
     state_mgr = StateManager()
-    saved = state_mgr.load()
-    if saved:
-        balance.from_state_dict(saved["balance"])
-        monitor.from_state_dict(saved["monitor"])
-        optimizer.from_state_dict(saved["optimizer"])
-        if "fee_manager" in saved:
-            fee_manager.from_state_dict(saved["fee_manager"])
-        if "hedge_manager" in saved:
-            hedge_manager.from_state_dict(saved["hedge_manager"])
-        # Sync symbols across components to match restored optimizer state
-        if optimizer._active_symbols:
-            monitor.update_symbols(optimizer._active_symbols)
-            balance.update_symbols(optimizer._active_symbols)
-        logger.info(
-            f"[State] Restored: {len(monitor._trades)} trades, "
-            f"{len(balance.transfers)} transfers, "
-            f"{len(optimizer._active_symbols)} active symbols"
-        )
-    else:
-        logger.info("[State] Starting fresh session")
 
-    dashboard = DashboardServer(
-        monitor, balance, fetchers, settings,
-        optimizer=optimizer, log_handler=log_handler, state_manager=state_mgr,
-        fee_manager=fee_manager,
-        transfer_fee_manager=transfer_fee_manager,
-        funding_monitor=funding_monitor,
-    )
+    # State loader bridge: for the migrated default config, return the
+    # legacy state/session.json contents. Phase 3 replaces this with
+    # per-config session files.
+    legacy_state = state_mgr.load()
 
-    # Demo/testnet portfolio comparison (optional — needs API keys in .env)
-    from demo_fetcher import DemoPortfolioFetcher
-    demo_fetcher = DemoPortfolioFetcher(
-        balance_tracker=balance, fetchers=fetchers, poll_interval=15.0,
-        fee_manager=fee_manager,
-    )
-    if saved and "demo_fetcher" in saved:
-        demo_fetcher.from_state_dict(saved["demo_fetcher"])
-    if demo_fetcher.enabled:
-        dashboard.set_demo_fetcher(demo_fetcher)
-    else:
-        logger.info("[DemoCompare] Disabled (no API keys configured in .env)")
+    def state_loader(config_id: str) -> dict | None:
+        # Per-config state files (Phase 3)
+        per_cfg = state_mgr.load_config(config_id) if hasattr(state_mgr, "load_config") else None
+        if per_cfg is not None:
+            return per_cfg
+        # Legacy bridge: only feed the v0.30 state to the migrated default config
+        if legacy_state and registry.default_config and registry.default_config.id == config_id:
+            return legacy_state
+        return None
 
-    # Phase 2: Demo order execution (optional — needs execution_mode=demo)
-    demo_executor = None
+    # ── SHARED: futures executor builder (super-primary only) ─────────
+    futures_executor_holder: dict = {"current": None}
 
-    if execution_mode in ("demo", "demo_only"):
+    def build_futures_executor(mode: str):
+        """Lazy-build a single Binance Futures executor (mode = testnet|live).
+        Returns the cached one if mode hasn't changed."""
+        cur = futures_executor_holder["current"]
+        if cur is not None:
+            try:
+                # If mode matches, reuse
+                if getattr(cur, "_mode", None) == mode:
+                    return cur
+                # Mode changed — close and rebuild
+                asyncio.ensure_future(cur.close())
+                futures_executor_holder["current"] = None
+            except Exception:
+                pass
+        from executors.binance_futures_exec import BinanceFuturesExecutor
+        ex = BinanceFuturesExecutor(exchange_info=exchange_info, mode=mode)
+        if not ex._credentials_ok():
+            logger.warning(
+                f"[Hedge] futures mode={mode} but credentials not set — "
+                f"falling back to simulation."
+            )
+            return None
+        futures_executor_holder["current"] = ex
+        return ex
+
+    # ── SHARED: demo executor builder (super-primary only) ────────────
+    demo_executor_holder: dict = {"current": None}
+
+    def build_demo_executor(mode: str):
+        cur = demo_executor_holder["current"]
+        if cur is not None:
+            return cur
         from config import (
             BINANCE_TESTNET_API_KEY, OKX_DEMO_API_KEY, BYBIT_DEMO_API_KEY,
         )
@@ -369,74 +297,183 @@ async def main() -> None:
         if BYBIT_DEMO_API_KEY:
             exchange_executors["Bybit"] = BybitExecutor(exchange_info)
 
-        if exchange_executors:
-            demo_executor = DemoExecutor(exchange_info, exchange_executors)
+        if not exchange_executors:
+            logger.warning(f"[Executor] mode={mode} but no API keys configured")
+            return None
+        ex = DemoExecutor(exchange_info, exchange_executors)
+        demo_executor_holder["current"] = ex
+        logger.info(
+            f"[Executor] {mode} mode enabled for: {list(exchange_executors.keys())}"
+        )
+        return ex
 
-            # Restore pending orders from saved state (nested in monitor state)
-            if saved:
-                monitor_state = saved.get("monitor", {})
-                executor_state = monitor_state.get("demo_executor")
-                if executor_state:
-                    demo_executor.from_state_dict(executor_state)
+    # ── PER-CONFIG factory ────────────────────────────────────────────
+    factory = ConfigFactory(
+        fetchers=fetchers,
+        exchange_info=exchange_info,
+        transfer_fee_manager=transfer_fee_manager,
+        funding_monitor=funding_monitor,
+        futures_executor_builder=build_futures_executor,
+        demo_executor_builder=build_demo_executor,
+        active_symbols_default=list(ACTIVE_SYMBOLS),
+        all_symbols=list(SYMBOLS),
+        # log_file=None: in multi-config mode the legacy per-tick
+        # _print_table / _output (stdout print + file write) would fire
+        # for every config every tick — flooding stdout AND adding 48
+        # synchronous file opens/writes per second. The dashboard +
+        # standard logger already capture everything; the legacy table
+        # is dead in this mode.
+        log_file=None,
+        state_loader=state_loader,
+    )
 
-            # Startup reconciliation: check pending orders + compare balances
-            try:
-                await demo_executor.recover_pending_orders()
-                await demo_executor.reconcile_balances(balance)
-            except Exception as e:
-                logger.error(f"[Reconcile] Startup reconciliation failed: {e}")
+    # ── Orchestrator: builds bundles, runs the per-tick sweep ─────────
+    capacity = CapacityMonitor(budget_ms=1500.0, critical_ms=2500.0)
+    orchestrator = Orchestrator(
+        registry=registry,
+        factory=factory,
+        capacity=capacity,
+        tick_interval=1.0,
+    )
+    await orchestrator.reconcile_components()
 
-            monitor.set_executor(
-                demo_executor, state_mgr,
-                demo_fetcher if demo_fetcher.enabled else None,
-                execution_mode=execution_mode,
-            )
-            balance._execution_mode = execution_mode
-            # Inform demo_fetcher which exchanges have executors
-            if demo_fetcher and demo_fetcher.enabled:
-                demo_fetcher.set_demo_exchanges(set(exchange_executors.keys()))
-            logger.info(
-                f"[Executor] {execution_mode} mode enabled for: "
-                f"{list(exchange_executors.keys())}"
-            )
-        else:
-            logger.warning(
-                f"[Executor] execution_mode={execution_mode} but no API keys configured"
-            )
+    # ── Default-config bundle for legacy DashboardServer wiring ───────
+    # (Phase 6 reshapes the dashboard to be config-aware; for now it points
+    # at the default config so single-config UI keeps working.)
+    default_bundle = orchestrator.get_bundle(registry.default_config.id) if registry.default_config else None
+    if default_bundle is None:
+        raise RuntimeError("No default config — cannot start dashboard")
+
+    # Build a flat settings dict for legacy callers
+    from settings import load_settings
+    flat_settings = load_settings()
+
+    dashboard = DashboardServer(
+        default_bundle.monitor,
+        default_bundle.balance,
+        fetchers,
+        flat_settings,
+        optimizer=default_bundle.optimizer,
+        log_handler=log_handler,
+        state_manager=state_mgr,
+        fee_manager=default_bundle.fee_manager,
+        transfer_fee_manager=transfer_fee_manager,
+        funding_monitor=funding_monitor,
+    )
+    # Wire the orchestrator + registry so the dashboard can reach every
+    # bundle for the multi-config UI in Phase 6.
+    dashboard._orchestrator = orchestrator
+    dashboard._registry = registry
+
+    # v0.31.0-beta+: register a post-build hook so every freshly-built
+    # bundle (initial start, config_add, config_clone, mode-drift rebuild,
+    # request_restart) gets the FULL hot-apply settings list. The
+    # ConfigFactory only sets a handful of settings explicitly; tunables
+    # like fee_threshold_multiplier and the diversification floor are only
+    # applied via dashboard_server._apply_settings, so without this hook
+    # new bundles run with constructor defaults instead of the user-saved
+    # values (observed: Group 2/Config 1 stuck in 5h discovery because
+    # optimizer.fee_threshold_multiplier was 0.5 not 0.2).
+    def _post_build_apply_settings(bundle, settings: dict) -> None:
+        try:
+            dashboard._apply_settings_to_bundle(bundle, settings)
+        except Exception as e:
+            logger.error(f"[Orchestrator] post_build_hook apply failed: {e}")
+    orchestrator.set_post_build_hook(_post_build_apply_settings)
+    # Apply now to any bundles that were already built before the hook
+    # was registered (initial reconcile_components ran before this point).
+    for cfg in registry.iter_configs():
+        b = orchestrator.get_bundle(cfg.id)
+        if b is not None:
+            _post_build_apply_settings(b, dict(cfg.settings))
+
+    # ── Demo portfolio fetcher (compares super-primary balance vs demo accounts) ─
+    from demo_fetcher import DemoPortfolioFetcher
+    demo_fetcher = DemoPortfolioFetcher(
+        balance_tracker=default_bundle.balance,
+        fetchers=fetchers,
+        poll_interval=15.0,
+        fee_manager=default_bundle.fee_manager,
+    )
+    if legacy_state and "demo_fetcher" in legacy_state:
+        demo_fetcher.from_state_dict(legacy_state["demo_fetcher"])
+    if demo_fetcher.enabled:
+        dashboard.set_demo_fetcher(demo_fetcher)
     else:
-        logger.info("[Executor] Simulation mode (no real orders)")
+        logger.info("[DemoCompare] Disabled (no API keys configured in .env)")
+
+    # ── Demo executor reconciliation (super-primary only) ─────────────
+    if default_bundle.demo_executor:
+        try:
+            await default_bundle.demo_executor.recover_pending_orders()
+            await default_bundle.demo_executor.reconcile_balances(default_bundle.balance)
+        except Exception as e:
+            logger.error(f"[Reconcile] Startup reconciliation failed: {e}")
 
     loop = asyncio.get_running_loop()
 
     def shutdown_handler():
         logger.info("Shutdown signal received, saving state...")
-        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None, fee_manager=fee_manager, hedge_manager=hedge_manager)
+        # Per-config: save every bundle (force, ignore dirty flag)
+        try:
+            n = orchestrator.save_all(state_mgr)
+            logger.info(f"[State] Shutdown save: {n} config(s) flushed")
+        except Exception as e:
+            logger.warning(f"[State] per-config save during shutdown failed: {e}")
+        # Legacy state (demo_fetcher baselines + sometimes fee_manager state) —
+        # keep saving until we wire those into the per-config or shared paths
+        try:
+            state_mgr.save(
+                default_bundle.balance,
+                default_bundle.monitor,
+                default_bundle.optimizer,
+                demo_fetcher if demo_fetcher.enabled else None,
+                fee_manager=default_bundle.fee_manager,
+                hedge_manager=default_bundle.hedge_manager,
+            )
+        except Exception as e:
+            logger.warning(f"[State] legacy save during shutdown failed: {e}")
         state_mgr.stop()
         if demo_fetcher.enabled:
             demo_fetcher.stop()
         for fetcher in fetchers:
             fetcher.stop()
-        monitor.stop()
-        optimizer.stop()
+        for bundle in orchestrator.all_bundles():
+            try:
+                bundle.monitor.stop()
+                bundle.optimizer.stop()
+            except Exception:
+                pass
+        orchestrator.stop()
         dashboard.stop()
         funding_monitor.stop()
-        if demo_executor:
-            asyncio.ensure_future(demo_executor.close())
-        if futures_executor:
-            asyncio.ensure_future(futures_executor.close())
+        if futures_executor_holder["current"]:
+            asyncio.ensure_future(futures_executor_holder["current"].close())
+        if demo_executor_holder["current"]:
+            asyncio.ensure_future(demo_executor_holder["current"].close())
 
     if sys.platform != "win32":
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, shutdown_handler)
 
+    # ── Launch all tasks ──────────────────────────────────────────────
     tasks = [asyncio.create_task(f.run()) for f in fetchers]
-    tasks.append(asyncio.create_task(monitor.run()))
-    tasks.append(asyncio.create_task(optimizer.run()))
+    tasks.append(asyncio.create_task(orchestrator.run()))
     tasks.append(asyncio.create_task(dashboard.run()))
     tasks.append(asyncio.create_task(funding_monitor.run()))
+    # Per-config periodic save: only writes dirty configs, spaces fsyncs
+    tasks.append(asyncio.create_task(orchestrator.periodic_save_loop(state_mgr)))
+    # Legacy save (kept until demo_fetcher/uptime/etc. are migrated to
+    # the new shared-state flow). Saves the default config's view to
+    # state/session.json so an emergency v0.31 → v0.30 rollback still has
+    # a readable state file.
     tasks.append(asyncio.create_task(state_mgr.periodic_save(
-        balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None,
-        fee_manager=fee_manager, hedge_manager=hedge_manager,
+        default_bundle.balance,
+        default_bundle.monitor,
+        default_bundle.optimizer,
+        demo_fetcher if demo_fetcher.enabled else None,
+        fee_manager=default_bundle.fee_manager,
+        hedge_manager=default_bundle.hedge_manager,
     )))
     if demo_fetcher.enabled:
         tasks.append(asyncio.create_task(demo_fetcher.run()))
@@ -446,21 +483,41 @@ async def main() -> None:
     except Exception as e:
         import traceback
         logger.error(f"Fatal error: {e}\n{traceback.format_exc()}")
-        state_mgr.save(balance, monitor, optimizer, demo_fetcher if demo_fetcher.enabled else None, fee_manager=fee_manager, hedge_manager=hedge_manager)
+        try:
+            state_mgr.save(
+                default_bundle.balance,
+                default_bundle.monitor,
+                default_bundle.optimizer,
+                demo_fetcher if demo_fetcher.enabled else None,
+                fee_manager=default_bundle.fee_manager,
+                hedge_manager=default_bundle.hedge_manager,
+            )
+        except Exception:
+            pass
         for fetcher in fetchers:
             fetcher.stop()
-        monitor.stop()
-        optimizer.stop()
+        orchestrator.stop()
         dashboard.stop()
         funding_monitor.stop()
-        if demo_executor:
-            await demo_executor.close()
-        if futures_executor:
-            await futures_executor.close()
+        if futures_executor_holder["current"]:
+            await futures_executor_holder["current"].close()
+        if demo_executor_holder["current"]:
+            await demo_executor_holder["current"].close()
         raise
     finally:
-        monitor.print_summary()
-        logger.info("ArbitrageBot Price Fetcher stopped")
+        try:
+            default_bundle.monitor.print_summary()
+        except Exception:
+            pass
+        logger.info("ArbitrageBot stopped")
+        # Drain the async log queue + flush pending records to file before
+        # the process exits. Without this, records still in the queue
+        # when shutdown begins would be lost (the daemon listener thread
+        # is killed when the main thread returns).
+        try:
+            log_listener.stop()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

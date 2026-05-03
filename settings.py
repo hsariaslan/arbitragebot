@@ -3,11 +3,27 @@ Settings manager for ArbitrageBot.
 
 Loads/saves runtime configuration from settings.json.
 Falls back to config.py defaults when settings.json is missing or incomplete.
+
+v0.31.0-beta: schema v2 multi-config support. The on-disk format is now
+{schema_version: 2, shared: {...}, groups: [{configs: [{settings: {...}}]}]}.
+`load_settings()` continues to return a flat dict (the default config's
+view) for backwards compatibility; `load_registry()` returns the full
+ConfigRegistry for code that needs the multi-config view.
 """
 
 import json
 import logging
 from pathlib import Path
+
+from config_registry import (
+    SCHEMA_VERSION,
+    SHARED_KEYS,
+    STRIP_FROM_PER_CONFIG,
+    Config,
+    ConfigGroup,
+    ConfigRegistry,
+    _new_id,
+)
 
 from config import (
     ADAPTIVE_MODE,
@@ -122,7 +138,7 @@ DEFAULT_SETTINGS: dict = {
     "demotion_period": DEMOTION_PERIOD_SECONDS,
     "min_net_profit_pct": MIN_NET_PROFIT_PCT,
     "rebalance_cooldown": REBALANCE_COOLDOWN_SECONDS,
-    "min_misses_before_rebalance": 15,
+    "min_misses_before_rebalance": 3,
     "rebalance_roi_horizon": REBALANCE_ROI_HORIZON,
     "adaptive_mode": ADAPTIVE_MODE,
     "trading_score_threshold": TRADING_SCORE_THRESHOLD,
@@ -188,6 +204,11 @@ DEFAULT_SETTINGS: dict = {
     "drawdown_threshold_pct": DRAWDOWN_THRESHOLD_PCT,
     "drawdown_resume_pct": DRAWDOWN_RESUME_PCT,
     "drawdown_emergency_mult": DRAWDOWN_EMERGENCY_MULT,
+    # v0.31.0-beta+: two-layer emergency gate (eliminates phantom drawdowns)
+    "realized_drawdown_emergency_pct": 15.0,
+    "combined_drawdown_emergency_pct": 25.0,
+    "combined_drawdown_sustained_seconds": 300.0,
+    "emergency_auto_liquidate": False,
     "symbol_loss_streak_threshold": SYMBOL_LOSS_STREAK_THRESHOLD,
     "symbol_loss_streak_cooldown": SYMBOL_LOSS_STREAK_COOLDOWN,
     "warning_pnl_pct": WARNING_PNL_PCT,
@@ -259,62 +280,249 @@ def _migrate_capital_architecture(settings: dict) -> dict:
     return settings
 
 
-def load_settings() -> dict:
-    """Load settings from JSON file, creating defaults if missing."""
-    path = Path(SETTINGS_FILE)
-    if path.exists():
-        try:
-            with open(path) as f:
-                settings = json.load(f)
-            logger.info(f"[Settings] Loaded from {SETTINGS_FILE}")
-            # Merge with defaults for any missing keys
-            for key, default in DEFAULT_SETTINGS.items():
-                if key not in settings:
+def _coerce_types(settings: dict) -> dict:
+    """Coerce numeric settings saved as strings to their default type."""
+    for key, default in DEFAULT_SETTINGS.items():
+        if key not in settings:
+            continue
+        val = settings[key]
+        if isinstance(default, int) and not isinstance(default, bool):
+            if not isinstance(val, int) or isinstance(val, bool):
+                try:
+                    settings[key] = int(val)
+                    logger.warning(f"[Settings] Coerced {key} from {type(val).__name__} to int")
+                except (ValueError, TypeError):
                     settings[key] = default
-                elif isinstance(default, dict) and isinstance(settings[key], dict):
-                    # Deep merge dict configs — add new exchanges/keys from defaults
-                    for sub_key, sub_val in default.items():
-                        if sub_key not in settings[key]:
-                            settings[key][sub_key] = sub_val
-            # Enforce types: coerce numeric settings that may have been
-            # saved as strings (e.g. from manual edits or older code)
-            for key, default in DEFAULT_SETTINGS.items():
-                if key not in settings:
-                    continue
-                val = settings[key]
-                if isinstance(default, int) and not isinstance(default, bool):
-                    if not isinstance(val, int) or isinstance(val, bool):
-                        try:
-                            settings[key] = int(val)
-                            logger.warning(f"[Settings] Coerced {key} from {type(val).__name__} to int")
-                        except (ValueError, TypeError):
-                            settings[key] = default
-                elif isinstance(default, float):
-                    if not isinstance(val, (int, float)) or isinstance(val, bool):
-                        try:
-                            settings[key] = float(val)
-                            logger.warning(f"[Settings] Coerced {key} from {type(val).__name__} to float")
-                        except (ValueError, TypeError):
-                            settings[key] = default
-                elif isinstance(default, bool):
-                    if not isinstance(val, bool):
-                        settings[key] = default
-                        logger.warning(f"[Settings] Reset {key} to default (was {type(val).__name__})")
-            # v0.30 migration: bitfinex_reserve_pct → trading_float_multiplier
-            settings = _migrate_capital_architecture(settings)
-            return settings
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"[Settings] Failed to load {SETTINGS_FILE}: {e}, using defaults")
-
-    settings = DEFAULT_SETTINGS.copy()
-    save_settings(settings)
-    logger.info(f"[Settings] Created default {SETTINGS_FILE}")
+        elif isinstance(default, float):
+            if not isinstance(val, (int, float)) or isinstance(val, bool):
+                try:
+                    settings[key] = float(val)
+                    logger.warning(f"[Settings] Coerced {key} from {type(val).__name__} to float")
+                except (ValueError, TypeError):
+                    settings[key] = default
+        elif isinstance(default, bool):
+            if not isinstance(val, bool):
+                settings[key] = default
+                logger.warning(f"[Settings] Reset {key} to default (was {type(val).__name__})")
     return settings
 
 
-def save_settings(settings: dict) -> None:
-    """Save settings to JSON file."""
+def _merge_with_defaults(settings: dict) -> dict:
+    """Add missing keys from DEFAULT_SETTINGS, deep-merge dict configs."""
+    for key, default in DEFAULT_SETTINGS.items():
+        if key not in settings:
+            settings[key] = default if not isinstance(default, dict) else dict(default)
+        elif isinstance(default, dict) and isinstance(settings[key], dict):
+            for sub_key, sub_val in default.items():
+                if sub_key not in settings[key]:
+                    settings[key][sub_key] = sub_val
+    return settings
+
+
+def _migrate_v1_to_v2(raw: dict) -> dict:
+    """v0.31 migration: flat single-config schema → multi-config schema.
+
+    Idempotent: only runs if `schema_version != 2`. Preserves the existing
+    config as Group 1 / Config 1 (primary + default + super-primary).
+    Lifts shared keys (execution_mode, ip_whitelist, transfer_configs, etc.)
+    into the `shared` section.
+    """
+    if raw.get("schema_version") == SCHEMA_VERSION:
+        return raw
+
+    # Apply v0.30 capital architecture migration first if needed
+    raw = _migrate_capital_architecture(raw)
+    # Fill in any missing v0.30 keys + coerce types so the per-config
+    # blob has everything the components expect
+    raw = _merge_with_defaults(raw)
+    raw = _coerce_types(raw)
+
+    # Build the shared section from legacy keys
+    shared: dict = {
+        "execution_mode": raw.get("execution_mode", "simulation"),
+        "hedge_execution_mode": raw.get("hedge_execution_mode", "simulation"),
+        "ip_whitelist_enabled": raw.get("ip_whitelist_enabled", False),
+        "ip_whitelist": list(raw.get("ip_whitelist", [])),
+        "transfer_configs": dict(raw.get("transfer_configs", {})),
+    }
+
+    # Build the per-config settings blob — strip out shared keys + group capital
+    per_config_settings = {
+        k: v for k, v in raw.items()
+        if k not in STRIP_FROM_PER_CONFIG and k != "schema_version"
+    }
+
+    config_id = _new_id()
+    group_id = _new_id()
+    capital = float(raw.get("total_capital", 1000.0))
+
+    shared["super_primary_config_id"] = config_id
+
+    migrated = {
+        "schema_version": SCHEMA_VERSION,
+        "shared": shared,
+        "groups": [
+            {
+                "id": group_id,
+                "name": "Group 1",
+                "initial_capital": capital,
+                "order": 0,
+                "configs": [
+                    {
+                        "id": config_id,
+                        "name": "Config 1",
+                        "description": "Migrated from v0.30 single-config setup",
+                        "is_primary": True,
+                        "is_default": True,
+                        "order": 0,
+                        "settings": per_config_settings,
+                    }
+                ],
+            }
+        ],
+    }
+
+    logger.warning(
+        f"[Migration] v0.31 multi-config: lifted single config into "
+        f"Group 1 / Config 1 (group_id={group_id[:8]}…, config_id={config_id[:8]}…), "
+        f"capital=${capital:.0f}, super-primary={config_id[:8]}…"
+    )
+    return migrated
+
+
+def load_registry() -> ConfigRegistry:
+    """Load the full multi-config registry from disk. Migrates v1 → v2 if needed.
+    Always writes the migrated form back so subsequent loads are no-op.
+    """
     path = Path(SETTINGS_FILE)
+    raw: dict = {}
+
+    if path.exists():
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+            logger.info(f"[Settings] Loaded from {SETTINGS_FILE}")
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"[Settings] Failed to load {SETTINGS_FILE}: {e}, using defaults")
+            raw = {}
+
+    needs_migration = raw.get("schema_version") != SCHEMA_VERSION
+
+    if not raw:
+        # Bootstrap from defaults — single config / single group
+        raw = dict(DEFAULT_SETTINGS)
+        needs_migration = True
+
+    if needs_migration:
+        v2 = _migrate_v1_to_v2(raw)
+    else:
+        v2 = raw
+
+    # Merge per-config settings with current defaults (covers new keys
+    # added in subsequent versions). The shared section is left as-is.
+    for group in v2.get("groups", []):
+        for cfg in group.get("configs", []):
+            cfg.setdefault("settings", {})
+            for k, default in DEFAULT_SETTINGS.items():
+                if k in STRIP_FROM_PER_CONFIG:
+                    continue
+                if k not in cfg["settings"]:
+                    cfg["settings"][k] = (
+                        dict(default) if isinstance(default, dict) else default
+                    )
+                elif isinstance(default, dict) and isinstance(cfg["settings"][k], dict):
+                    for sub_k, sub_v in default.items():
+                        if sub_k not in cfg["settings"][k]:
+                            cfg["settings"][k][sub_k] = sub_v
+
+    # Ensure shared has its expected keys
+    shared = v2.setdefault("shared", {})
+    shared.setdefault("execution_mode", "simulation")
+    shared.setdefault("hedge_execution_mode", "simulation")
+    shared.setdefault("ip_whitelist_enabled", False)
+    shared.setdefault("ip_whitelist", [])
+    shared.setdefault("transfer_configs", dict(DEFAULT_SETTINGS["transfer_configs"]))
+    # Deep-merge transfer_configs against defaults to pick up new networks
+    for ex, ex_cfg in DEFAULT_SETTINGS["transfer_configs"].items():
+        if ex not in shared["transfer_configs"]:
+            shared["transfer_configs"][ex] = dict(ex_cfg)
+        elif isinstance(ex_cfg, dict) and isinstance(shared["transfer_configs"][ex], dict):
+            for sub_k, sub_v in ex_cfg.items():
+                if sub_k not in shared["transfer_configs"][ex]:
+                    shared["transfer_configs"][ex][sub_k] = sub_v
+
+    registry = ConfigRegistry.from_settings_dict(v2)
+
+    if needs_migration:
+        save_registry(registry)
+        logger.info(f"[Settings] Persisted v{SCHEMA_VERSION} schema after migration")
+
+    return registry
+
+
+def save_registry(registry: ConfigRegistry) -> None:
+    """Persist the full registry to settings.json."""
+    path = Path(SETTINGS_FILE)
+    payload = registry.to_settings_dict()
     with open(path, "w") as f:
-        json.dump(settings, f, indent=2)
-    logger.info(f"[Settings] Saved to {SETTINGS_FILE}")
+        json.dump(payload, f, indent=2)
+    logger.info(f"[Settings] Saved registry to {SETTINGS_FILE}")
+
+
+def load_settings() -> dict:
+    """Backwards-compat: return a flat dict view of the default config + shared.
+
+    Existing code that hasn't been refactored to use ConfigRegistry directly
+    can keep calling load_settings() — it gets the default config's settings
+    blob merged with shared keys (execution_mode, ip_whitelist, transfer_configs).
+    """
+    registry = load_registry()
+    default = registry.default_config
+    if default is None:
+        # No configs at all — return defaults
+        flat = dict(DEFAULT_SETTINGS)
+    else:
+        flat = dict(default.settings)
+
+    # Lift shared keys back into the flat view so legacy callers see them
+    flat["execution_mode"] = registry.shared.get("execution_mode", "simulation")
+    flat["hedge_execution_mode"] = registry.shared.get(
+        "hedge_execution_mode", "simulation"
+    )
+    flat["ip_whitelist_enabled"] = registry.shared.get("ip_whitelist_enabled", False)
+    flat["ip_whitelist"] = list(registry.shared.get("ip_whitelist", []))
+    flat["transfer_configs"] = dict(registry.shared.get("transfer_configs", {}))
+    # Group capital → top-level total_capital
+    flat["total_capital"] = (
+        registry.find_group_for_config(default.id).initial_capital
+        if default else DEFAULT_SETTINGS["total_capital"]
+    )
+    return _coerce_types(_merge_with_defaults(flat))
+
+
+def save_settings(settings: dict) -> None:
+    """Backwards-compat: save flat-dict updates by writing them through to
+    the default config's settings blob (and shared keys to shared)."""
+    registry = load_registry()
+    default = registry.default_config
+    if default is None:
+        # Nothing to update against; just write the flat settings as-is for
+        # diagnostic (will be re-migrated on next load).
+        path = Path(SETTINGS_FILE)
+        with open(path, "w") as f:
+            json.dump(settings, f, indent=2)
+        return
+
+    # Split incoming flat dict into shared vs per-config buckets
+    for k, v in settings.items():
+        if k == "total_capital":
+            g = registry.find_group_for_config(default.id)
+            if g:
+                g.initial_capital = float(v)
+        elif k in SHARED_KEYS:
+            registry.shared[k] = v
+        elif k == "schema_version":
+            continue
+        else:
+            default.settings[k] = v
+    save_registry(registry)

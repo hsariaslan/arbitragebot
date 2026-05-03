@@ -105,6 +105,65 @@ class StateManager:
                 f.unlink()
         logger.info("[State] Cleared saved state (fresh restart)")
 
+    # ── v0.31 multi-config per-config state files (Phase 3 stubs) ─────
+    def load_config(self, config_id: str) -> dict | None:
+        """Load per-config session state. Phase 3 implements the read path."""
+        path = STATE_DIR / "configs" / config_id / "session.json"
+        if not path.exists():
+            return None
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"[State] Failed to load per-config {config_id[:8]}…: {e}")
+            return None
+
+    def save_config(self, config_id: str, payload: dict) -> bool:
+        """Save per-config session state atomically. Phase 3 expands this
+        with a dirty-flag gate from the orchestrator."""
+        cfg_dir = STATE_DIR / "configs" / config_id
+        try:
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            path = cfg_dir / "session.json"
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "w") as f:
+                json.dump(payload, f)
+            os.replace(str(tmp), str(path))
+            return True
+        except Exception as e:
+            logger.error(f"[State] Failed to save per-config {config_id[:8]}…: {e}")
+            return False
+
+    def clear_config(self, config_id: str, remove_dir: bool = False) -> None:
+        """Delete per-config state.
+
+        `remove_dir`: when True, also remove the now-empty `configs/<id>/`
+        directory itself. Use this on permanent removal (config_remove,
+        config_remove_group). For non-destructive resets (Restart Config),
+        leave False so the directory exists for the next save cycle.
+
+        Without `remove_dir`, the bot accumulates empty per-config
+        directories every time a config is permanently removed — observed
+        S31 with 28 orphan dirs (11 still containing stale session.json
+        from group-removal that never called this).
+        """
+        cfg_dir = STATE_DIR / "configs" / config_id
+        for fname in ("session.json", "session.json.bak"):
+            path = cfg_dir / fname
+            if path.exists():
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+        if remove_dir and cfg_dir.exists():
+            try:
+                # Only remove if empty — we don't want to nuke arbitrary
+                # files that someone may have placed under this id.
+                if not any(cfg_dir.iterdir()):
+                    cfg_dir.rmdir()
+            except Exception:
+                pass
+
     async def periodic_save(self, balance, monitor, optimizer, demo_fetcher=None, fee_manager=None, hedge_manager=None) -> None:
         """Async task that saves state periodically."""
         while self._running:
