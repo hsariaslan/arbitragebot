@@ -570,3 +570,58 @@ After deploying with $1k capital ($500 spot + $500 futures margin) for 30 days:
 | Liquidations | **0** (1× leverage should make this impossible barring exchange bugs) |
 
 If all 6 met after 30 days → scale to $5k capital. If any fail badly → diagnose, iterate, retry at $1k.
+
+---
+
+## Anti-Churn — Future Improvements (2026-05-03)
+
+These were proposed during the rebalancing-churn analysis but deferred until after **A** (demotion-frequency cooldown scaling), **B** (quiet-period pause), and **C** (activation profitability bar) prove their value. Each addresses a specific failure mode observed in the 9-day Session #19 + 5-hour Session #2026-05-03 logs.
+
+### D. Inventory Persistence (Hold Instead of Sell on Demotion)
+
+**Problem**: Today's demotion path sells held crypto immediately, paying taker fees both ways (sell now + buy back when re-activated). For symbols that demote+re-activate frequently, this is pure round-trip cost.
+
+**Proposed**: Add `demotion_hold_inventory_seconds: float` setting. When > 0, demoted crypto sits in place for that duration. If symbol re-activates within window, no setup cost. If window expires, sell normally.
+
+**Trade-off**: Capital tied up in crypto that may keep falling. Combine with momentum filter — only enable hold during sideways/uptrend conditions. The Session #19 mark-to-market disaster (-$571 actual portfolio change despite +$3,863 paper profit) is the warning case: blindly holding inventory in falling markets is worse than selling.
+
+**When to ship**: After A+B+C have a measurable session, if churn is still the dominant cost driver. Implementation requires a "hold queue" tracker + integration with momentum filter.
+
+### E. Quiet-Pair Lockout
+
+**Problem**: Some `(symbol, buy_ex, sell_ex)` tuples activate repeatedly without producing matching trade volume. The same pair keeps cycling through activate→trade-rarely→demote.
+
+**Proposed**: Track per `(sym, buy, sell)` over rolling 4h window:
+- Activations count
+- Trades within those activations count
+- If activations ≥ 3 AND trades < 5 → lockout that pair for 4h
+
+Targets the specific "activate → no trades → demote" pattern at the per-pair level.
+
+**Implementation**: Per-pair counters keyed by `f"{sym}:{buy}:{sell}"`. Can piggyback on existing `_demotion_history` infrastructure.
+
+### F. Auto-Downgrade on Session Deficit
+
+**Problem**: A config in deep session deficit (>$5 net negative for 2+ hours) keeps trading aggressively, deepening the loss.
+
+**Proposed**: Feedback loop — when session net P&L < -$5 for 2+ hours, auto-switch regime to MORE conservative:
+- Double `regime_weak_min_net_multiplier`
+- Move all `neutral_hours` to `weak_hours`
+- Move 50% of `strong_hours` to `neutral_hours`
+
+Auto-revert when session P&L recovers above -$2.
+
+**Trade-off**: Risk of over-conservatism if one bad hour shapes the whole day. Need careful hysteresis. Could conflict with per-config regime profiles the operator explicitly chose.
+
+**When to ship**: If even with regime gating + A+B+C, configs still deep-deficit during weekday tests. Probably needs dashboard UI to opt configs in/out.
+
+### G. Batched Rebalancing
+
+**Problem**: Each demotion's USDT goes to the custody hub in N separate transfers (one per source exchange). Each transfer has its own fee (even if cheap).
+
+**Proposed**: Collect all "USDT to be moved to custody hub" into a single planning pass. Choose the cheapest network globally. Combine adjacent transfers where possible.
+
+**Estimated impact**: ~30% reduction in transfer fee count (not amount). NOT the dominant bottleneck — fee-per-trade ratio dominates, not fee-count optimization.
+
+**When to ship**: After A+B+C reduce fee waste meaningfully but residual count optimization still has measurable impact (likely a low-priority polish item).
+

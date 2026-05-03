@@ -3,6 +3,9 @@
 ## Project Start Date
 2026-02-22
 
+## Current Version
+**v0.31.0-beta** — Multi-config orchestrator architecture. See the **v0.31.0-beta — Multi-Config Architecture** section near the bottom of this file for the canonical reference. Earlier sections describe the original single-config bot — most facts (exchange list, fees, symbol tiers, fetcher details, slippage simulation, anomaly logic, fee management) still apply per-config in v0.31, but anything that says "the bot does X" should be read as "each config's bundle does X" in multi-config mode.
+
 ## Instructions
 - Never run `git checkout` or `git commit` commands without my confirmation.
 - Always use `read_xlsx.py` when reading a xlsx output file.
@@ -1496,5 +1499,204 @@ Detailed reference documents in `documentations/`:
 - **Async:** asyncio + websockets library
 - **Dashboard:** React 18 + TypeScript + Vite + Tailwind CSS + react-router-dom (HashRouter) + recharts
 - **Data:** CSV snapshots per exchange per symbol (1s intervals)
-- **Architecture:** BaseFetcher with exchange-specific subclasses, ArbitrageMonitor reads all fetcher states, SymbolOptimizer handles symbol discovery/rotation/scoring, BalanceTracker simulates capital management
-- **Output:** Real-time dashboard + XLSX export + console arbitrage table
+- **Architecture (v0.31+):** Multi-config orchestrator drives a round-robin sweep across N per-config bundles. Each bundle owns its own BalanceTracker / ArbitrageMonitor / SymbolOptimizer / FeeManager / HedgeManager. Shared resources: BaseFetchers (9 exchanges), ExchangeInfoManager, FundingMonitor, VolumeFetcher, DemoFetcher, DashboardServer, StateManager.
+- **Output:** Real-time dashboard + XLSX export + per-config bot logs
+
+---
+
+## v0.31.0-beta — Multi-Config Architecture (current version)
+
+The bot runs **N independent strategy configs in parallel** against the same live market data. The operator can A/B/C/… test variations simultaneously and compare results within a single session. Each config has its own balances, trades, P&L, anomaly state, hedge state. Fetchers, funding, exchange info, and the dashboard auth server are shared.
+
+### Per-config registry (`settings.json` schema_version=2)
+
+```json
+{
+  "schema_version": 2,
+  "shared": {
+    "execution_mode": "simulation",
+    "hedge_execution_mode": "simulation",
+    "ip_whitelist_enabled": false,
+    "ip_whitelist": [],
+    "transfer_configs": {...},
+    "super_primary_config_id": "<uuid>"
+  },
+  "groups": [
+    {
+      "id": "<uuid>",
+      "name": "Group 1",
+      "initial_capital": 1000.0,
+      "order": 0,
+      "configs": [
+        {
+          "id": "<uuid>",
+          "name": "Config 1",
+          "description": "",
+          "is_primary": true,
+          "is_default": true,
+          "order": 0,
+          "settings": { /* all per-config keys */ }
+        }
+      ]
+    }
+  ]
+}
+```
+
+`config_registry.py` owns `Config` / `ConfigGroup` / `ConfigRegistry` dataclasses + persistence. v1 → v2 auto-migrates on first startup.
+
+### Super-primary config (only one)
+
+Exactly one config across the registry is flagged super-primary. The super-primary is the **only** config that:
+- May use non-simulation `execution_mode` (`demo` / `demo_only` / `live`)
+- May use non-simulation `hedge_execution_mode` (`testnet` / `live`)
+- Holds REAL Binance Futures positions
+
+Every other config is force-locked at construction time to `simulation` mode regardless of what's in its settings. Stale per-config settings can never accidentally route real orders.
+
+### Orchestrator sweep (`orchestrator.py`)
+
+Round-robin sequential sweep replaces the per-component task graph from v0.30 and earlier. One `Orchestrator.run()` task drives all configs:
+
+```python
+while running:
+    sweep_prices = build_sweep_prices(fetchers, symbols, globally_allowed)
+    for bundle in bundles:
+        bundle.optimizer.tick_once()
+        bundle.monitor.tick_once()
+        await asyncio.sleep(0)  # yield to broadcast/state-save/fetchers
+    await asyncio.sleep(remaining_to_1s)
+```
+
+`ConfigContextVar` tags every log line with `[Group X][Config Y]`. `CapacityMonitor` warns when avg sweep_ms exceeds the budget.
+
+### Per-sweep optimization stack
+
+Stacked optimizations (each independently shippable, ordered by impact):
+
+1. **Globally-allowed price filter** (`tick_cache.py:build_sweep_prices`) — skips `(symbol, exchange)` cells where NO config can act as buyer or seller. Cache invalidates only when fee_manager state changes (`_version` counter on FeeManager). Saves ~10-15% of cells when many low-volume pairs are auto-disabled across all configs.
+2. **Pre-built shared `exchange_prices`** — built once per sweep. Each config reads via `tick_cache.filter_for_config()` instead of calling `fetcher.get_state()` independently. Eliminates ~25K redundant lookups/sweep at 48 configs.
+3. **Pre-parsed order book floats** — `_parse_levels()` converts `[(price_str, qty_str), ...]` to `[(price_f, qty_f), ...]` once per sweep. Slippage walkers skip per-call string parsing.
+4. **Slippage memoization** (`slippage._SWEEP_CACHE`) — repeated `(book, size)` walks return cached results. ~95% hit rate observed.
+5. **Optimizer incremental aggregates** — `_compute_scores` was 4 linear scans over the rolling tick deque per symbol. Now O(1) per symbol via `_agg_total` / `_agg_sum_net` / `_agg_prof_count` / `_agg_prof_sum` updated at append/popleft sites. The `best_net` is tracked via a **monotonic max-deque** (`_best_net_dq`) — front always has the current max; O(1) read; no stale-recompute path.
+6. **`@dataclass(slots=True)`** on `SymbolTick`, `SymbolScore`, `SlippageResult` — high-allocation rate dataclasses. Per-instance ~75% memory reduction (no `__dict__` overhead). Fewer GC tracking objects.
+7. **GC tuning** (`run.py`) — `gc.set_threshold(700, 100, 100)` raises gen2 threshold 10× to reduce stop-the-world pause frequency.
+8. **Async file logging** — `QueueHandler` + `QueueListener` + daemon thread move all file I/O off the main event loop. `ConfigPrefixFilter` runs synchronously on enqueue so per-config tagging works correctly.
+
+### Per-config state persistence
+
+- `state/index.json` — registry tree (groups + configs metadata, primary/default/super-primary flags). Always saved.
+- `state/configs/{group_id}/{config_id}/session.json` — per-config state (balance, monitor, optimizer, fee, hedge, anomaly). Saved only when `cfg._dirty` is True. Dirty flag triggers: trade fired, transfer fired, active_symbols changed.
+- `state/uptime.json`, `state/proxy_uptime.json`, `state/funding_history.json`, `state/auto_disable_volumes.json` — shared.
+
+`Orchestrator.periodic_save_loop` saves dirty configs every 60s, spaced with `await asyncio.sleep(0)` between fsyncs.
+
+### Time-based regime gating (per-config)
+
+Each config has a UTC-hour profile:
+
+```json
+"regime_gating_enabled": true,
+"regime_strong_hours": [7, 15, 20, 21, 22],
+"regime_neutral_hours": [0, 1, 5, 6, 8, 9, 11],
+"regime_weak_min_net_multiplier": 2.0,
+"regime_weak_disable_rebalance": true,
+"regime_weak_disable_demote": true,
+"regime_weak_disable_expand": true
+```
+
+Hours not in `strong_hours` or `neutral_hours` default to **WEAK**. STRONG and NEUTRAL trade normally; WEAK applies the multiplier + suppresses rebalances/demotions/expansions. Operator-configurable per config so aggressive configs trade most hours while conservative configs idle through thin windows.
+
+Pattern from 9-day Session #19 analysis (excluding outlier ARUSDT day):
+- **Best arb hours**: 07 UTC ($0.80/trade avg), 20 UTC ($0.51), 22 UTC ($0.37), 15 UTC ($0.37) — asynchronous market handovers create dislocations.
+- **Worst arb hours**: 10 UTC ($0.07), 13 UTC ($0.07), 16 UTC ($0.08), 12 UTC ($0.09) — high competition / mid-day liquidity tightens spreads.
+
+UI: `ConfigEditModal` has a "Schedule (UTC)" tab with a 24-hour click-to-cycle grid.
+
+Settings: `monitor._effective_min_net_profit_pct()` returns `min_net × multiplier` during weak hours. `monitor._should_rebalance` returns `(False, "regime_weak ...")` during weak. `optimizer._evaluate_demotions` and `_auto_expand_on_understaff_tick` early-return during weak.
+
+### Anti-churn settings (per-config, complement regime gating)
+
+Three independent gates against the activate→trade-rarely→demote→re-activate fee bleed pattern:
+
+#### A. Demotion-frequency cooldown scaling
+
+`demotion_freq_scaling_enabled: bool` (default true). Tracks per-symbol 24h rolling demotion timestamps. Scales cooldown geometrically:
+
+| 24h demotions | Cooldown |
+|---|---|
+| 1 | 1× base (~25min default) |
+| 2 | 2× |
+| 3 | 4× |
+| 4+ | 8× (capped, ~3.3h) |
+
+A symbol that keeps churning self-locks for the day. 24h window auto-resets so yesterday's bad run gets a fresh chance.
+
+#### B. Quiet-period pause
+
+`quiet_period_pause_minutes: float` (default 0 = disabled). When > 0, after that many minutes without a trade, the bot suppresses:
+- `replenish_trading_float`
+- `_consolidate_trading_float_overflow`
+- `_reevaluate_dominant_pairs` reallocations
+- Rebalance gates (`_should_rebalance` returns False)
+
+Resets on first trade. Per-config so aggressive configs (low value) keep trying while conservative (high value) idle through dead windows.
+
+#### C. Activation profitability bar
+
+`activation_profit_horizon_multiplier: float` (default 2.0 = legacy). Applied on top of `reallocation_cost_horizon` for SETUP costs only:
+
+```
+required_est_hourly = setup_cost / (reallocation_cost_horizon × activation_profit_horizon_multiplier)
+```
+
+Higher = stricter. Reallocations between already-active exchanges keep using the base horizon since inventory is already in place.
+
+### Multi-config bug fixes (v0.31.0-beta)
+
+Several silent bugs from the v0.30 → v0.31 transition where the dashboard's `self._monitor`/`self._optimizer`/etc. only operated on the SELECTED config:
+
+1. **`update_profit_state` per-config** — deficit gate (`_rotation_budget_ok`) now updates per-bundle in the broadcast loop. Pre-fix, 53/54 configs traded as if always profitable.
+2. **`_anomaly.update_portfolio_value` per-config** — drawdown peak ratcheting + Layer A/B emergency gates + per-symbol drawdown blocks now evaluate per-bundle. Pre-fix, only the selected config had functional anomaly protection.
+3. **`_rescale_trade_amount` per-config** — auto-scale via `trade_amount_pct` now rescales each bundle's `monitor._trade_amount` + `optimizer._trade_amount` based on its own portfolio value. Pre-fix, only the selected config rescaled.
+4. **Selected-config fallback on remove/restart** — `config_remove`, `config_remove_group`, `config_restart`, `config_restart_all` now repoint `self._monitor`/etc. when the selected config is torn down. Pre-fix, dashboard read from torn-down components.
+
+### Realized-peak basis-change reset
+
+`AnomalyProtection.reset_peak_on_basis_change()` now resets BOTH the combined peak AND `_peak_realized_value`. Called from `optimizer._complete_discovery` after `balance.reconfigure(allocations)` runs. Pre-fix, `_initial_investment` would recompute from new allocation sum (basis change) but realized peak stayed anchored to old basis → Layer A misread basis change as 75% drawdown emergency (observed 2026-05-03 21:03 trace, Group 4 / Diverse with $0.14 actual P&L).
+
+### Auto-disable hourly cadence (v0.31)
+
+Was once-per-UTC-day at 00:01 UTC. Now fires every hour (`now - last_run_ts >= 3600s`) because 24h volumes shift fast — operator observed JUP volume jump 100× ($205 → $25.6K) within minutes. Forced startup run preserved for restart-during-day. Each per-config bundle uses ITS OWN `auto_disable_volume_threshold_usd` (recomputed inside `_apply_auto_disable_to_other_configs` and `_apply_auto_disable_to_all_configs`) — so a $10k-capital config with $100k threshold blocks more pairs than a $1k-capital config with $10k threshold, against the same volumes snapshot.
+
+### Comprehensive diagnostics (per-minute log lines)
+
+Six diagnostic streams emitted once per minute by the orchestrator + dashboard:
+
+- **`[Capacity]`** — `sweep_avg / last / p95`, build_prices time, per_cfg breakdown (opt/mon), yield, configs/dirty/trades/transfers/watchlist/rotations, ticks_total/max, gen2_collections, heap_mb, gc_objects, gc counts, thresh
+- **`[SlowConfigs]`** — top 5 + bot 3 configs by avg `optimizer.tick_once` time
+- **`[Heap]`** — top 10 Python object types by count + counts of key dataclasses (SymbolTick / SymbolScore / SlippageResult / SimulatedTrade / Transfer)
+- **`[Tasks]`** — `len(asyncio.all_tasks())` (detects task leaks)
+- **`[Fetcher]`** — per-fetcher: WS connected status, `state` size, `latency_samples` size, last-data age
+- **`[Broadcast]`** — `_build_state` time, `json.dumps` time, payload KB, clients, log entries, top sections breakdown
+- **`[CSV]`** — per-fetcher: avg snapshot write time
+- **`[State]`** — per save: build/save/total time, avg payload KB
+
+### Bounded collections (memory safety)
+
+Several previously-unbounded collections that grew per-tick or per-trade:
+
+| Collection | Was | Now |
+|---|---|---|
+| `monitor._trades` | unbounded list | `deque(maxlen=5000)` + `_cumulative_pnl` / `_cumulative_trade_count` survive eviction |
+| `monitor._all_observations` | unbounded list (~5K appends/sec) | **REMOVED** (was never read for any logic) |
+| `monitor._config_history` | unbounded list (1/300 ticks/config) | `deque(maxlen=500)` |
+| `WatchlistEntry.score_samples` | unbounded list | trimmed to 60 on append |
+| `DashboardLogHandler._all_entries` | unbounded list | `deque(maxlen=50000)` |
+| `optimizer._best_net` + `_best_net_stale` | grew with deque size | replaced by monotonic max-deque (O(1) always) |
+
+### Capacity behavior at scale
+
+At 54 configs on local 8c/16t: sweep ramps from ~50ms (startup) to ~600-800ms steady state over the first 30-90 minutes (deque saturation). Peak transients up to ~1800ms during mass-event windows (e.g. 04:00 UTC funding settlement triggers ~150 transfers in 1 minute across configs). Heap plateaus at ~1.3 GB. After the saturation transition, sweep stays in the 500-700ms range for hours.
+
+For 1 vCPU VPS deployment, drop to 6-12 configs to stay under 1500ms steady state with realistic safety margin. Live trading exposes network latency the sim doesn't model — fewer configs gives the bot enough headroom to make sim ↔ live correspondence tight.
