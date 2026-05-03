@@ -10,7 +10,7 @@ import asyncio
 import logging
 import random
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -162,8 +162,46 @@ class ArbitrageMonitor:
         self._net_pct_sizing_enabled: bool = net_pct_sizing_enabled
         self._net_pct_multiplier_cap: float = net_pct_multiplier_cap
 
+        # Quiet-period pause: when no trade has fired for N minutes, the
+        # bot's replenish/overflow/reallocation logic still runs, paying
+        # transfer fees that aren't matched by trade revenue. This setting
+        # gates those costs: 0 = disabled (current behavior), > 0 = pause
+        # all rebalance-class transfers after that many minutes without
+        # a trade. Auto-resumes the moment a trade fires. Per-config so
+        # aggressive configs (low quiet_period_minutes) keep trying while
+        # conservative configs (high) stop wasting on dead windows.
+        self._quiet_period_pause_minutes: float = 0.0  # 0 = disabled
+        self._last_trade_ts: float = 0.0  # set on every successful trade
+
+        # Time-based regime gating (v0.31). Each UTC hour 0-23 maps to one
+        # of three regimes: STRONG, NEUTRAL, or WEAK (any hour not in
+        # strong or neutral defaults to weak).
+        # - STRONG / NEUTRAL: full activity, base thresholds
+        # - WEAK: tightened — `min_net_profit_pct *= weak_min_net_multiplier`
+        #   plus optional gates blocking rebalances/demotions/expansions.
+        # Operator-configurable per config so different configs can have
+        # different active windows (e.g., aggressive configs trade more
+        # hours, conservative configs idle through thin windows).
+        # Default off (regime_gating_enabled=False) — backward-compatible.
+        # When off, behavior matches the pre-regime path exactly.
+        self._regime_gating_enabled: bool = False
+        self._regime_strong_hours: set[int] = {7, 15, 20, 21, 22}
+        self._regime_neutral_hours: set[int] = {0, 1, 5, 6, 8, 9, 11}
+        self._regime_weak_min_net_multiplier: float = 2.0
+        self._regime_weak_disable_rebalance: bool = True
+        self._regime_last_logged_regime: str = ""  # track transitions for logging
+
         self._optimizer: "SymbolOptimizer | None" = None
-        self._trades: list[SimulatedTrade] = []
+        # Bounded deque (maxlen=5000) — pre-fix this was an unbounded list
+        # despite CLAUDE.md claiming the cap. At 48 configs the per-tick
+        # `sum(t.profit_usd for t in self._trades)` in get_net_profit_stats()
+        # AND in _should_rebalance() became the dominant slow-growth source
+        # after the optimizer aggregates fix. Now bounded; we ALSO track
+        # `_cumulative_pnl` incrementally so totals don't reset when older
+        # trades evict from the deque.
+        self._trades: deque[SimulatedTrade] = deque(maxlen=5000)
+        self._cumulative_pnl: float = 0.0
+        self._cumulative_trade_count: int = 0
         self._low_profit_skips: int = 0
         self._start_time: float = 0.0
         self._tick_count: int = 0
@@ -173,8 +211,12 @@ class ArbitrageMonitor:
         self._net_pnl_gate_grace_seconds: int = 1800
         self._rebalance_roi_divisor: int = 3
 
-        # Configuration history tracking
-        self._config_history: list[ConfigSnapshot] = []
+        # Configuration history tracking — bounded deque(maxlen=500).
+        # `record_config_snapshot("adaptive_update")` fires every 300
+        # ticks (5 min) regardless of trade activity, so this grows
+        # over time even when nothing else does. 500 entries = ~41
+        # hours of snapshots, more than the broadcast's UI needs.
+        self._config_history: deque[ConfigSnapshot] = deque(maxlen=500)
 
         # Hourly/daily P&L tracking (persisted across restarts)
         # Key: "YYYY-MM-DD_HH" -> {"pnl": float, "trades": int}
@@ -190,10 +232,6 @@ class ArbitrageMonitor:
         # Backoff after try_rebalance returns empty (no viable transfers).
         # Key: miss_key → (next_retry_time, current_backoff_seconds)
         self._rebalance_empty_backoff: dict[str, tuple[float, float]] = {}
-
-        # Track all spread observations (even non-profitable) per symbol
-        # Each entry: (spread_pct, fee_pct, net_pct, buy_ex, sell_ex)
-        self._all_observations: list[tuple[str, float, float, float, str, str]] = []
 
         # Data freshness tracking
         self._stale_skips: dict[str, int] = defaultdict(int)
@@ -336,11 +374,21 @@ class ArbitrageMonitor:
         self._daily_pnl[day_key]["trades"] += 1
 
     def _output(self, text: str) -> None:
-        """Print to console and append to log file."""
+        """Print to console and append to log file.
+
+        v0.31.0-beta+: when `_log_file` isn't configured (the multi-config
+        default — orchestrator passes `log_file=None`), skip both the
+        print() and the file write. The dashboard is the primary view,
+        and stdout flooding at 48 configs × per-tick prints was both
+        making the terminal unreadable and adding I/O contention. The
+        per-config `[Session]` and `[Balance] Snapshot` log lines via
+        the standard logger already capture equivalent info.
+        """
+        if not self._log_file:
+            return
         print(text)
-        if self._log_file:
-            with open(self._log_file, "a") as f:
-                f.write(text + "\n")
+        with open(self._log_file, "a") as f:
+            f.write(text + "\n")
 
     def _emergency_sell_all(self) -> None:
         """Emergency: sell all crypto positions to USDT."""
@@ -469,9 +517,13 @@ class ArbitrageMonitor:
     def get_net_profit_stats(self) -> dict:
         """Compute rolling hourly net profit stats."""
         now = time.time()
-        elapsed_hours = max((now - self._start_time) / 3600, 1 / 3600) if self._start_time else 1 / 3600
+        elapsed_seconds = (now - self._start_time) if self._start_time else 0.0
 
-        trading_pnl = sum(t.profit_usd for t in self._trades)
+        # O(1) read from incremental aggregate (was a full scan of an
+        # unbounded list — at 48 configs called per-tick from broadcast,
+        # this was the largest remaining slow-growth source after the
+        # optimizer aggregates + score_samples fixes).
+        trading_pnl = self._cumulative_pnl
         transfer_fees = self._balance.total_transfer_fees if self._balance else 0.0
         credited_cashback = (
             self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
@@ -481,7 +533,11 @@ class ArbitrageMonitor:
         )
         net_profit = trading_pnl - transfer_fees + credited_cashback
 
-        # Rolling 1-hour window
+        # Rolling 1-hour window — `self._trades` is now bounded at 5000,
+        # so the scan is O(min(5000, N)) instead of O(N) growing forever.
+        # The transfers scan was similarly unbounded; we use the running
+        # `total_transfer_fees` as an approximation (loses time-window
+        # precision but matches the displayed "Net Total" semantics).
         one_hour_ago = now - 3600
         recent_profit = sum(t.profit_usd for t in self._trades if t.timestamp >= one_hour_ago)
         recent_fees = sum(
@@ -490,7 +546,16 @@ class ArbitrageMonitor:
         )
 
         hourly_net = recent_profit - recent_fees
-        session_hourly_rate = net_profit / elapsed_hours
+        # Suppress only the most extreme early-session noise:
+        #   - No trades yet → setup-time transfer fees extrapolate to
+        #     misleading rates over near-zero elapsed time.
+        #   - Less than 60 seconds elapsed → just give it a minute.
+        # Operator wants $/hr visible quickly, so keep the floor short.
+        WARMUP_SECONDS = 60.0
+        if len(self._trades) == 0 or elapsed_seconds < WARMUP_SECONDS:
+            session_hourly_rate = 0.0
+        else:
+            session_hourly_rate = net_profit / (elapsed_seconds / 3600)
 
         referrer_earnings = (
             self._fee_manager._total_referrer_earnings
@@ -510,6 +575,51 @@ class ArbitrageMonitor:
             "referrer_earnings_total": round(referrer_earnings, 4),
         }
 
+    def in_quiet_period(self) -> bool:
+        """True when no trade has fired for `quiet_period_pause_minutes`.
+
+        Used to gate rebalance/reallocation/replenish/overflow logic so
+        the bot doesn't pay transfer fees during dead windows that won't
+        produce trades. The first trade after a quiet period resets the
+        timer immediately. Setting `quiet_period_pause_minutes=0` (default)
+        disables the gate entirely.
+        """
+        if self._quiet_period_pause_minutes <= 0:
+            return False
+        # No trades yet AND start_time elapsed > pause threshold → quiet
+        ref = self._last_trade_ts if self._last_trade_ts > 0 else self._start_time
+        if ref <= 0:
+            return False
+        elapsed = time.time() - ref
+        return elapsed > (self._quiet_period_pause_minutes * 60.0)
+
+    def _current_regime(self) -> str:
+        """Return 'strong', 'neutral', or 'weak' for the current UTC hour.
+
+        When regime_gating_enabled is False, always returns 'strong' so
+        all gates remain open (backward-compatible). Strong and neutral
+        behave identically for execution; only WEAK applies restrictions.
+        Hours not listed in strong_hours or neutral_hours fall to weak.
+        """
+        if not self._regime_gating_enabled:
+            return "strong"
+        h = time.gmtime().tm_hour
+        if h in self._regime_strong_hours:
+            return "strong"
+        if h in self._regime_neutral_hours:
+            return "neutral"
+        return "weak"
+
+    def _effective_min_net_profit_pct(self) -> float:
+        """Apply regime multiplier to the base threshold. Weak hours get
+        a higher floor so marginal opportunities are skipped during thin
+        market windows."""
+        if not self._regime_gating_enabled:
+            return self._min_net_profit_pct
+        if self._current_regime() == "weak":
+            return self._min_net_profit_pct * self._regime_weak_min_net_multiplier
+        return self._min_net_profit_pct
+
     def _should_rebalance(self, buy_ex: str, sell_ex: str) -> tuple[bool, str]:
         """Check if rebalancing is worthwhile based on ROI and net P&L.
 
@@ -518,12 +628,31 @@ class ArbitrageMonitor:
         if not self._balance or not self._adaptive_mode:
             return True, ""
 
+        # Regime gate: block rebalances during weak hours (saves transfer
+        # fees during thin spread windows). The bot can still trade
+        # existing positions but won't pay setup costs to chase new ones.
+        if (
+            self._regime_gating_enabled
+            and self._regime_weak_disable_rebalance
+            and self._current_regime() == "weak"
+        ):
+            return False, "regime_weak (no rebalance during thin hours)"
+
+        # Quiet-period gate: when no trade has fired for the configured
+        # pause window, suppress rebalance attempts. Transfer fees during
+        # quiet windows aren't matched by trade volume — pure cost.
+        if self.in_quiet_period():
+            return False, (
+                f"quiet_period (no trades for "
+                f"{self._quiet_period_pause_minutes:.0f}m)"
+            )
+
         # Block when net P&L is negative (after warm-up: trades + grace period)
         warmup_trades = getattr(self, "_net_pnl_gate_warmup_trades", 10)
         grace_seconds = getattr(self, "_net_pnl_gate_grace_seconds", 1800)
         elapsed = time.time() - self._start_time if self._start_time else 0
-        if len(self._trades) >= warmup_trades and elapsed >= grace_seconds:
-            trading_pnl = sum(t.profit_usd for t in self._trades)
+        if self._cumulative_trade_count >= warmup_trades and elapsed >= grace_seconds:
+            trading_pnl = self._cumulative_pnl
             credited_cb = (
                 self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
             )
@@ -690,7 +819,11 @@ class ArbitrageMonitor:
 
     def record_config_snapshot(self, reason: str) -> None:
         """Record current configuration state for history tracking."""
-        recent = self._trades[-100:] if self._trades else []
+        # deque doesn't support [-100:] slicing — use itertools.islice or
+        # convert via list. Since this is rare (settings save / periodic),
+        # the list copy cost is negligible.
+        n = len(self._trades)
+        recent = list(self._trades)[-100:] if n else []
         sizes = [t.trade_amount for t in recent if t.trade_amount > 0]
         self._config_history.append(ConfigSnapshot(
             timestamp=time.time(),
@@ -1293,7 +1426,6 @@ class ArbitrageMonitor:
             self._rebalance_roi_horizon = rebalance_roi_horizon
 
         # Reset per-cycle operational state only
-        self._all_observations.clear()
         self._low_profit_skips = 0
         self._stale_skips.clear()
         self._fresh_samples.clear()
@@ -1322,8 +1454,57 @@ class ArbitrageMonitor:
             f"(cumulative: {len(self._trades)} trades, tick #{self._tick_count})"
         )
 
+    def tick_once(self) -> None:
+        """Single monitor tick (anomaly sync + trade scan).
+
+        Extracted from `run()` so the multi-config Orchestrator can drive
+        the tick rate directly. Calling this in a single-config setup is
+        equivalent to one iteration of the legacy while-loop body.
+        """
+        # First-tick init: `run()` used to seed `_start_time` on its first
+        # iteration, but the v0.31 Orchestrator drives `tick_once()` directly
+        # and skips `run()`. Without this guard, `_start_time` stays at 0
+        # forever for fresh-state bundles, which makes `elapsed_seconds=0`
+        # in `get_net_profit_stats()` (so Net $/hr is always $0.00 via the
+        # 5-min warmup gate) and `trades_per_minute=0.0` in the dashboard
+        # payload (because `start_t > 0` is False). Restored bundles get
+        # `_start_time` from state — leave that path untouched.
+        if not self._start_time:
+            self._start_time = time.time()
+
+        # Anomaly protection: sync pause state
+        if self._anomaly.should_block_trading:
+            if not self._anomaly_paused:
+                self._anomaly_paused = True
+                logger.warning("[Monitor] Anomaly protection activated, trading paused")
+                # Phase E: tell hedge manager to stop opening new hedges.
+                # Existing hedges keep tracking inventory and can still close.
+                if self._hedge_manager is not None:
+                    self._hedge_manager.on_safety_pause(reason=self._anomaly._pause_reason or "anomaly")
+        elif self._anomaly_paused:
+            self._anomaly_paused = False
+            logger.info("[Monitor] Anomaly protection cleared, resuming trading")
+            # Phase E: hedge manager should re-evaluate / reconcile after resume
+            if self._hedge_manager is not None:
+                self._hedge_manager.on_safety_resume()
+
+        # Phase E: also propagate manual-stop state to hedge manager
+        if self._hedge_manager is not None:
+            if self._manual_stopped and not self._hedge_manager._safety_paused:
+                self._hedge_manager.on_safety_pause(reason="manual_stop")
+            elif not self._manual_stopped and not self._anomaly_paused and self._hedge_manager._safety_paused:
+                # Both anomaly and manual-stop are clear → resume
+                self._hedge_manager.on_safety_resume()
+
+        if not self._paused and not self._anomaly_paused and not self._manual_stopped:
+            self._tick()
+
     async def run(self) -> None:
-        """Main loop: periodically scan prices, simulate trades, print table."""
+        """Main loop: periodically scan prices, simulate trades, print table.
+
+        Used by the legacy single-component setup. The multi-config
+        Orchestrator drives `tick_once()` directly and skips this wrapper.
+        """
         self._running = True
         if not self._start_time:
             self._start_time = time.time()
@@ -1334,32 +1515,7 @@ class ArbitrageMonitor:
         )
 
         while self._running:
-            # Anomaly protection: sync pause state
-            if self._anomaly.should_block_trading:
-                if not self._anomaly_paused:
-                    self._anomaly_paused = True
-                    logger.warning("[Monitor] Anomaly protection activated, trading paused")
-                    # Phase E: tell hedge manager to stop opening new hedges.
-                    # Existing hedges keep tracking inventory and can still close.
-                    if self._hedge_manager is not None:
-                        self._hedge_manager.on_safety_pause(reason=self._anomaly._pause_reason or "anomaly")
-            elif self._anomaly_paused:
-                self._anomaly_paused = False
-                logger.info("[Monitor] Anomaly protection cleared, resuming trading")
-                # Phase E: hedge manager should re-evaluate / reconcile after resume
-                if self._hedge_manager is not None:
-                    self._hedge_manager.on_safety_resume()
-
-            # Phase E: also propagate manual-stop state to hedge manager
-            if self._hedge_manager is not None:
-                if self._manual_stopped and not self._hedge_manager._safety_paused:
-                    self._hedge_manager.on_safety_pause(reason="manual_stop")
-                elif not self._manual_stopped and not self._anomaly_paused and self._hedge_manager._safety_paused:
-                    # Both anomaly and manual-stop are clear → resume
-                    self._hedge_manager.on_safety_resume()
-
-            if not self._paused and not self._anomaly_paused and not self._manual_stopped:
-                self._tick()
+            self.tick_once()
             await asyncio.sleep(MONITOR_INTERVAL_SECONDS)
 
         logger.info("[Monitor] Simulation stopped")
@@ -1467,71 +1623,97 @@ class ArbitrageMonitor:
         # Track per-exchange data age for this tick's display
         tick_age_lists: dict[str, list[float]] = defaultdict(list)
 
+        # v0.31.0-beta+: read from the orchestrator's per-sweep prices cache
+        # if one is set. Same primitives as `optimizer._score_tick` — sharing
+        # the cache avoids 60-symbol × 9-fetcher state lookups per config.
+        from tick_cache import get_sweep_prices, filter_for_config_full
+        sweep_prices = get_sweep_prices()
+
         for symbol in self._symbols:
             exchange_prices: list[tuple[str, float, float]] = []
             # Per-exchange data age for this symbol (for trade metadata)
             symbol_ex_age: dict[str, float] = {}
 
-            for fetcher in self._fetchers:
-                if fetcher.exchange_name not in self._active_exchanges:
-                    continue
-                state = fetcher.get_state()
-                ps = state.get(symbol)
-                if ps is None or not ps.bid or not ps.ask:
-                    continue
-
-                # Check data freshness
-                if ps.received_at > 0:
-                    age = now - ps.received_at
-                    symbol_ex_age[fetcher.exchange_name] = age
-                    tick_age_lists[fetcher.exchange_name].append(age)
-
-                    # Track running stats for summary report
-                    self._exchange_age_sum[fetcher.exchange_name] += age
-                    self._exchange_age_count[fetcher.exchange_name] += 1
-                    if age > self._exchange_age_max[fetcher.exchange_name]:
-                        self._exchange_age_max[fetcher.exchange_name] = age
-
-                    # Skip stale data
-                    if age > MAX_DATA_AGE_SECONDS:
-                        self._stale_skips[fetcher.exchange_name] += 1
+            if sweep_prices is not None:
+                # Shared-cache fast path: read pre-built (ex, bid, ask, bid_qty,
+                # ask_qty, bids_f, asks_f, received_at) tuples and assemble
+                # the legacy 7-tuple format the rest of `_tick` consumes.
+                for ex, bid_f, ask_f, bid_qty_f, ask_qty_f, bids_f, asks_f, recv_at in (
+                    filter_for_config_full(sweep_prices, symbol, self._active_exchanges)
+                ):
+                    # Per-config age stats — same numbers, just sourced
+                    # from the shared cache's received_at column.
+                    if recv_at > 0:
+                        age = now - recv_at
+                        symbol_ex_age[ex] = age
+                        tick_age_lists[ex].append(age)
+                        self._exchange_age_sum[ex] += age
+                        self._exchange_age_count[ex] += 1
+                        if age > self._exchange_age_max[ex]:
+                            self._exchange_age_max[ex] = age
+                        if age > MAX_DATA_AGE_SECONDS:
+                            self._stale_skips[ex] += 1
+                            continue
+                        self._fresh_samples[ex] += 1
+                    # D-03: Round prices to tick size (corrects float imprecision)
+                    if self._exchange_info:
+                        from decimal import Decimal
+                        bid_f = float(self._exchange_info.round_price(
+                            ex, symbol, Decimal(str(bid_f))
+                        ))
+                        ask_f = float(self._exchange_info.round_price(
+                            ex, symbol, Decimal(str(ask_f))
+                        ))
+                    bid_depth = bid_f * bid_qty_f if bid_qty_f > 0 else float("inf")
+                    ask_depth = ask_f * ask_qty_f if ask_qty_f > 0 else float("inf")
+                    exchange_prices.append((ex, bid_f, ask_f, bid_depth, ask_depth, bids_f, asks_f))
+            else:
+                # Legacy single-config path: build per-tick from fetchers.
+                for fetcher in self._fetchers:
+                    if fetcher.exchange_name not in self._active_exchanges:
                         continue
-
-                    self._fresh_samples[fetcher.exchange_name] += 1
-
-                try:
-                    bid_f = float(ps.bid)
-                    ask_f = float(ps.ask)
-                except (ValueError, TypeError):
-                    continue
-
-                if bid_f <= 0 or ask_f <= 0:
-                    continue
-
-                # D-03: Round prices to tick size (corrects float imprecision)
-                if self._exchange_info:
-                    from decimal import Decimal
-                    bid_rounded = self._exchange_info.round_price(
-                        fetcher.exchange_name, symbol, Decimal(str(bid_f))
-                    )
-                    ask_rounded = self._exchange_info.round_price(
-                        fetcher.exchange_name, symbol, Decimal(str(ask_f))
-                    )
-                    bid_f = float(bid_rounded)
-                    ask_f = float(ask_rounded)
-
-                # Compute depth in USD at best bid/ask
-                try:
-                    bid_qty_f = float(ps.bid_qty) if ps.bid_qty else 0.0
-                    ask_qty_f = float(ps.ask_qty) if ps.ask_qty else 0.0
-                except (ValueError, TypeError):
-                    bid_qty_f = 0.0
-                    ask_qty_f = 0.0
-
-                bid_depth = bid_f * bid_qty_f if bid_qty_f > 0 else float("inf")
-                ask_depth = ask_f * ask_qty_f if ask_qty_f > 0 else float("inf")
-
-                exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, bid_depth, ask_depth, ps.bids, ps.asks))
+                    state = fetcher.get_state()
+                    ps = state.get(symbol)
+                    if ps is None or not ps.bid or not ps.ask:
+                        continue
+                    if ps.received_at > 0:
+                        age = now - ps.received_at
+                        symbol_ex_age[fetcher.exchange_name] = age
+                        tick_age_lists[fetcher.exchange_name].append(age)
+                        self._exchange_age_sum[fetcher.exchange_name] += age
+                        self._exchange_age_count[fetcher.exchange_name] += 1
+                        if age > self._exchange_age_max[fetcher.exchange_name]:
+                            self._exchange_age_max[fetcher.exchange_name] = age
+                        if age > MAX_DATA_AGE_SECONDS:
+                            self._stale_skips[fetcher.exchange_name] += 1
+                            continue
+                        self._fresh_samples[fetcher.exchange_name] += 1
+                    try:
+                        bid_f = float(ps.bid)
+                        ask_f = float(ps.ask)
+                    except (ValueError, TypeError):
+                        continue
+                    if bid_f <= 0 or ask_f <= 0:
+                        continue
+                    if self._exchange_info:
+                        from decimal import Decimal
+                        bid_rounded = self._exchange_info.round_price(
+                            fetcher.exchange_name, symbol, Decimal(str(bid_f))
+                        )
+                        ask_rounded = self._exchange_info.round_price(
+                            fetcher.exchange_name, symbol, Decimal(str(ask_f))
+                        )
+                        bid_f = float(bid_rounded)
+                        ask_f = float(ask_rounded)
+                    try:
+                        bid_qty_f = float(ps.bid_qty) if ps.bid_qty else 0.0
+                        ask_qty_f = float(ps.ask_qty) if ps.ask_qty else 0.0
+                    except (ValueError, TypeError):
+                        bid_qty_f = 0.0
+                        ask_qty_f = 0.0
+                    bid_depth = bid_f * bid_qty_f if bid_qty_f > 0 else float("inf")
+                    ask_depth = ask_f * ask_qty_f if ask_qty_f > 0 else float("inf")
+                    exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, bid_depth, ask_depth, ps.bids, ps.asks))
 
             if len(exchange_prices) < 2:
                 continue
@@ -1657,11 +1839,11 @@ class ArbitrageMonitor:
                             f"applied, still best)"
                         )
 
-                # Record observation (all, not just profitable)
-                self._all_observations.append((sym, spread, fee, net, buy_ex, sell_ex))
-
-                # Minimum net% threshold (scoring_net includes cashback weighting)
-                pair_min_net = self._min_net_profit_pct
+                # Minimum net% threshold (scoring_net includes cashback weighting).
+                # Apply regime multiplier — during WEAK UTC hours the threshold
+                # is raised so marginal opportunities are skipped to avoid
+                # transfer-fee overhead in thin market windows.
+                pair_min_net = self._effective_min_net_profit_pct()
 
                 # Simulate trade if profitable after cashback AND raw P&L is
                 # positive. The raw-net check (v0.30.5) prevents executing
@@ -1732,7 +1914,7 @@ class ArbitrageMonitor:
                             self._interval_size_skips += 1
                             miss_key = f"{sym}:{buy_ex}:{sell_ex}"
                             streak = self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
-                            if streak <= 3 or streak % 30 == 0:
+                            if streak == 1 or streak % 120 == 0:
                                 sym_score = self._optimizer.get_symbol_score(sym) if self._optimizer else None
                                 mult = sym_score.trade_multiplier if sym_score else 1.0
                                 score_val = sym_score.score if sym_score else 0.0
@@ -1750,7 +1932,7 @@ class ArbitrageMonitor:
                                 self._interval_balance_skips += 1
                                 miss_key = f"{sym}:{buy_ex}:{sell_ex}"
                                 streak = self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
-                                if streak <= 3 or streak % 30 == 0:
+                                if streak == 1 or streak % 120 == 0:
                                     logger.info(
                                         f"[Monitor] SKIP {sym} {buy_ex}->{sell_ex}: "
                                         f"insufficient balance (net={net:.4f}% size=${trade_size:.2f} "
@@ -1913,7 +2095,7 @@ class ArbitrageMonitor:
                             self._one_leg_sim_cost += unwind_cost
                             one_leg_flag = True
                             logger.info(
-                                f"[Trade] ONE_LEG_SIM #{len(self._trades)+1} {sym} "
+                                f"[Trade] ONE_LEG_SIM #{self._cumulative_trade_count + 1} {sym} "
                                 f"{buy_ex}->{sell_ex}: failed_leg={failed_leg} "
                                 f"unwind_cost=${unwind_cost:.4f} "
                                 f"adjusted_profit=${actual_profit:.4f}"
@@ -1944,6 +2126,11 @@ class ArbitrageMonitor:
                             one_leg_simulated=one_leg_flag,
                         )
                         self._trades.append(trade)
+                        # Incremental aggregates — survives deque eviction
+                        # so totals stay accurate after >5000 trades.
+                        self._cumulative_pnl += actual_profit
+                        self._last_trade_ts = time.time()  # quiet-period reset
+                        self._cumulative_trade_count += 1
                         self._record_trade_pnl(now, actual_profit)
                         self._anomaly.record_trade(now, sym, actual_profit, context={
                             "buy_ex": buy_ex, "sell_ex": sell_ex,
@@ -1952,7 +2139,7 @@ class ArbitrageMonitor:
                         qty = trade_size / ask_p if ask_p > 0 else 0.0
                         slip_str = f" slip={actual_slippage:.4f}%" if actual_slippage > 0 else ""
                         logger.info(
-                            f"[Trade] #{len(self._trades)} {sym} {buy_ex}->{sell_ex}: "
+                            f"[Trade] #{self._cumulative_trade_count} {sym} {buy_ex}->{sell_ex}: "
                             f"buy@${ask_p:.4f} sell@${bid_p:.4f} qty={qty:.4f} "
                             f"size=${trade_size:.2f} profit=${actual_profit:.4f} "
                             f"(net={net_adjusted:+.4f}%{slip_str})"
@@ -2037,7 +2224,7 @@ class ArbitrageMonitor:
 
                 # Periodically update estimated profit on balance + record config
                 if self._tick_count % 60 == 0 and self._balance and self._trades:
-                    recent_profits = [t.profit_usd for t in self._trades[-100:]]
+                    recent_profits = [t.profit_usd for t in list(self._trades)[-100:]]
                     avg_profit = sum(recent_profits) / len(recent_profits)
                     self._balance._estimated_profit_per_trade = max(0.005, avg_profit)
                 if self._adaptive_mode and self._tick_count % 300 == 0 and self._tick_count > 0:
@@ -2236,7 +2423,16 @@ class ArbitrageMonitor:
     def _print_table(self, dt: datetime,
                      rows: list[tuple[str, str, float, str, float, float, float, float, float]],
                      tick_ages: dict[str, float] | None = None) -> None:
-        """Print the live arbitrage + simulation table."""
+        """Print the live arbitrage + simulation table.
+
+        v0.31.0-beta+: legacy single-config console-table display from
+        the pre-dashboard era. In multi-config mode (`_log_file` is None)
+        the orchestrator runs 48+ configs and all that output would flood
+        stdout every tick. Short-circuit early to avoid both the print
+        AND the string-building work.
+        """
+        if not self._log_file:
+            return
         total_profit = sum(t.profit_usd for t in self._trades)
         total_trades = len(self._trades)
 
@@ -2477,10 +2673,11 @@ class ArbitrageMonitor:
         return {
             "trades": [asdict(t) for t in self._trades],
             "config_history": [asdict(c) for c in self._config_history],
+            "_cumulative_pnl": self._cumulative_pnl,
+            "_cumulative_trade_count": self._cumulative_trade_count,
             "_tick_count": self._tick_count,
             "_start_time": self._start_time,
             "_miss_streak": dict(self._miss_streak),
-            "_all_observations": self._all_observations[-100000:],
             "_low_profit_skips": self._low_profit_skips,
             "_stale_skips": dict(self._stale_skips),
             "_fresh_samples": dict(self._fresh_samples),
@@ -2527,16 +2724,28 @@ class ArbitrageMonitor:
 
     def from_state_dict(self, data: dict) -> None:
         """Restore session state from a saved dict."""
-        self._trades = [SimulatedTrade(**t) for t in data.get("trades", [])]
-        self._config_history = [
-            ConfigSnapshot(**c) for c in data.get("config_history", [])
-        ]
+        # Bounded deque(maxlen=5000) — old state files may have lists
+        # longer than this; the deque drops the oldest automatically.
+        loaded_trades = [SimulatedTrade(**t) for t in data.get("trades", [])]
+        self._trades = deque(loaded_trades, maxlen=5000)
+        # Restore aggregates if present (post-v0.31 state files); fall
+        # back to recomputing from the loaded trades for older files
+        # (the count is exact for trades currently in the deque, but
+        # the cumulative pnl is approximate when older trades were
+        # already evicted before the upgrade).
+        if "_cumulative_pnl" in data:
+            self._cumulative_pnl = float(data["_cumulative_pnl"])
+            self._cumulative_trade_count = int(data.get("_cumulative_trade_count", len(self._trades)))
+        else:
+            self._cumulative_pnl = sum(t.profit_usd for t in self._trades)
+            self._cumulative_trade_count = len(self._trades)
+        self._config_history = deque(
+            (ConfigSnapshot(**c) for c in data.get("config_history", [])),
+            maxlen=500,
+        )
         self._tick_count = data.get("_tick_count", 0)
         self._start_time = data.get("_start_time", 0.0)
         self._miss_streak = data.get("_miss_streak", {})
-        self._all_observations = [
-            tuple(obs) for obs in data.get("_all_observations", [])
-        ]
         self._low_profit_skips = data.get("_low_profit_skips", 0)
         self._stale_skips = defaultdict(int, data.get("_stale_skips", {}))
         self._fresh_samples = defaultdict(int, data.get("_fresh_samples", {}))

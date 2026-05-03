@@ -958,10 +958,18 @@ class BalanceTracker:
         is `trade_amount × trading_float_multiplier` — bounded by trade size,
         not capital.
 
+        v0.31+: `trading_float_multiplier == 0` is the explicit "disabled"
+        signal. When disabled, no float is maintained, no replenishment
+        ever fires, and overflow sweeping is also skipped. The other paths
+        (demotion via Bitfinex 0%, distribute, etc.) continue working.
+
         max_fee_per_source is accepted for backward compat but largely
         irrelevant when routing via Aptos $0.
         """
         if "Bitfinex" not in self._exchanges:
+            return []
+        # 0 = disabled. Explicit early return so the semantic is unmissable.
+        if self._trading_float_multiplier <= 0:
             return []
         hub = self._custody_hub_exchange
         if hub == "Bitfinex" or hub not in self._exchanges:
@@ -1643,8 +1651,17 @@ class BalanceTracker:
         Falls back to flat `prices` dict for any (exchange, symbol) missing
         from `prices_per_exchange`.
 
-        Includes spot USDT + spot crypto value + optional futures hedge
-        unrealized PnL.
+        Includes spot USDT + spot crypto value + in-transit USDT/crypto
+        (debited from source, not yet credited to destination — D-17 demo
+        mode network delay) + optional futures hedge unrealized PnL.
+
+        v0.31.0-beta+: in-transit funds MUST be counted. Without them,
+        a burst of USDT rebalances in demo mode reads as a phantom
+        portfolio drop equal to the in-flight total during the network-
+        delay window — observed in S31 with three back-to-back transfers
+        ($88+$114+$120) producing a momentary $321 phantom drop on a
+        $1000 portfolio (32%) that crossed the emergency drawdown
+        threshold and triggered a false sell-all.
         """
         total = sum(self.usdt.values())
         for ex in self._exchanges:
@@ -1654,6 +1671,17 @@ class BalanceTracker:
                     # Prefer per-exchange price; fall back to flat dict
                     p = ex_prices.get(sym) or prices.get(sym, 0.0)
                     total += qty * p
+        # In-transit funds: real money that's been debited from source
+        # but not yet credited to dest. USDT counts at face value; in-
+        # transit crypto is MTM-marked against the destination exchange's
+        # price (closest proxy, since that's where it's about to land).
+        for fund in self._in_transit:
+            if fund.asset == "USDT":
+                total += fund.amount
+            else:
+                ex_prices = (prices_per_exchange or {}).get(fund.to_exchange, {})
+                p = ex_prices.get(fund.asset) or prices.get(fund.asset, 0.0)
+                total += fund.amount * p
         total += hedge_pnl_usd
         return total
 

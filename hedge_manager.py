@@ -491,9 +491,19 @@ class HedgeManager:
         """Adjust hedge size to match new target.
 
         Real mode: places a delta order (BUY to shrink short, SELL to grow short).
+        Entry-price math (S31 fix):
+          - Growing the position (|new_qty| > |old_qty|): the new fills happen
+            at the executor's actual fill price, not the original entry. Compute
+            a size-weighted average so unrealized PnL math is correct going
+            forward. Without this, the entry stays frozen at the original value
+            and produces a phantom unrealized PnL the more the position grows.
+          - Shrinking (|new_qty| < |old_qty|): FIFO realization — the entry of
+            the remaining position is unchanged; the closed slice's PnL is
+            realized at fill price (handled in funding/PnL accounting).
         """
         sh = self._get_shadow(spot_symbol)
         old_qty = sh.qty
+        old_entry = sh.entry_price
         delta = new_qty - old_qty
         if abs(delta) < 1e-12:
             return True
@@ -503,15 +513,30 @@ class HedgeManager:
         f_sym, mult = get_futures_symbol(spot_symbol)
         notional = new_qty * price
 
+        # Helper: size-weighted average entry for "growing" adjusts.
+        def _weighted_entry(fill_price: float) -> float:
+            """When growing the position (|new| > |old|), fill_qty = |new| - |old|
+            new fills happen at fill_price. New entry = size-weighted average."""
+            if old_entry <= 0 or abs(old_qty) < 1e-12:
+                return fill_price  # no prior entry to blend
+            fill_qty = abs(new_qty) - abs(old_qty)
+            if fill_qty <= 0:
+                return old_entry  # not growing — entry unchanged
+            return (abs(old_qty) * old_entry + fill_qty * fill_price) / abs(new_qty)
+
         if not self._is_real_mode():
+            # Shadow mode: use the input price as the synthetic fill price
             sh.qty = new_qty
+            if abs(new_qty) > abs(old_qty):
+                sh.entry_price = _weighted_entry(price)
             sh.last_adjusted_at = now
             sh.adjust_count += 1
             self._total_adjusts += 1
             sign = "+" if delta > 0 else "-"
             logger.info(
                 f"[Hedge] WOULD_ADJUST {spot_symbol} {sign}{abs(delta):.6f} "
-                f"(was {old_qty:.6f} → now {new_qty:.6f}) notional=${notional:.2f}"
+                f"(was {old_qty:.6f} → now {new_qty:.6f}) notional=${notional:.2f} "
+                f"entry=${sh.entry_price:.4f}"
             )
             return True
 
@@ -544,7 +569,21 @@ class HedgeManager:
             )
             return False
 
+        # Recompute entry on grow using the actual fill price (or expected
+        # if the executor doesn't report a real avg). On shrink, entry is
+        # unchanged — FIFO realizes PnL on the closed slice.
         sh.qty = new_qty
+        if abs(new_qty) > abs(old_qty):
+            fill_px = (
+                result.actual_avg_price
+                if result.actual_avg_price > 0
+                else price
+            )
+            new_entry = _weighted_entry(fill_px)
+            entry_log = f" entry={old_entry:.4f}→{new_entry:.4f} (fill ${fill_px:.4f})"
+            sh.entry_price = new_entry
+        else:
+            entry_log = f" entry=${old_entry:.4f} (unchanged on shrink)"
         sh.last_adjusted_at = now
         sh.adjust_count += 1
         self._total_adjusts += 1
@@ -552,7 +591,7 @@ class HedgeManager:
         logger.info(
             f"[Hedge] ADJUST {spot_symbol} {sign}{abs(delta):.6f} "
             f"(was {old_qty:.6f} → now {new_qty:.6f}) notional=${notional:.2f} "
-            f"latency={result.latency_ms:.0f}ms"
+            f"latency={result.latency_ms:.0f}ms{entry_log}"
         )
         return True
 
@@ -816,7 +855,13 @@ class HedgeManager:
                 sh.entry_price = 0.0
                 sh.opened_at = 0.0
             elif sh.entry_price == 0.0 and real:
-                sh.entry_price = float(real.get("entry_price", 0.0))
+                # Same anti-phantom-PnL logic as the orphan branch below:
+                # prefer current markPrice over the exchange's stale entry.
+                current_mark = float(real.get("mark_price", 0.0))
+                if current_mark > 0:
+                    sh.entry_price = current_mark
+                else:
+                    sh.entry_price = float(real.get("entry_price", 0.0))
                 sh.opened_at = time.time()
                 sh.last_funding_check_ts = time.time()
 
@@ -830,15 +875,35 @@ class HedgeManager:
             if new_shadow_qty == 0.0:
                 continue
             n_orphan += 1
+            historical_entry = float(real.get("entry_price", 0.0))
+            current_mark = float(real.get("mark_price", 0.0))
+            # Adopt at current markPrice — the historical entry on the
+            # exchange's own position record can be days/sessions stale, and
+            # on testnet the markPrice oracle drifts independently from real
+            # markets. Marking against a stale entry produces a phantom
+            # unrealized PnL the moment the bot starts MTM-ing the position
+            # (S30 PENDLE -$215 case; S31 ARUSDT ~15% phantom drawdown).
+            # Resetting the entry to current mark makes unrealized_pnl = 0
+            # at adoption — the operator can then close or grow the position
+            # via normal hedge ops without phantom losses.
+            if current_mark > 0:
+                adopted_entry = current_mark
+                entry_log = (
+                    f"entry=${adopted_entry:.4f} (was ${historical_entry:.4f} "
+                    f"on exchange — reset to current markPrice to avoid phantom PnL)"
+                )
+            else:
+                adopted_entry = historical_entry
+                entry_log = f"entry=${adopted_entry:.4f} (markPrice unavailable — using historical)"
             logger.warning(
                 f"[Hedge] RECONCILE {spot_sym}: orphan real position "
-                f"size={real_size:.6f} entry=${real['entry_price']:.4f} "
+                f"size={real_size:.6f} {entry_log} "
                 f"→ creating shadow entry"
             )
             self._shadows[spot_sym] = ShadowHedge(
                 spot_symbol=spot_sym,
                 qty=new_shadow_qty,
-                entry_price=float(real.get("entry_price", 0.0)),
+                entry_price=adopted_entry,
                 opened_at=time.time(),
                 last_funding_check_ts=time.time(),
             )

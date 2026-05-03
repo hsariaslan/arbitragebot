@@ -90,6 +90,11 @@ class BaseFetcher(abc.ABC):
         self._message_count: int = 0
         self._last_snapshot_time: float = 0.0
         self._last_data_received: float = 0.0  # for staleness detection
+        # CSV write timing diagnostics — measured per snapshot batch.
+        # Useful for detecting filesystem slowdown over long sessions.
+        self._csv_write_total_ms: float = 0.0
+        self._csv_write_count: int = 0
+        self._csv_last_log_ts: float = 0.0
         # Latency tracking
         self._connect_time: float = 0.0  # when WS connection was established
         self._first_data_time: float = 0.0  # when first price data arrived
@@ -262,10 +267,26 @@ class BaseFetcher(abc.ABC):
     def _take_snapshot(self, timestamp: float) -> None:
         """Write current state to CSV files."""
         ts_str = f"{timestamp:.3f}"
-
+        t_start = time.monotonic()
         for symbol in self.symbols:
             state = self._state[symbol]
             self._append_csv(symbol, ts_str, state)
+        elapsed_ms = (time.monotonic() - t_start) * 1000.0
+        self._csv_write_total_ms += elapsed_ms
+        self._csv_write_count += 1
+        # Per-minute aggregate log — confirms whether CSV writes are the
+        # cause of `yield` time growth in the orchestrator's [Capacity] log.
+        now = timestamp
+        if now - self._csv_last_log_ts >= 60.0 and self._csv_write_count > 0:
+            avg_ms = self._csv_write_total_ms / self._csv_write_count
+            logger.info(
+                f"[CSV] {self.exchange_name}: avg={avg_ms:.1f}ms/snapshot "
+                f"({self._csv_write_count} snapshots in last min, "
+                f"{len(self.symbols)} files/snapshot)"
+            )
+            self._csv_write_total_ms = 0.0
+            self._csv_write_count = 0
+            self._csv_last_log_ts = now
 
     def _ensure_output_dir(self) -> None:
         """Create the output directory if it does not exist."""

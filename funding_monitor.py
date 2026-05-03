@@ -100,7 +100,14 @@ class FundingMonitor:
         self._score_min_factor: float = score_min_factor
         self._score_max_factor: float = score_max_factor
 
-        # Throttled logging — at most one log per (symbol, kind) per 10 min
+        # Throttled logging — at most one log per (config_id, symbol, kind)
+        # per 10 min. config_id is included because FundingMonitor is shared
+        # across all configs in v0.31+, but get_funding_factor() is called
+        # from each per-config optimizer tick under its own ConfigContextVar.
+        # A symbol-only throttle key would let the first config to query a
+        # symbol "win" the log slot and silence every other config for 10
+        # minutes — observed in S29 with only [Group 1][Config 1] funding
+        # logs while all 6 configs were querying the same factors.
         self._last_log_ts: dict[str, float] = {}
 
         # Run flag
@@ -287,7 +294,35 @@ class FundingMonitor:
 
     # ── Logging helpers ─────────────────────────────────────────
 
+    def _emit_global(self, msg: str) -> None:
+        """Log without the calling config's `[Group X][Config Y]` prefix.
+
+        Funding rates are GLOBAL — every config queries the same Binance
+        Futures rate for a given symbol, so per-config repetition just
+        floods the file with identical messages. v0.31.0-beta+: clear the
+        ConfigContextVar around the emit so funding lines route to the
+        Universal log bucket and only appear ONCE per (symbol, kind) per
+        10-min window across the whole bot.
+
+        Without this, S33 saw 3,566 funding factor lines in 14 min from 48
+        configs all logging the same factors — that's a sustained 4 lines/sec
+        of pure duplicate I/O.
+        """
+        try:
+            from log_context import ConfigContextVar
+            token = ConfigContextVar.set(None)
+            try:
+                logger.info(msg)
+            finally:
+                ConfigContextVar.reset(token)
+        except Exception:
+            # Fall back to direct emit if log_context isn't importable
+            # (e.g., bare-bones unit test environment).
+            logger.info(msg)
+
     def _maybe_log_skip(self, spot_symbol: str) -> None:
+        # Symbol-only throttle key — funding rate is identical across
+        # configs, so only one log per symbol per 10 min is enough.
         key = f"{spot_symbol}:skip"
         now = time.time()
         if now - self._last_log_ts.get(key, 0.0) < 600:
@@ -298,7 +333,7 @@ class FundingMonitor:
         threshold = (
             self._skip_threshold_4h_pct if interval_h == 4 else self._skip_threshold_8h_pct
         )
-        logger.info(
+        self._emit_global(
             f"[Funding] SKIP {spot_symbol}: rate={rate * 100:+.4f}%/{interval_h}h "
             f"< threshold {threshold:+.4f}% — score factor = {self._score_min_factor}"
         )
@@ -307,12 +342,15 @@ class FundingMonitor:
         # Only log when factor deviates meaningfully from 1.0
         if abs(factor - 1.0) < 0.05:
             return
+        # Symbol-only throttle key — funding rate is identical across
+        # configs (it's a shared Binance Futures fetch), so logging once
+        # per symbol per 10 min covers the entire bot.
         key = f"{spot_symbol}:factor"
         now = time.time()
         if now - self._last_log_ts.get(key, 0.0) < 600:
             return
         self._last_log_ts[key] = now
-        logger.info(
+        self._emit_global(
             f"[Funding] {spot_symbol}: ann={ann_pct:+.2f}%/yr factor={factor:.3f} "
             f"({'boost' if factor > 1.0 else 'penalty'})"
         )

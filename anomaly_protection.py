@@ -41,10 +41,27 @@ class AnomalyProtection:
         circuit_breaker_threshold: float = -5.0,
         circuit_breaker_resume_pct: float = 0.5,
         circuit_breaker_cooldown: int = 300,
-        # Layer 2: Drawdown protection
+        # Layer 2: Drawdown protection (legacy MTM gate — kept as a soft
+        # per-symbol throttle at `drawdown_threshold_pct`; the legacy
+        # emergency multiplier is replaced by the two-layer gate below)
         drawdown_threshold_pct: float = 5.0,
         drawdown_resume_pct: float = 3.0,
         drawdown_emergency_mult: float = 2.0,
+        # v0.31.0-beta+: Two-layer emergency gate
+        # Layer A — realized capital drawdown (primary)
+        #   Catches actually-locked-in losses (closed bad trades, fees, etc.).
+        #   Doesn't fire on MTM noise because realized capital only moves
+        #   when money is permanently in/out.
+        realized_drawdown_emergency_pct: float = 15.0,
+        # Layer B — combined spot+hedge unrealized drawdown (hedge-health)
+        #   Fires only when the hedge fails to offset spot price moves AND
+        #   the breach persists past `combined_drawdown_sustained_seconds`
+        #   (so flash quotes / in-transit transients can't trip it).
+        combined_drawdown_emergency_pct: float = 25.0,
+        combined_drawdown_sustained_seconds: float = 300.0,
+        # Action: default is halt + alert. Set True to keep legacy
+        # auto-sell-all behavior on emergency trigger.
+        emergency_auto_liquidate: bool = False,
         # Layer 3: Per-symbol loss streak
         symbol_loss_streak_threshold: int = 4,
         symbol_loss_streak_cooldown: int = 300,
@@ -62,6 +79,11 @@ class AnomalyProtection:
         self._dd_threshold_pct = drawdown_threshold_pct
         self._dd_resume_pct = drawdown_resume_pct
         self._dd_emergency_mult = drawdown_emergency_mult
+        # v0.31.0-beta+: two-layer emergency gate config
+        self._realized_dd_emergency_pct = realized_drawdown_emergency_pct
+        self._combined_dd_emergency_pct = combined_drawdown_emergency_pct
+        self._combined_dd_sustained_s = combined_drawdown_sustained_seconds
+        self._emergency_auto_liquidate = emergency_auto_liquidate
         self._sls_threshold = symbol_loss_streak_threshold
         self._sls_cooldown = symbol_loss_streak_cooldown
         self._warning_pnl_pct = warning_pnl_pct
@@ -71,8 +93,22 @@ class AnomalyProtection:
         self._rolling_pnl_sum: float = 0.0
 
         # State: Drawdown
+        # _peak_portfolio_value tracks the realized-capital peak (USDT +
+        # locked-in P&L). _current_drawdown_pct is the COMBINED gate metric:
+        # (realized_peak − mtm_value) / realized_peak. Used by Layer B and
+        # the legacy soft per-symbol-block path.
         self._peak_portfolio_value: float = 0.0
         self._current_drawdown_pct: float = 0.0
+        # v0.31.0-beta+: realized-only peak/drawdown for Layer A.
+        # _peak_realized only ratchets on realized capital growth — it has
+        # zero MTM exposure, so phantom drawdowns can't fire Layer A.
+        self._peak_realized_value: float = 0.0
+        self._current_realized_drawdown_pct: float = 0.0
+        # Layer B sustained-breach tracker. Set to the timestamp when the
+        # combined drawdown first crossed the emergency threshold; cleared
+        # when it dips back below. The gate fires only when
+        # (now − _combined_breach_start) >= combined_drawdown_sustained_seconds.
+        self._combined_breach_start: float | None = None
 
         # State: Per-symbol loss streak
         self._symbol_consecutive_losses: dict[str, int] = {}
@@ -166,18 +202,39 @@ class AnomalyProtection:
             return
         old_peak = self._peak_portfolio_value
         old_dd = self._current_drawdown_pct
+        old_realized_peak = self._peak_realized_value
+        old_realized_dd = self._current_realized_drawdown_pct
         self._peak_portfolio_value = portfolio_value
         self._current_drawdown_pct = 0.0
+        # CRITICAL: also reset the realized-only peak. Pre-fix, only the
+        # combined peak was reset on basis change. After
+        # `balance.reconfigure(allocations)` (e.g. discovery completes →
+        # symbols activate), `_initial_investment` is recomputed from
+        # the new allocation sum. If allocations only cover a subset of
+        # capital, realized capital "drops" relative to peak (which was
+        # locked in pre-reconfigure with the old initial_investment),
+        # producing a phantom 75% Layer A drawdown emergency in the
+        # 21:03 trace. Resetting realized peak here makes the reconfigure
+        # the new reference point — same logic as the combined peak.
+        self._peak_realized_value = 0.0  # re-seed on next update
+        self._current_realized_drawdown_pct = 0.0
         logger.info(
             f"[Anomaly] PEAK_RESET ({reason}): basis change\n"
             f"  | old_peak=${old_peak:.2f} new_peak=${portfolio_value:.2f}\n"
-            f"  | old_drawdown={old_dd:.2f}% new_drawdown=0.00%"
+            f"  | old_drawdown={old_dd:.2f}% new_drawdown=0.00%\n"
+            f"  | old_realized_peak=${old_realized_peak:.2f} → reset (re-seeds on next update)\n"
+            f"  | old_realized_drawdown={old_realized_dd:.2f}% new_realized_drawdown=0.00%"
         )
         self._events.append(AnomalyEvent(
             timestamp=time.time(), layer="drawdown", level="resume",
             reason=f"Peak reset: {reason}",
             value=portfolio_value, threshold=old_peak,
-            details={"old_peak": f"${old_peak:.2f}", "old_drawdown": f"{old_dd:.2f}%"},
+            details={
+                "old_peak": f"${old_peak:.2f}",
+                "old_drawdown": f"{old_dd:.2f}%",
+                "old_realized_peak": f"${old_realized_peak:.2f}",
+                "old_realized_drawdown": f"{old_realized_dd:.2f}%",
+            },
         ))
 
     def reset_peak_if_no_crypto(self, portfolio_value: float) -> None:
@@ -340,9 +397,23 @@ class AnomalyProtection:
             else:
                 self._peak_portfolio_value = peak_source
 
-        # Drawdown: peak (realized) vs current (MTM-inclusive). This is the
-        # right semantic — drawdown represents "how much worse is current MTM
-        # vs locked-in capital", not "how much did MTM-on-MTM oscillate".
+        # v0.31.0-beta+: track realized-only peak for Layer A. No growth
+        # cap — realized capital can't move fast in normal trading, so
+        # capping it would actually delay legitimate peak updates after
+        # a large profitable trade settles.
+        if realized_value is not None and realized_value > 0:
+            if realized_value > self._peak_realized_value:
+                self._peak_realized_value = realized_value
+            if self._peak_realized_value > 0:
+                self._current_realized_drawdown_pct = (
+                    (self._peak_realized_value - realized_value)
+                    / self._peak_realized_value * 100
+                )
+
+        # Combined drawdown: realized peak vs current MTM (includes hedge
+        # PnL via the value param). Layer B uses this metric with a sustained
+        # breach gate so transient MTM noise (in-transit, flash quotes,
+        # hedge basis) can't trip emergency.
         if self._peak_portfolio_value > 0:
             self._current_drawdown_pct = (
                 (self._peak_portfolio_value - value)
@@ -488,37 +559,132 @@ class AnomalyProtection:
                 reason="Warning cleared — P&L recovered",
             ))
 
-    def _check_drawdown(self, timestamp: float) -> None:
-        """Evaluate drawdown protection and emergency sell."""
-        if self._paused or self._peak_portfolio_value <= 0:
-            return
+    def _fire_emergency(
+        self,
+        timestamp: float,
+        layer_label: str,
+        drawdown_pct: float,
+        threshold_pct: float,
+        ctx: dict,
+        reason_extra: str,
+    ) -> None:
+        """Trigger emergency pause + alert. Auto-liquidate is opt-in only.
 
-        emergency_threshold = self._dd_threshold_pct * self._dd_emergency_mult
-        ctx = self._portfolio_context
-
-        if self._current_drawdown_pct >= emergency_threshold:
-            drop = self._peak_portfolio_value * self._current_drawdown_pct / 100
-            details = {
-                "portfolio": f"${ctx.get('portfolio_value', 0):.2f}",
-                "peak": f"${self._peak_portfolio_value:.2f}",
-                "drop": f"${drop:.2f}",
-                "usdt_total": f"${ctx.get('usdt_total', 0):.2f}",
-                "crypto_total": f"${ctx.get('crypto_total', 0):.2f}",
-                "action": "SELLING ALL CRYPTO POSITIONS",
-            }
-            reason = (
-                f"Drawdown {self._current_drawdown_pct:.2f}% "
-                f">= emergency threshold {emergency_threshold:.1f}%"
-            )
-            self._trigger_pause(
-                timestamp, "drawdown", "emergency", reason,
-                self._current_drawdown_pct, emergency_threshold, details,
-            )
-            self._emergency_triggered = True
+        v0.31.0-beta+: default action is HALT + ALERT, not sell-all. The
+        operator gets paged via email and can use the existing Hard Stop
+        button after investigating. Set `emergency_auto_liquidate=True` to
+        restore the pre-v0.31 behavior.
+        """
+        realized = ctx.get("realized_value", 0.0)
+        portfolio = ctx.get("portfolio_value", 0.0)
+        details = {
+            "layer": layer_label,
+            "portfolio_mtm": f"${portfolio:.2f}",
+            "realized_capital": f"${realized:.2f}",
+            "realized_peak": f"${self._peak_realized_value:.2f}",
+            "realized_drawdown": f"{self._current_realized_drawdown_pct:.2f}%",
+            "combined_peak": f"${self._peak_portfolio_value:.2f}",
+            "combined_drawdown": f"{self._current_drawdown_pct:.2f}%",
+            "usdt_total": f"${ctx.get('usdt_total', 0):.2f}",
+            "crypto_total": f"${ctx.get('crypto_total', 0):.2f}",
+            "action": (
+                "SELLING ALL CRYPTO POSITIONS"
+                if self._emergency_auto_liquidate
+                else "HALT + ALERT (no auto-sell — operator decides)"
+            ),
+        }
+        reason = (
+            f"EMERGENCY ({layer_label}): drawdown {drawdown_pct:.2f}% "
+            f">= threshold {threshold_pct:.1f}% — {reason_extra}"
+        )
+        self._trigger_pause(
+            timestamp, "drawdown", "emergency", reason,
+            drawdown_pct, threshold_pct, details,
+        )
+        self._emergency_triggered = True
+        if self._emergency_auto_liquidate:
             self._emergency_sell_pending = True
             self._total_emergency_sells += 1
 
-        elif self._current_drawdown_pct >= self._dd_threshold_pct:
+    def _check_drawdown(self, timestamp: float) -> None:
+        """Evaluate drawdown protection — two-layer emergency gate.
+
+        Layer A (realized): fires immediately when realized-capital drawdown
+        crosses `realized_drawdown_emergency_pct`. Realized capital can only
+        move on locked-in events (closed trades, fees, cashback) so this
+        gate has no MTM-noise exposure.
+
+        Layer B (combined+sustained): fires when the combined spot+hedge
+        unrealized drawdown crosses `combined_drawdown_emergency_pct` AND
+        the breach persists past `combined_drawdown_sustained_seconds`. The
+        combined metric is what matters for hedge health — if the hedge
+        offsets spot moves correctly, this gate never fires regardless of
+        spot price action. The sustained-breach requirement filters
+        transient phantoms (in-transit, flash quotes, hedge basis change).
+
+        Action: halt + alert by default. Sell-all is only triggered when
+        `emergency_auto_liquidate=True` (off by default — operator should
+        decide via the Hard Stop button after investigating).
+
+        Below the emergency thresholds, the legacy MTM per-symbol blocking
+        path stays as a soft throttle (kicks in at `drawdown_threshold_pct`).
+        """
+        if self._paused or self._peak_portfolio_value <= 0:
+            return
+
+        ctx = self._portfolio_context
+
+        # Layer A — realized capital drawdown (primary trigger)
+        if (
+            self._peak_realized_value > 0
+            and self._current_realized_drawdown_pct >= self._realized_dd_emergency_pct
+        ):
+            self._fire_emergency(
+                timestamp, layer_label="layer_a_realized",
+                drawdown_pct=self._current_realized_drawdown_pct,
+                threshold_pct=self._realized_dd_emergency_pct,
+                ctx=ctx,
+                reason_extra="realized capital drop — actual locked-in loss",
+            )
+            return
+
+        # Layer B — combined unrealized drawdown, sustained breach
+        if self._current_drawdown_pct >= self._combined_dd_emergency_pct:
+            if self._combined_breach_start is None:
+                self._combined_breach_start = timestamp
+                logger.info(
+                    f"[Anomaly] Combined drawdown breach started: "
+                    f"{self._current_drawdown_pct:.2f}% "
+                    f">= {self._combined_dd_emergency_pct:.1f}% "
+                    f"(must persist {self._combined_dd_sustained_s:.0f}s to fire emergency)"
+                )
+            else:
+                breach_duration = timestamp - self._combined_breach_start
+                if breach_duration >= self._combined_dd_sustained_s:
+                    self._fire_emergency(
+                        timestamp, layer_label="layer_b_combined",
+                        drawdown_pct=self._current_drawdown_pct,
+                        threshold_pct=self._combined_dd_emergency_pct,
+                        ctx=ctx,
+                        reason_extra=(
+                            f"combined spot+hedge unrealized drop sustained "
+                            f"{breach_duration:.0f}s — hedge not offsetting spot moves"
+                        ),
+                    )
+                    self._combined_breach_start = None
+                    return
+        else:
+            # Reverted below threshold — clear the breach timer
+            if self._combined_breach_start is not None:
+                duration = timestamp - self._combined_breach_start
+                logger.info(
+                    f"[Anomaly] Combined drawdown breach cleared after {duration:.0f}s "
+                    f"(now {self._current_drawdown_pct:.2f}% < {self._combined_dd_emergency_pct:.1f}%)"
+                )
+                self._combined_breach_start = None
+
+        # Soft per-symbol blocking — legacy path, unchanged
+        if self._current_drawdown_pct >= self._dd_threshold_pct:
             drop = self._peak_portfolio_value * self._current_drawdown_pct / 100
             # Per-symbol blocking instead of global pause:
             # Block symbols with crypto exposure (they cause the drawdown)

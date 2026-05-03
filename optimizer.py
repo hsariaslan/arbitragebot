@@ -20,7 +20,7 @@ import logging
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from config import (
     AUTO_EXPAND_ON_UNDERSTAFF,
@@ -56,9 +56,20 @@ VERY_STRONG_SCORE_THRESHOLD = 0.3  # very strong tier (highest multiplier, most 
 FEE_THRESHOLD_MULTIPLIER = 0.5     # activation threshold scales with pair fee excess over cheapest
 
 
-@dataclass
+@dataclass(slots=True)
 class SymbolTick:
-    """Single observation of best cross-exchange opportunity for a symbol."""
+    """Single observation of best cross-exchange opportunity for a symbol.
+
+    `slots=True` is critical here: at 48 configs × 60 symbols ×
+    `scoring_window` (1800) ticks, the bot accumulates ~5 million live
+    instances at steady state. Without slots, each instance carries a
+    full `__dict__` (~224B overhead just for the dict header) —
+    that's ~1.1 GB of dict overhead alone. With slots: ~80B/instance
+    total. ~75% memory reduction. The Python GC also tracks fewer
+    container objects, cutting gen2 collection time proportionally.
+    Observed in the 19:45-20:01 trace: per_cfg time grew 25× as the
+    deques filled, dominated by gen2 GC pauses during tick_once.
+    """
 
     timestamp: float
     best_net_pct: float
@@ -68,9 +79,17 @@ class SymbolTick:
     fee_pct: float
 
 
-@dataclass
+@dataclass(slots=True)
 class SymbolScore:
-    """Computed score for a symbol over the rolling window."""
+    """Computed score for a symbol over the rolling window.
+
+    `slots=True`: 60 SymbolScore instances are allocated per config per
+    tick in `_compute_scores`. At 48 configs that's 2,880 allocations
+    per second. Without slots, each instance carries a ~224B __dict__
+    overhead. Slots cut per-instance memory ~75% AND reduce GC load
+    (fewer attribute dicts to track). Pairs with the SymbolTick slots
+    fix to control the heap growth rate the diagnostic exposed.
+    """
 
     symbol: str
     score: float
@@ -170,7 +189,20 @@ class HistoricalExchangeStats:
 
 @dataclass
 class WatchlistEntry:
-    """Tracks a strong candidate symbol being observed for confirmation."""
+    """Tracks a strong candidate symbol being observed for confirmation.
+
+    `score_samples` is kept as a `list` (multiple call sites use
+    `samples[-N:]` slice notation, which deque doesn't support). It's
+    bounded by trimming-on-append at the writer sites: the trajectory
+    classifier reads the last 30, stability checks read the last 3-5,
+    so capping at 60 is plenty. Pre-cap this was unbounded: at 48
+    configs × ~5 watchlist candidates × 1 sample/sec, after 30 min the
+    cumulative size hit ~432K floats, with linear scans on every read
+    — observed as the slow ~13ms/min creep in sweep time even after
+    the optimizer aggregates fix.
+    """
+
+    SAMPLES_MAX: ClassVar[int] = 60
 
     symbol: str
     entered_at: float
@@ -178,6 +210,15 @@ class WatchlistEntry:
     score_samples: list[float] = field(default_factory=list)
     peak_score: float = 0.0
     confirmed: bool = False
+
+    def add_sample(self, score: float) -> None:
+        """Append + trim. Use this instead of `score_samples.append()`."""
+        s = self.score_samples
+        s.append(score)
+        if len(s) > self.SAMPLES_MAX:
+            # Slice-assign keeps the same list object so any external
+            # references (e.g. `samples = entry.score_samples`) stay valid.
+            del s[:-self.SAMPLES_MAX]
 
 
 class SymbolOptimizer:
@@ -239,6 +280,10 @@ class SymbolOptimizer:
         self._discovery_duration = discovery_duration
         self._initial_discovery_duration = discovery_duration
         self._running = False
+        # v0.31: tick_once() can be called from either run() or the
+        # multi-config orchestrator. Track first-tick startup separately
+        # so we log the startup line exactly once per component lifetime.
+        self._startup_logged = False
 
         # Score threshold for transfers (Phase 2)
         self._min_rebalance_score = min_rebalance_score
@@ -259,8 +304,24 @@ class SymbolOptimizer:
         self._score_stability_seconds = score_stability_seconds
         self._score_stability_factor = score_stability_factor
 
+        # Per-symbol demotion history for frequency-aware cooldown scaling.
+        # The same symbol cycling through activate→demote→re-activate is
+        # the worst churn pattern: each cycle pays setup+teardown fees
+        # (~$0.30-1.00) without proportional trade volume. Track 24h
+        # rolling demotion count per symbol; scale cooldown geometrically
+        # so problem symbols self-lockout for the day. Operator can
+        # disable via `demotion_freq_scaling_enabled` setting.
+        self._demotion_history: dict[str, list[float]] = {}
+        self._demotion_freq_scaling_enabled: bool = True
+
         # Reallocation cost gate
         self._reallocation_cost_horizon = reallocation_cost_horizon
+        # Activation profitability bar — multiplier applied on top of
+        # `reallocation_cost_horizon` for SETUP costs (vs reallocation
+        # costs which keep using the base horizon). Tighter setting means
+        # marginal symbols don't activate. Default 2.0 = same behavior
+        # as before; higher = stricter. Per-config tunable.
+        self._activation_profit_horizon_multiplier: float = 2.0
 
         # Configurable score thresholds (settable from dashboard)
         self._trading_threshold: float = TRADING_SCORE_THRESHOLD
@@ -294,6 +355,36 @@ class SymbolOptimizer:
             sym: deque() for sym in self._all_symbols
         }
 
+        # Incremental aggregates over the rolling window — maintained at
+        # the two `_ticks` mutation sites (append in `_score_tick`,
+        # popleft in the prune loop). This keeps `_compute_scores` O(1)
+        # per symbol instead of O(window). At full window (1800 entries)
+        # × 60 symbols × 48 configs the previous single-pass cost ~5M
+        # element scans/sweep — visible as progressive sweep-time growth
+        # over the first 30 minutes as deques filled (1500ms → 2140ms
+        # observed in the 16:22 log). With incremental aggregates the
+        # cost is constant regardless of window size.
+        #
+        # `best_net` is the only aggregate that can't be incrementally
+        # decreased on popleft, so it's tracked with a stale flag: on
+        # popleft of a tick equal to the current max, we mark the symbol
+        # stale and recompute lazily inside `_compute_scores`. Most
+        # popleft events don't touch the max so the recompute is rare.
+        self._agg_total: dict[str, int] = defaultdict(int)
+        self._agg_sum_net: dict[str, float] = defaultdict(float)
+        self._agg_prof_count: dict[str, int] = defaultdict(int)
+        self._agg_prof_sum: dict[str, float] = defaultdict(float)
+        # Monotonic max-deque: (timestamp, best_net_pct) pairs in
+        # monotonically decreasing order by value. Front is always the
+        # current max in the time window. Replaces the previous
+        # `_best_net + _best_net_stale` lazy-recompute pattern, which
+        # produced a sweep-time peak at deque saturation (~T+30-90min)
+        # because many symbols simultaneously triggered O(window)
+        # full-deque scans when the front-of-deque max evicted. With
+        # the monotonic structure, max retrieval is O(1) and append +
+        # popleft are O(1) amortized — no recompute path exists.
+        self._best_net_dq: dict[str, deque[tuple[float, float]]] = defaultdict(deque)
+
         # Latest computed scores
         self._scores: dict[str, SymbolScore] = {}
 
@@ -323,6 +414,15 @@ class SymbolOptimizer:
 
         # Timing
         self._last_evaluation: float = 0.0
+        # Throttle for fast-track-related INFO logs (fire once per 30s
+        # per config when the candidate is at the threshold-but-unstable
+        # boundary; without this the tight loop fires both logs every tick).
+        self._last_fast_track_log: float = 0.0
+        # Throttle for the "trading float overflow blocked" log — when
+        # the custody hub is unreachable (e.g. disabled in a Lean config),
+        # this condition holds indefinitely and the log otherwise fires
+        # every tick.
+        self._last_overflow_blocked_log: float = 0.0
         self._tick_count: int = 0
         self._session_start: float = time.time()
 
@@ -367,6 +467,20 @@ class SymbolOptimizer:
         # Auto-expand on understaff (Feature 6)
         self._auto_expand_on_understaff: bool = AUTO_EXPAND_ON_UNDERSTAFF
         self._last_auto_expand_attempt: float = 0.0
+
+        # Time-based regime gating (mirrors monitor settings). When weak
+        # hours are active, demotion + auto-expand are suppressed to
+        # avoid the activate→demote→reactivate fee churn observed in
+        # the 04:00 UTC funding-settlement event of 2026-05-03 (216
+        # transfers in one minute, $1+/config in fees during a 2-trade
+        # session). Each per-config bundle has its own regime config so
+        # aggressive configs can stay active while conservative ones
+        # idle through thin windows.
+        self._regime_gating_enabled: bool = False
+        self._regime_strong_hours: set[int] = {7, 15, 20, 21, 22}
+        self._regime_neutral_hours: set[int] = {0, 1, 5, 6, 8, 9, 11}
+        self._regime_weak_disable_demote: bool = True
+        self._regime_weak_disable_expand: bool = True
 
         # Diversification floor (S21 follow-up). When understaffed, multiply
         # activation threshold by `_diversification_floor_multiplier` so
@@ -418,217 +532,250 @@ class SymbolOptimizer:
                 f"[Optimizer] Rotation gate OPENED: net_profit=${net_profit:.2f}"
             )
 
-    async def run(self) -> None:
-        """Score all symbols every second, evaluate rotation periodically."""
-        self._running = True
+    def _ensure_started(self) -> None:
+        """Initialize discovery_start / last_evaluation timestamps + log
+        the first-tick startup line. Idempotent — safe to call from
+        either `run()` or the multi-config orchestrator."""
         if not self._discovery_start:
             self._discovery_start = time.time()
         if not self._last_evaluation:
             self._last_evaluation = time.time()
+        if not self._startup_logged:
+            self._startup_logged = True
+            if self._discovery_mode:
+                self._monitor._paused = True
+                # NOTE: DEBUG-level not enabled here — at 48 configs the
+                # `[Candidate] WATCH` and `[Discovery]` debug lines flood
+                # the log file (~15K lines / 15 min observed in 16:22
+                # log) and grow sweep time. The discovery summary log
+                # below is INFO and stays visible regardless.
+                logger.info(
+                    f"[Optimizer] Discovery stage: scoring all "
+                    f"{len(self._all_symbols)} symbols on all exchanges "
+                    f"for {self._discovery_duration}s"
+                )
+            else:
+                logger.info(
+                    f"[Optimizer] Starting: top {self._min_active_symbols} symbols from "
+                    f"{len(self._all_symbols)}, window={self._scoring_window}s, "
+                    f"eval_interval={self._evaluation_interval}s, "
+                    f"auto_rotate={self._auto_rotate}"
+                )
 
-        if self._discovery_mode:
-            self._monitor._paused = True
-            # Enable DEBUG logging during discovery
-            logger.setLevel(logging.DEBUG)
-            logger.info(
-                f"[Optimizer] Discovery stage: scoring all "
-                f"{len(self._all_symbols)} symbols on all exchanges "
-                f"for {self._discovery_duration}s"
-            )
-        else:
-            logger.info(
-                f"[Optimizer] Starting: top {self._min_active_symbols} symbols from "
-                f"{len(self._all_symbols)}, window={self._scoring_window}s, "
-                f"eval_interval={self._evaluation_interval}s, "
-                f"auto_rotate={self._auto_rotate}"
-            )
+    def tick_once(self) -> None:
+        """Single optimizer tick (score + discovery + rotation + inventory + auto-expand).
 
-        while self._running:
-            self._score_tick()
-            self._tick_count += 1
+        Extracted from `run()` so the multi-config Orchestrator can drive
+        the tick rate directly.
+        """
+        self._ensure_started()
+        self._score_tick()
+        self._tick_count += 1
 
-            now = time.time()
+        now = time.time()
 
-            # Discovery stage: check for tradeable candidates every tick, complete when duration elapses
-            if self._discovery_mode and not self._discovery_complete:
-                elapsed = now - self._discovery_start
+        # Discovery stage: check for tradeable candidates every tick, complete when duration elapses
+        if self._discovery_mode and not self._discovery_complete:
+            elapsed = now - self._discovery_start
 
-                if self._tick_count >= self._min_warmup_ticks:
-                    # Standard early-exit: half a scoring window of observation.
-                    # Prevents inflated scores from thin windows (e.g., 100% freq
-                    # from 60 ticks vs real 55% from 1800 ticks).
-                    min_ticks_std = self._scoring_window // 2
-                    min_time_std = float(self._scoring_window // 2)
+            if self._tick_count >= self._min_warmup_ticks:
+                # Standard early-exit: half a scoring window of observation.
+                # Prevents inflated scores from thin windows (e.g., 100% freq
+                # from 60 ticks vs real 55% from 1800 ticks).
+                min_ticks_std = self._scoring_window // 2
+                min_time_std = float(self._scoring_window // 2)
 
-                    # Fast-track (S29 follow-up): trajectory-aware exit. Per-tier
-                    # base times multiplied by aggressiveness; declining
-                    # candidates fall back to the standard wait.
-                    ft_enabled = self._fast_track_discovery_enabled
-                    ft_aggr = self._fast_track_aggressiveness
+                # Fast-track (S29 follow-up): trajectory-aware exit. Per-tier
+                # base times multiplied by aggressiveness; declining
+                # candidates fall back to the standard wait.
+                ft_enabled = self._fast_track_discovery_enabled
+                ft_aggr = self._fast_track_aggressiveness
 
-                    def _qualifies(s) -> tuple[bool, str, float]:
-                        """Return (qualifies_for_exit, path_kind, required_elapsed_seconds)."""
-                        if s.score < self._get_activation_threshold(s.symbol):
-                            return False, "", min_time_std
-                        # Standard path always wins if eligible
-                        if s.total_ticks >= min_ticks_std:
-                            return True, "standard", min_time_std
-                        if not ft_enabled:
-                            return False, "", min_time_std
+                def _qualifies(s) -> tuple[bool, str, float]:
+                    """Return (qualifies_for_exit, path_kind, required_elapsed_seconds)."""
+                    if s.score < self._get_activation_threshold(s.symbol):
+                        return False, "", min_time_std
+                    # Standard path always wins if eligible
+                    if s.total_ticks >= min_ticks_std:
+                        return True, "standard", min_time_std
+                    if not ft_enabled:
+                        return False, "", min_time_std
 
-                        # Trajectory classification needs 30+ samples — use
-                        # live per-symbol score history (works for active +
-                        # candidates).
-                        history = self._score_history.get(s.symbol)
-                        wl = self._watchlist.get(s.symbol)
-                        if not history or len(history) < 30:
-                            return False, "", min_time_std
+                    # Trajectory classification needs 30+ samples — use
+                    # live per-symbol score history (works for active +
+                    # candidates).
+                    history = self._score_history.get(s.symbol)
+                    wl = self._watchlist.get(s.symbol)
+                    if not history or len(history) < 30:
+                        return False, "", min_time_std
 
-                        peak_for_traj = wl.peak_score if wl else max(history)
-                        trajectory = self._classify_trajectory(history, peak_score=peak_for_traj)
-                        if trajectory == "declining":
-                            return False, "", min_time_std  # full wait
+                    peak_for_traj = wl.peak_score if wl else max(history)
+                    trajectory = self._classify_trajectory(history, peak_score=peak_for_traj)
+                    if trajectory == "declining":
+                        return False, "", min_time_std  # full wait
 
-                        # Tier from current score (matches focus-tier classification)
-                        if s.score >= self._strong_threshold:
-                            # very_strong AND strong both use the same fast wait
-                            tier_kind = "strong+"
-                            base = 30.0 if trajectory == "rising" else 60.0
-                        else:
-                            tier_kind = "normal"
-                            base = 240.0 if trajectory == "rising" else 300.0
+                    # Tier from current score (matches focus-tier classification)
+                    if s.score >= self._strong_threshold:
+                        # very_strong AND strong both use the same fast wait
+                        tier_kind = "strong+"
+                        base = 30.0 if trajectory == "rising" else 60.0
+                    else:
+                        tier_kind = "normal"
+                        base = 240.0 if trajectory == "rising" else 300.0
 
-                        required = base * ft_aggr
+                    required = base * ft_aggr
 
-                        # Tier-confirmation gate: prevents activating on a brief
-                        # single-tick spike into the tier. Last `required`
-                        # samples (= seconds at 1Hz) must all be at the tier
-                        # threshold. A symbol that was strong throughout
-                        # discovery passes immediately; one that just
-                        # transitioned waits until enough strong samples
-                        # accumulate.
-                        if tier_kind == "strong+":
-                            n_check = int(required)
-                            if len(history) < n_check:
-                                return False, "", required
-                            recent = list(history)[-n_check:]
-                            if not all(x >= self._strong_threshold for x in recent):
-                                return False, "", required
-
-                        # Total ticks gate: at least as many ticks as seconds
-                        if s.total_ticks < required:
+                    # Tier-confirmation gate: prevents activating on a brief
+                    # single-tick spike into the tier. Last `required`
+                    # samples (= seconds at 1Hz) must all be at the tier
+                    # threshold. A symbol that was strong throughout
+                    # discovery passes immediately; one that just
+                    # transitioned waits until enough strong samples
+                    # accumulate.
+                    if tier_kind == "strong+":
+                        n_check = int(required)
+                        if len(history) < n_check:
                             return False, "", required
-                        return True, f"fast_track_{tier_kind}_{trajectory}", required
+                        recent = list(history)[-n_check:]
+                        if not all(x >= self._strong_threshold for x in recent):
+                            return False, "", required
 
-                    tradeable_found: list = []
-                    qualified_kind: str = ""
-                    qualified_required: float = min_time_std
-                    for s in self._scores.values():
-                        ok, kind, required = _qualifies(s)
-                        if ok:
-                            tradeable_found.append(s)
-                            # Prefer the standard kind in logs if any candidate
-                            # qualifies via that path; otherwise show fast-track
-                            # kind of the best (highest-score) candidate.
-                            if not qualified_kind or "standard" in kind:
-                                qualified_kind = kind
-                                qualified_required = required
-                    tradeable_found.sort(key=lambda s: s.score, reverse=True)
+                    # Total ticks gate: at least as many ticks as seconds
+                    if s.total_ticks < required:
+                        return False, "", required
+                    return True, f"fast_track_{tier_kind}_{trajectory}", required
 
-                    if tradeable_found and elapsed >= qualified_required:
-                        names = ", ".join(
-                            f"{s.symbol.replace('USDT', '')}({s.score:.4f})"
-                            for s in tradeable_found[:5]
-                        )
+                tradeable_found: list = []
+                qualified_kind: str = ""
+                qualified_required: float = min_time_std
+                for s in self._scores.values():
+                    ok, kind, required = _qualifies(s)
+                    if ok:
+                        tradeable_found.append(s)
+                        # Prefer the standard kind in logs if any candidate
+                        # qualifies via that path; otherwise show fast-track
+                        # kind of the best (highest-score) candidate.
+                        if not qualified_kind or "standard" in kind:
+                            qualified_kind = kind
+                            qualified_required = required
+                tradeable_found.sort(key=lambda s: s.score, reverse=True)
+
+                if tradeable_found and elapsed >= qualified_required:
+                    names = ", ".join(
+                        f"{s.symbol.replace('USDT', '')}({s.score:.4f})"
+                        for s in tradeable_found[:5]
+                    )
+                    # When the stability gate keeps rejecting, this branch
+                    # fires every tick. Throttle to once per 30s per config
+                    # so we don't spam ~30 log lines/min × 48 configs at
+                    # 40+ scale.
+                    if now - self._last_fast_track_log >= 30.0:
+                        self._last_fast_track_log = now
                         logger.info(
                             f"[Optimizer] {len(tradeable_found)} tradeable candidates "
                             f"found at {elapsed:.0f}s ({qualified_kind}): {names} — exiting discovery"
                         )
-                        self._complete_discovery()
-                    elif elapsed >= self._discovery_duration:
-                        # Duration elapsed, none found — extend discovery
-                        self._complete_discovery()
+                    self._complete_discovery(from_fast_track=True)
+                elif elapsed >= self._discovery_duration:
+                    # Duration elapsed, none found — extend discovery
+                    self._complete_discovery(from_fast_track=False)
 
-                    # During discovery, only consolidate from cheap sources
-                    # (skip KuCoin $0.40, Gate.io $0.50, OKX $0.10 — too expensive
-                    # when we don't know if next symbol will use Bitfinex)
-                    if (
-                        now - self._last_evaluation >= self._evaluation_interval
-                        and self._balance
-                        and "Bitfinex" in self._balance._exchanges
-                    ):
-                        transfers = self._balance.consolidate_to_custody_hub(
-                            None, max_fee_per_source=0.02,
+                # During discovery, only consolidate from cheap sources
+                # (skip KuCoin $0.40, Gate.io $0.50, OKX $0.10 — too expensive
+                # when we don't know if next symbol will use Bitfinex)
+                if (
+                    now - self._last_evaluation >= self._evaluation_interval
+                    and self._balance
+                    and "Bitfinex" in self._balance._exchanges
+                ):
+                    transfers = self._balance.consolidate_to_custody_hub(
+                        None, max_fee_per_source=0.02,
+                    )
+                    if transfers:
+                        hub_fee = sum(t.fee_usd for t in transfers)
+                        hub_amt = sum(t.amount_usd for t in transfers)
+                        logger.info(
+                            f"[Optimizer] Discovery consolidation (cheap only): "
+                            f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
+                            f"(fees: ${hub_fee:.4f}, max_fee=$0.02)"
                         )
-                        if transfers:
-                            hub_fee = sum(t.fee_usd for t in transfers)
-                            hub_amt = sum(t.amount_usd for t in transfers)
-                            logger.info(
-                                f"[Optimizer] Discovery consolidation (cheap only): "
-                                f"{len(transfers)} transfers, ${hub_amt:.2f} to Bitfinex "
-                                f"(fees: ${hub_fee:.4f}, max_fee=$0.02)"
-                            )
-                        self._balance.replenish_trading_float(max_fee_per_source=0.02)
-                        self._last_evaluation = now
+                    self._balance.replenish_trading_float(max_fee_per_source=0.02)
+                    self._last_evaluation = now
 
-            elif (
-                self._auto_rotate
-                and not self._discovery_mode
-                and self._tick_count >= self._min_warmup_ticks
-                and now - self._last_evaluation >= self._evaluation_interval
-            ):
-                # Post-discovery stabilization: allow rotations after 1 evaluation interval
-                time_since_discovery = now - (self._discovery_start + self._discovery_duration)
-                if time_since_discovery >= self._evaluation_interval:
-                    self._evaluate_rotation()
-                else:
-                    # Still evaluate demotions only (protect against truly dead symbols)
-                    self._evaluate_demotions()
-                self._last_evaluation = now
+        elif (
+            self._auto_rotate
+            and not self._discovery_mode
+            and self._tick_count >= self._min_warmup_ticks
+            and now - self._last_evaluation >= self._evaluation_interval
+        ):
+            # Post-discovery stabilization: allow rotations after 1 evaluation interval
+            time_since_discovery = now - (self._discovery_start + self._discovery_duration)
+            if time_since_discovery >= self._evaluation_interval:
+                self._evaluate_rotation()
+            else:
+                # Still evaluate demotions only (protect against truly dead symbols)
+                self._evaluate_demotions()
+            self._last_evaluation = now
 
-            # Periodic inventory drift rebalance (Feature 4)
-            # `balance.initialized` gate prevents firing between reconfigure()
-            # and initialize_crypto() — running there would see crypto=0
-            # against the just-set target and DRIFT_BUY phantom crypto,
-            # uncompensated when initialize_crypto() later overwrites the qty.
-            if (
-                self._inventory_rebalance_enabled
-                and not self._discovery_mode
-                and self._active_symbols
-                and self._balance
-                and self._balance.initialized
-                and now - self._last_inventory_rebalance >= self._inventory_rebalance_interval
-            ):
-                self._run_inventory_rebalance(now)
-                self._last_inventory_rebalance = now
+        # Quiet-period detection (consulted via monitor — single source).
+        # When True, suppress rebalance-class transfers that aren't
+        # producing matching trade volume. Disabled by default; when
+        # enabled (`quiet_period_pause_minutes > 0`), the gate below
+        # short-circuits inventory rebalance + overflow + replenish.
+        in_quiet = self._monitor.in_quiet_period() if self._monitor else False
 
-            # Trading float overflow → custody hub (v0.30+, was Feature 5)
-            # Same initialized-gate as above: pre-init Bitfinex USDT
-            # transiently includes the about-to-be-crypto allocation, so a
-            # premature sweep would drain the planned crypto pool.
-            if (
-                self._bitfinex_over_target_enabled
-                and not self._discovery_mode
-                and self._active_symbols
-                and self._balance
-                and self._balance.initialized
-                and "Bitfinex" in self._balance._exchanges
-            ):
-                self._consolidate_trading_float_overflow()
+        # Periodic inventory drift rebalance (Feature 4)
+        # `balance.initialized` gate prevents firing between reconfigure()
+        # and initialize_crypto() — running there would see crypto=0
+        # against the just-set target and DRIFT_BUY phantom crypto,
+        # uncompensated when initialize_crypto() later overwrites the qty.
+        if (
+            self._inventory_rebalance_enabled
+            and not self._discovery_mode
+            and self._active_symbols
+            and self._balance
+            and self._balance.initialized
+            and not in_quiet  # quiet-period: skip drift rebalance
+            and now - self._last_inventory_rebalance >= self._inventory_rebalance_interval
+        ):
+            self._run_inventory_rebalance(now)
+            self._last_inventory_rebalance = now
 
-            # Auto-expand on understaff (Feature 6) — fire ASAP when active count < min
-            if (
-                self._auto_expand_on_understaff
-                and self._auto_rotate
-                and not self._discovery_mode
-                and self._discovery_complete
-                and self._tick_count >= self._min_warmup_ticks
-                and len(self._active_symbols) < self._min_active_symbols
-                and now - self._last_auto_expand_attempt >= 60.0  # max 1/minute
-            ):
-                self._auto_expand_on_understaff_tick(now)
-                self._last_auto_expand_attempt = now
+        # Trading float overflow → custody hub (v0.30+, was Feature 5)
+        # Same initialized-gate as above: pre-init Bitfinex USDT
+        # transiently includes the about-to-be-crypto allocation, so a
+        # premature sweep would drain the planned crypto pool.
+        if (
+            self._bitfinex_over_target_enabled
+            and not self._discovery_mode
+            and self._active_symbols
+            and self._balance
+            and self._balance.initialized
+            and not in_quiet  # quiet-period: skip float overflow sweep
+            and "Bitfinex" in self._balance._exchanges
+        ):
+            self._consolidate_trading_float_overflow()
 
+        # Auto-expand on understaff (Feature 6) — fire ASAP when active count < min
+        if (
+            self._auto_expand_on_understaff
+            and self._auto_rotate
+            and not self._discovery_mode
+            and self._discovery_complete
+            and self._tick_count >= self._min_warmup_ticks
+            and len(self._active_symbols) < self._min_active_symbols
+            and now - self._last_auto_expand_attempt >= 60.0  # max 1/minute
+        ):
+            self._auto_expand_on_understaff_tick(now)
+            self._last_auto_expand_attempt = now
+
+    async def run(self) -> None:
+        """Legacy single-component loop. The multi-config Orchestrator drives
+        `tick_once()` directly and skips this wrapper."""
+        self._running = True
+        self._ensure_started()
+        while self._running:
+            self.tick_once()
             await asyncio.sleep(1.0)
 
     # ── Scoring ──────────────────────────────────────────────────────────
@@ -637,36 +784,85 @@ class SymbolOptimizer:
         """Compute best net spread for each symbol, append to rolling window."""
         now = time.time()
 
+        # v0.31.0-beta+: read from the orchestrator's per-sweep prices cache
+        # if one is set. Cuts 60 symbols × 9 fetchers × N configs of redundant
+        # `fetcher.get_state()` work down to a single build per sweep, plus
+        # gives us pre-parsed `bids_f` / `asks_f` for the slippage walker.
+        from tick_cache import get_sweep_prices, filter_for_config
+        sweep_prices = get_sweep_prices()
+
         for symbol in self._all_symbols:
-            exchange_prices: list[tuple[str, float, float, list | None, list | None]] = []
-
-            for fetcher in self._fetchers:
-                if fetcher.exchange_name not in self._active_exchanges:
-                    continue
-                state = fetcher.get_state()
-                ps = state.get(symbol)
-                if ps is None or not ps.bid or not ps.ask:
-                    continue
-                if ps.received_at > 0 and (now - ps.received_at) > MAX_DATA_AGE_SECONDS:
-                    continue
-
-                try:
-                    bid_f = float(ps.bid)
-                    ask_f = float(ps.ask)
-                    if bid_f <= 0 or ask_f <= 0:
-                        continue
-                    exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, ps.bids, ps.asks))
-                    # Cache Bitfinex bids for later demotion-sell routing.
-                    # Bitfinex's event-driven feed has 10-20s gaps; without a
-                    # cached last-known bid, demotions miss the 0% taker
-                    # advantage during those gaps.
-                    if fetcher.exchange_name == "Bitfinex":
+            if sweep_prices is not None:
+                # Shared-cache fast path: read pre-built tuples + filter
+                # by this config's active exchanges.
+                exchange_prices = filter_for_config(
+                    sweep_prices, symbol, self._active_exchanges
+                )
+                # Bitfinex last-bid cache is per-config but the value is
+                # identical across configs — replicate the legacy write
+                # so demotion routing still works.
+                for ex, bid_f, _, _, _ in exchange_prices:
+                    if ex == "Bitfinex":
                         self._bitfinex_last_bid[symbol] = bid_f
-                except (ValueError, TypeError):
-                    continue
+                        break
+            else:
+                # Legacy single-config path: build per-tick from fetchers.
+                exchange_prices = []
+                for fetcher in self._fetchers:
+                    if fetcher.exchange_name not in self._active_exchanges:
+                        continue
+                    state = fetcher.get_state()
+                    ps = state.get(symbol)
+                    if ps is None or not ps.bid or not ps.ask:
+                        continue
+                    if ps.received_at > 0 and (now - ps.received_at) > MAX_DATA_AGE_SECONDS:
+                        continue
+                    try:
+                        bid_f = float(ps.bid)
+                        ask_f = float(ps.ask)
+                        if bid_f <= 0 or ask_f <= 0:
+                            continue
+                        exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, ps.bids, ps.asks))
+                        if fetcher.exchange_name == "Bitfinex":
+                            self._bitfinex_last_bid[symbol] = bid_f
+                    except (ValueError, TypeError):
+                        continue
 
             if len(exchange_prices) < 2:
                 continue
+
+            # v0.31 perf: pre-filter to exchanges that can either buy or
+            # sell this symbol. With 80 configs running in parallel on a
+            # 1 vCPU VPS, the inner pair-combinatorics loop is the hot
+            # path; filtering early avoids ~30-50% of slippage compute
+            # for symbols heavily auto-disabled (low <$10k/24h volume).
+            buyers: set[str] = set()
+            sellers: set[str] = set()
+            if self._fee_manager:
+                buyers = {
+                    ex for (ex, _, _, _, _) in exchange_prices
+                    if self._fee_manager.can_buy(ex, symbol)
+                }
+                sellers = {
+                    ex for (ex, _, _, _, _) in exchange_prices
+                    if self._fee_manager.can_sell(ex, symbol)
+                }
+                if not buyers or not sellers:
+                    continue
+                # Drop the entry if it can't act as either side
+                exchange_prices = [
+                    e for e in exchange_prices
+                    if e[0] in buyers or e[0] in sellers
+                ]
+                if len(exchange_prices) < 2:
+                    continue
+
+            # Per-symbol scoring-fee memo. `get_scoring_fee(ex, symbol)`
+            # is deterministic for the duration of this scoring tick;
+            # the inner pair loop hits the same (ex, symbol) up to
+            # 2*(N-1) times. One dict lookup vs full fee computation
+            # is a meaningful win at 48 configs × 60 symbols × 72 pairs.
+            fee_cache: dict[str, float] = {}
 
             # Track mid-price for momentum filter (Feature 3)
             mid_prices = [(b + a) / 2.0 for _, b, a, _, _ in exchange_prices]
@@ -681,24 +877,30 @@ class SymbolOptimizer:
             best_fee = 0.0
 
             for i, (ex_buy, _, ask_i, _bids_i, asks_i) in enumerate(exchange_prices):
+                # Outer-leg block check: cheap set lookup using the
+                # buyers set already computed above. Was a fee_manager
+                # call per (i,j) pair — now once per i.
+                if self._fee_manager and ex_buy not in buyers:
+                    continue
                 for j, (ex_sell, bid_j, _, bids_j, _asks_j) in enumerate(exchange_prices):
                     if i == j:
                         continue
-                    # Skip pairs where either leg is blocked for this symbol
-                    # (per-role flags or symbol blocklists). Without this filter,
-                    # the score reflects opportunities through blocked exchanges
-                    # that allocation can't actually use — observed in S28 with
-                    # JUPUSDT scoring 0.27 on MEXC→Bitfinex while Bitfinex was
-                    # auto-disabled for JUP, leaving the bot allocated to a
-                    # zero-edge Bybit↔MEXC pair.
-                    if self._fee_manager and (
-                        not self._fee_manager.can_buy(ex_buy, symbol)
-                        or not self._fee_manager.can_sell(ex_sell, symbol)
-                    ):
+                    # Inner-leg block check: same — set lookup vs call.
+                    if self._fee_manager and ex_sell not in sellers:
                         continue
                     spread_pct = (bid_j - ask_i) / ask_i * 100
-                    buy_fee = self._fee_manager.get_scoring_fee(ex_buy, symbol) if self._fee_manager else 0.001
-                    sell_fee = self._fee_manager.get_scoring_fee(ex_sell, symbol) if self._fee_manager else 0.001
+                    if self._fee_manager:
+                        buy_fee = fee_cache.get(ex_buy)
+                        if buy_fee is None:
+                            buy_fee = self._fee_manager.get_scoring_fee(ex_buy, symbol)
+                            fee_cache[ex_buy] = buy_fee
+                        sell_fee = fee_cache.get(ex_sell)
+                        if sell_fee is None:
+                            sell_fee = self._fee_manager.get_scoring_fee(ex_sell, symbol)
+                            fee_cache[ex_sell] = sell_fee
+                    else:
+                        buy_fee = 0.001
+                        sell_fee = 0.001
                     fee_pct = (buy_fee + sell_fee) * 100
 
                     # Deduct estimated slippage from depth data
@@ -743,6 +945,20 @@ class SymbolOptimizer:
                     fee_pct=best_fee,
                 )
                 self._ticks[symbol].append(tick)
+                # Incremental aggregate maintenance — see __init__ note
+                self._agg_total[symbol] += 1
+                self._agg_sum_net[symbol] += best_net
+                if best_net > 0:
+                    self._agg_prof_count[symbol] += 1
+                    self._agg_prof_sum[symbol] += best_net
+                # Monotonic max-deque maintenance: pop trailing entries
+                # whose value is <= new value (they're dominated and can
+                # never be the max while the new value is in the window).
+                # Then append new (timestamp, value). Amortized O(1).
+                mq = self._best_net_dq[symbol]
+                while mq and mq[-1][1] <= best_net:
+                    mq.pop()
+                mq.append((now, best_net))
                 self._update_historical_stats(symbol, tick)
 
                 # During discovery: track exchange profitability + direction
@@ -758,11 +974,24 @@ class SymbolOptimizer:
         if self._discovery_mode:
             self._discovery_debug_log(now)
 
-        # Prune old ticks
+        # Prune old ticks + maintain incremental aggregates + max-deque.
         cutoff = now - self._scoring_window
-        for dq in self._ticks.values():
+        for sym, dq in self._ticks.items():
             while dq and dq[0].timestamp < cutoff:
-                dq.popleft()
+                evicted = dq.popleft()
+                v = evicted.best_net_pct
+                self._agg_total[sym] -= 1
+                self._agg_sum_net[sym] -= v
+                if v > 0:
+                    self._agg_prof_count[sym] -= 1
+                    self._agg_prof_sum[sym] -= v
+            # Prune monotonic max-deque to the same time cutoff. O(1)
+            # amortized — each entry is popleft'd at most once. The
+            # front of the deque is the current max in the window.
+            mq = self._best_net_dq.get(sym)
+            if mq is not None:
+                while mq and mq[0][0] < cutoff:
+                    mq.popleft()
 
         self._compute_scores()
 
@@ -852,7 +1081,7 @@ class SymbolOptimizer:
                     confirmation_start=now,
                 )
             wl = self._watchlist[s.symbol]
-            wl.score_samples.append(s.score)
+            wl.add_sample(s.score)
             # Only track peak after 10 samples — early scores are inflated
             # by tiny sample sizes (100% frequency on 1-2 ticks)
             if len(wl.score_samples) >= 10:
@@ -882,7 +1111,15 @@ class SymbolOptimizer:
             status = "NEW" if is_new else "WATCH"
             act_thresh = self._get_activation_threshold(s.symbol)
             fee_adj = self._compute_fee_threshold_adjustment(s.symbol)
-            logger.info(
+            # Per-tick WATCH logs at 48 configs × ~5 candidates each = ~240
+            # log lines/sec going through file I/O + dashboard buffer +
+            # WebSocket broadcast — directly contributes to capacity warnings.
+            # NEW (first sighting) stays at INFO since it's a discrete event.
+            # Steady-state WATCH drops to DEBUG so it only fires when the
+            # operator explicitly wants verbose output.
+            log_level = logging.INFO if is_new else logging.DEBUG
+            logger.log(
+                log_level,
                 f"[Candidate] {status} {s.symbol}: "
                 f"score={s.score:.6f} peak={wl.peak_score:.6f} "
                 f"drop={drop_from_peak:.0f}% tier={tier} "
@@ -910,6 +1147,13 @@ class SymbolOptimizer:
 
     def _discovery_debug_log(self, now: float) -> None:
         """Emit debug logs during discovery to diagnose low scores."""
+        # All output here is `logger.debug(...)`, which is filtered out
+        # at the default INFO threshold. But the f-strings + list comps +
+        # dict iteration still execute — at 48 configs × 2 cycles/min ×
+        # 14 min = ~1,344 wasted invocations per session. Skip the work
+        # entirely when DEBUG isn't enabled.
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
         elapsed = now - self._discovery_start
 
         # Every 30s: exchange data availability + tick-level spread summary
@@ -1028,8 +1272,7 @@ class SymbolOptimizer:
         all_scores: list[SymbolScore] = []
 
         for sym in self._all_symbols:
-            ticks = self._ticks[sym]
-            total = len(ticks)
+            total = self._agg_total.get(sym, 0)
             if total == 0:
                 all_scores.append(
                     SymbolScore(
@@ -1046,17 +1289,26 @@ class SymbolOptimizer:
                 )
                 continue
 
-            profitable = [t for t in ticks if t.best_net_pct > 0]
-            profitable_count = len(profitable)
-            frequency = profitable_count / total
+            # O(1) read from incremental aggregates (maintained at the
+            # append/popleft sites in `_score_tick`). Pre-v0.31 this was
+            # 4 linear scans of a deque growing toward `scoring_window`
+            # — the dominant cause of progressive sweep-time growth.
+            sum_net = self._agg_sum_net.get(sym, 0.0)
+            profitable_count = self._agg_prof_count.get(sym, 0)
+            sum_profitable_net = self._agg_prof_sum.get(sym, 0.0)
 
-            avg_net = sum(t.best_net_pct for t in ticks) / total
+            # O(1) read from monotonic max-deque (front is always the
+            # current max in the time window). Replaces the previous
+            # lazy-recompute pattern that produced the sweep peak at
+            # deque saturation.
+            mq = self._best_net_dq.get(sym)
+            best_net = mq[0][1] if mq else float("-inf")
+
+            frequency = profitable_count / total
+            avg_net = sum_net / total
             avg_profitable_net = (
-                sum(t.best_net_pct for t in profitable) / profitable_count
-                if profitable_count > 0
-                else 0.0
+                sum_profitable_net / profitable_count if profitable_count > 0 else 0.0
             )
-            best_net = max(t.best_net_pct for t in ticks)
 
             # score = avg profitable spread × frequency
             score = avg_profitable_net * frequency
@@ -1226,8 +1478,28 @@ class SymbolOptimizer:
 
     # ── Discovery ─────────────────────────────────────────────────────────
 
-    def _complete_discovery(self) -> None:
-        """Pick best symbols after discovery period. All active exchanges stay active."""
+    def _complete_discovery(self, from_fast_track: bool = False) -> None:
+        """Pick best symbols after discovery period. All active exchanges stay active.
+
+        `from_fast_track`: True when the call came from the early-exit
+        path (a candidate cleared the fast-track timer + threshold) rather
+        than from the duration-elapsed path. When True and the activation
+        threshold + stability gate then rejects every candidate, we DON'T
+        double `_discovery_duration` or reset `_discovery_start` — the
+        ticks/watchlist/score history all keep accumulating, but the
+        duration timer stays put so the next fast-track re-evaluation
+        fires on the natural cadence instead of being pushed out
+        exponentially.
+
+        Without this differentiation, every fast-track rejection (e.g.
+        cliff-drop on a candidate that bloomed and then cooled) compounds
+        `_discovery_duration` 300→600→1200→…→3600. The candidate's tick
+        data was preserved but the time-based gates kept growing, making
+        activation effectively impossible — observed in S31 with AR on
+        Group 2/Config 4 ticking 191/274 → 274/405 across an extension,
+        the user reasonably perceiving it as "ticks reset" when really
+        the *eligible-to-fire window* was the thing pushed further away.
+        """
         if not self._scores:
             logger.warning("[Optimizer] Discovery complete but no scores available")
             logger.setLevel(logging.INFO)
@@ -1343,21 +1615,47 @@ class SymbolOptimizer:
                 f"{strong_count} strong (>= {self._strong_threshold}), activating {len(best_symbols)}"
             )
         else:
-            # No tradeable symbols found — extend discovery and keep scanning
-            self._discovery_duration = min(
-                self._discovery_duration * 2, 3600
-            )
-            self._discovery_start = time.time()
+            # No tradeable symbols found — keep scanning. Two paths:
+            #   * from_fast_track=True: a candidate cleared the threshold
+            #     but stability gate rejected it (cliff drop / declining /
+            #     etc.). The ticks + score history are still accumulating
+            #     and the candidate may stabilize on the next eval. DON'T
+            #     compound `_discovery_duration` — that just pushes future
+            #     activation gates exponentially further out.
+            #   * from_fast_track=False: actual duration timeout with no
+            #     candidates anywhere. Double duration (capped at 3600s)
+            #     so we keep collecting data but don't churn evaluation
+            #     work.
             top_10 = ", ".join(
                 f"{s.symbol.replace('USDT', '')}({s.score:.6f} "
                 f"prof={s.profitable_ticks}/{s.total_ticks} "
                 f"best={s.best_net_pct:+.4f}%)"
                 for s in ranked_symbols[:10]
             ) if ranked_symbols else "no data"
-            logger.warning(
-                f"[Optimizer] Discovery: NO tradeable symbols (>= {self._trading_threshold}). "
-                f"Extending to {self._discovery_duration}s. Top 10: {top_10}"
-            )
+            if from_fast_track:
+                # Same per-config 30s throttle — when a candidate keeps
+                # cycling through fast-track + stability rejection, both
+                # this log and the "found at Xs" log fire on every tick.
+                # Logging once per 30s gives the operator visibility
+                # without flooding the file.
+                now_ts = time.time()
+                if now_ts - self._last_fast_track_log >= 30.0:
+                    self._last_fast_track_log = now_ts
+                    logger.info(
+                        f"[Optimizer] Discovery: candidates cleared threshold "
+                        f"but stability gate rejected — keeping current duration "
+                        f"({self._discovery_duration}s), ticks preserved. "
+                        f"Top 10: {top_10}"
+                    )
+            else:
+                self._discovery_duration = min(
+                    self._discovery_duration * 2, 3600
+                )
+                self._discovery_start = time.time()
+                logger.warning(
+                    f"[Optimizer] Discovery: NO tradeable symbols (>= {self._trading_threshold}). "
+                    f"Extending to {self._discovery_duration}s. Top 10: {top_10}"
+                )
             return  # Stay in discovery mode, don't proceed
 
         if not best_symbols:
@@ -1524,6 +1822,23 @@ class SymbolOptimizer:
         self._balance._symbols = list(best_symbols)
         self._balance.reconfigure(allocations=allocations)
 
+        # CRITICAL: reset anomaly peaks on basis change. balance.reconfigure
+        # recomputes _initial_investment from the new allocation sum; without
+        # this reset, _peak_realized_value stays anchored to the old basis
+        # and Layer A misreads the basis change as a massive realized
+        # drawdown (e.g. 75% phantom emergency in the 21:03 trace).
+        try:
+            new_realized = self._balance.get_realized_capital(
+                trading_pnl=0.0,  # post-reconfigure trading_pnl is what monitor will track going forward
+                credited_cashback=0.0,
+            )
+            self._monitor._anomaly.reset_peak_on_basis_change(
+                portfolio_value=new_realized,
+                reason="discovery_complete_reconfigure",
+            )
+        except Exception:
+            logger.exception("[Optimizer] Failed to reset anomaly peak post-reconfigure")
+
         # Reconfigure monitor with new symbols/exchanges (preserves cumulative trades/P&L)
         self._monitor.reconfigure(
             symbols=best_symbols,
@@ -1654,24 +1969,26 @@ class SymbolOptimizer:
         now = time.time()
         active_set = set(self._active_symbols)
 
-        # Determine threshold: max of promotion_threshold and worst active score
-        active_scores = [
-            self._scores[s].score
-            for s in self._active_symbols
-            if s in self._scores
-        ]
-        threshold = max(
-            self._promotion_threshold,
-            min(active_scores) if active_scores else 0.0,
-        )
-
-        # Update existing entries and add new ones
+        # Update existing entries and add new ones.
+        # Pre-fix: threshold was `max(promotion_threshold, min(active_scores))`
+        # — meaning if any active symbol scored anomalously high (e.g., JUP at
+        # ~1.32 during its structural inefficiency window), no other candidate
+        # could ever stay watchlisted because nothing else hits 1.32. Observed
+        # in 20:21 trace: ALGO at score=0.018 entered EXPAND_TRACK, was dropped
+        # 28s later as `0.018<1.328104`, then immediately re-added as "first
+        # seen" by _evaluate_expansion. The 30s observation reset broke
+        # confirmation entirely. Now we use the per-symbol activation threshold
+        # which matches the threshold _evaluate_expansion uses to consider the
+        # candidate, so they don't fight each other. The rotation gate (beating
+        # worst active to trigger replacement) lives in _evaluate_rotation
+        # where it belongs — not in watchlist retention.
         cooldown_set = set(self._recently_demoted.keys())
         removed_candidates: list[str] = []
         for sym, score_obj in self._scores.items():
             if sym in active_set or sym in cooldown_set:
                 continue
 
+            threshold = self._get_activation_threshold(sym)
             if score_obj.score >= threshold and score_obj.score > 0:
                 is_new = sym not in self._watchlist
                 if is_new:
@@ -1686,7 +2003,7 @@ class SymbolOptimizer:
                         stats.times_entered_watchlist += 1
 
                 entry = self._watchlist[sym]
-                entry.score_samples.append(score_obj.score)
+                entry.add_sample(score_obj.score)
                 if len(entry.score_samples) >= 10:
                     entry.peak_score = max(entry.peak_score, score_obj.score)
 
@@ -1734,7 +2051,13 @@ class SymbolOptimizer:
                     status = "NEW" if is_new else "WATCH"
                     act_thresh = self._get_activation_threshold(sym)
                     fee_adj = self._compute_fee_threshold_adjustment(sym)
-                    logger.info(
+                    # Same throttling as the discovery-phase WATCH — NEW
+                    # stays INFO (discrete event), per-tick WATCH drops to
+                    # DEBUG to keep file I/O and dashboard buffer usage
+                    # under control at 40+ configs scale.
+                    log_level = logging.INFO if is_new else logging.DEBUG
+                    logger.log(
+                        log_level,
                         f"[Candidate] {status} {sym}: "
                         f"score={score_val:.6f} peak={entry.peak_score:.6f} "
                         f"avg_net={score_obj.avg_profitable_net:.4f}% freq={score_obj.frequency:.1%} "
@@ -1758,10 +2081,71 @@ class SymbolOptimizer:
                 + (f" +{len(removed_candidates)-5} more" if len(removed_candidates) > 5 else "")
             )
 
+    # ── Regime helpers ──────────────────────────────────────────────────
+
+    def _current_regime(self) -> str:
+        """Return 'strong', 'neutral', or 'weak' for the current UTC hour.
+
+        Mirrors the monitor's helper. When regime_gating_enabled is False,
+        always returns 'strong' so all gates remain open. Hours not in
+        strong_hours or neutral_hours fall to weak.
+        """
+        if not self._regime_gating_enabled:
+            return "strong"
+        h = time.gmtime().tm_hour
+        if h in self._regime_strong_hours:
+            return "strong"
+        if h in self._regime_neutral_hours:
+            return "neutral"
+        return "weak"
+
+    def _compute_demotion_cooldown(self, symbol: str) -> float:
+        """Frequency-scaled cooldown.
+
+        A symbol cycling through demotions wastes setup+teardown fees
+        on each cycle without matching trade volume. Geometric scaling:
+
+            1 demotion in last 24h →  1× base cooldown
+            2 demotions             →  2×
+            3 demotions             →  4×
+            4+ demotions            →  8× (capped, ~3.3h at default 25min base)
+
+        The 24h window auto-resets at midnight UTC roll, so a symbol
+        that had a bad run yesterday gets a fresh chance today.
+        Disabled per-config via `demotion_freq_scaling_enabled = False`.
+        """
+        base = self._demotion_cooldown
+        if not self._demotion_freq_scaling_enabled:
+            return base
+        hist = self._demotion_history.get(symbol)
+        if not hist:
+            return base
+        # Prune to 24h rolling window (cheap on small list)
+        now = time.time()
+        cutoff = now - 86400.0
+        recent = [t for t in hist if t >= cutoff]
+        n = len(recent)
+        if n <= 1:
+            return base
+        # 2^(n-1) capped at 8× — n=2→2×, n=3→4×, n=4+→8×
+        multiplier = min(2 ** (n - 1), 8)
+        return base * multiplier
+
     # ── Demotion ─────────────────────────────────────────────────────────
 
     def _evaluate_demotions(self) -> None:
         """Demote active symbols that drop below trading threshold."""
+        # Regime gate: skip demotions during weak UTC hours. The activation
+        # cost was already paid; demoting now means paying teardown fees
+        # to free capital that probably won't get redeployed during this
+        # thin window anyway. Better to let symbols sit until conditions
+        # improve.
+        if (
+            self._regime_gating_enabled
+            and self._regime_weak_disable_demote
+            and self._current_regime() == "weak"
+        ):
+            return
         now = time.time()
         to_demote: list[str] = []
 
@@ -1965,13 +2349,22 @@ class SymbolOptimizer:
         self._demotion_tracking.pop(symbol, None)
         # Anti-churning: record demotion time to prevent immediate re-activation
         self._recently_demoted[symbol] = now
+        # Track demotion in 24h rolling history for frequency-aware cooldown scaling
+        hist = self._demotion_history.setdefault(symbol, [])
+        cutoff_24h = now - 86400.0
+        hist[:] = [t for t in hist if t >= cutoff_24h]
+        hist.append(now)
+        # Compute escalating cooldown: 1× / 2× / 4× / 8× for 1/2/3/4+ demotions
+        effective_cooldown = self._compute_demotion_cooldown(symbol)
 
         self._monitor.update_symbols(list(self._active_symbols))
         self._balance.update_symbols(list(self._active_symbols))
 
         logger.info(
             f"[Optimizer] Demotion complete: {symbol} removed, "
-            f"cooldown={self._demotion_cooldown}s, active: {self._active_symbols}"
+            f"cooldown={effective_cooldown:.0f}s "
+            f"(base={self._demotion_cooldown:.0f}s, "
+            f"24h_demotions={len(hist)}), active: {self._active_symbols}"
         )
 
         # Redistribute freed capital to starved buyer exchanges
@@ -2097,11 +2490,18 @@ class SymbolOptimizer:
         # Single destination: the configured custody hub (default Bybit)
         transfer = self._balance.transfer_excess_to_custody(excess)
         if transfer is None:
-            logger.info(
-                f"[Capital] Trading float overflow blocked: "
-                f"bfx=${bfx_usdt:.2f} target=${target:.2f} excess=${excess:.2f} "
-                f"(custody hub={self._balance._custody_hub_exchange} unreachable)"
-            )
+            # When the custody hub is disabled (e.g. Lean BFX+MEX config),
+            # this condition persists indefinitely and the log fires on
+            # EVERY tick. Throttle to once per 5 min per config so we
+            # still surface the issue without flooding the file.
+            now_ts = time.time()
+            if now_ts - self._last_overflow_blocked_log >= 300.0:
+                self._last_overflow_blocked_log = now_ts
+                logger.info(
+                    f"[Capital] Trading float overflow blocked: "
+                    f"bfx=${bfx_usdt:.2f} target=${target:.2f} excess=${excess:.2f} "
+                    f"(custody hub={self._balance._custody_hub_exchange} unreachable)"
+                )
             return
         logger.info(
             f"[Capital] Trading float overflow: Bitfinex ${bfx_usdt:.2f} > "
@@ -2119,6 +2519,15 @@ class SymbolOptimizer:
         before _evaluate_rotation() runs again. When active count < min_active_symbols
         this delay creates dead capital. This method bypasses the eval cooldown.
         """
+        # Regime gate: skip auto-expand during weak UTC hours. Activating
+        # new symbols means paying setup transfer fees — wasteful if the
+        # market window won't generate enough trades to amortize them.
+        if (
+            self._regime_gating_enabled
+            and self._regime_weak_disable_expand
+            and self._current_regime() == "weak"
+        ):
+            return
         active_count = len(self._active_symbols)
         deficit = self._min_active_symbols - active_count
         logger.info(
@@ -2680,10 +3089,12 @@ class SymbolOptimizer:
                 )
             return
 
-        # Clean up expired demotion cooldowns
+        # Clean up expired demotion cooldowns. Cooldown is scaled by
+        # 24h demotion count when frequency scaling is enabled — a
+        # symbol that keeps churning gets locked out longer each time.
         expired = [
             sym for sym, ts in self._recently_demoted.items()
-            if now - ts >= self._demotion_cooldown
+            if now - ts >= self._compute_demotion_cooldown(sym)
         ]
         for sym in expired:
             del self._recently_demoted[sym]
@@ -2901,7 +3312,7 @@ class SymbolOptimizer:
                         f"first seen, observing stability"
                     )
                     continue
-                wl_entry.score_samples.append(candidate.score)
+                wl_entry.add_sample(candidate.score)
                 if len(wl_entry.score_samples) >= 10:
                     wl_entry.peak_score = max(wl_entry.peak_score, candidate.score)
                 stable, reason = self._is_score_stable(wl_entry, candidate.score)
@@ -2914,16 +3325,26 @@ class SymbolOptimizer:
                         f"unstable: {reason}"
                     )
                     continue
-                # Expansion cost gate: estimate setup cost vs expected profit
+                # Expansion cost gate: estimate setup cost vs expected profit.
+                # Setup cost requires a stricter horizon than reallocation —
+                # `activation_profit_horizon_multiplier` raises the bar for
+                # NEW activations (which pay full setup). Reallocations
+                # between already-active exchanges keep using the base
+                # horizon since the inventory is already in place.
                 est_cost = self._estimate_expansion_cost(candidate.symbol, candidate)
-                est_benefit = candidate.est_hourly_profit * self._reallocation_cost_horizon
+                effective_horizon = (
+                    self._reallocation_cost_horizon * self._activation_profit_horizon_multiplier
+                )
+                est_benefit = candidate.est_hourly_profit * effective_horizon
                 if est_cost > 0 and est_benefit > 0 and est_cost > est_benefit:
                     logger.info(
                         f"[Candidate] EXPAND_BLOCKED {candidate.symbol}: "
                         f"setup_cost=${est_cost:.4f} > "
                         f"est_benefit=${est_benefit:.4f} "
                         f"(hourly=${candidate.est_hourly_profit:.4f} × "
-                        f"{self._reallocation_cost_horizon}h)"
+                        f"{effective_horizon:.1f}h, "
+                        f"base={self._reallocation_cost_horizon}h × "
+                        f"activation_mult={self._activation_profit_horizon_multiplier:.1f})"
                     )
                     continue
                 # Pair fee viability: block if dominant pair's combined fees exceed avg net%
@@ -3395,6 +3816,31 @@ class SymbolOptimizer:
             new_buyers = {ex for ex, _ in new_pairs["buyers"]}
 
             if old_sellers != new_sellers or old_buyers != new_buyers:
+                # No-trades-since-last-alloc gate: dominant-pair detection
+                # keeps shifting based on tick-level scoring, but moving
+                # capital across exchanges costs taker fees on BOTH sides
+                # of the swap. If we haven't actually traded the symbol
+                # since the previous allocation, the previous allocation
+                # didn't generate value — chasing a new "winner" is
+                # speculative and the cost often exceeds any benefit.
+                # Observed in S31: Group 2/Config 3 paid $0.38 in
+                # internal-taker fees from a single
+                # [Bybit,MEXC,OKX]→[Bitget,MEXC,OKX] reallocation despite
+                # zero AR trades since activation.
+                last_realloc = self._last_reallocation.get(sym, 0.0)
+                trades_since = 0
+                if self._monitor is not None:
+                    trades_since = sum(
+                        1 for t in self._monitor._trades
+                        if t.symbol == sym and t.timestamp > last_realloc
+                    )
+                if trades_since == 0:
+                    logger.info(
+                        f"[Optimizer] Reallocation SKIPPED for {sym}: "
+                        f"0 trades since last allocation — no realized "
+                        f"value to justify reallocation churn"
+                    )
+                    continue
                 if self._reallocate_symbol(sym, old_pairs, new_pairs):
                     self._dominant_pairs[sym] = new_pairs
                     self._last_reallocation[sym] = now
@@ -3956,6 +4402,12 @@ class SymbolOptimizer:
         # Clear rolling windows (NOT historical stats)
         for dq in self._ticks.values():
             dq.clear()
+        # Aggregates mirror the deques — reset alongside
+        self._agg_total.clear()
+        self._agg_sum_net.clear()
+        self._agg_prof_count.clear()
+        self._agg_prof_sum.clear()
+        self._best_net_dq.clear()
         self._scores.clear()
         self._rotations.clear()
         self._watchlist.clear()
@@ -4007,7 +4459,9 @@ class SymbolOptimizer:
                     "symbol": e.symbol,
                     "entered_at": e.entered_at,
                     "confirmation_start": e.confirmation_start,
-                    "score_samples": e.score_samples,
+                    # Serialize deque as list for JSON; from_state_dict
+                    # coerces back to deque(maxlen=60).
+                    "score_samples": list(e.score_samples),
                     "peak_score": e.peak_score,
                     "confirmed": e.confirmed,
                 }
@@ -4042,10 +4496,16 @@ class SymbolOptimizer:
             self._historical_stats[sym] = HistoricalSymbolStats(**stats_dict)
         for ex, stats_dict in data.get("_historical_exchange_stats", {}).items():
             self._historical_exchange_stats[ex] = HistoricalExchangeStats(**stats_dict)
-        self._watchlist = {
-            sym: WatchlistEntry(**entry)
-            for sym, entry in data.get("_watchlist", {}).items()
-        }
+        # Trim score_samples to SAMPLES_MAX in case a pre-cap state file
+        # is being loaded with a long list.
+        self._watchlist = {}
+        for sym, entry in data.get("_watchlist", {}).items():
+            entry = dict(entry)
+            saved = entry.get("score_samples", []) or []
+            if len(saved) > WatchlistEntry.SAMPLES_MAX:
+                saved = saved[-WatchlistEntry.SAMPLES_MAX:]
+            entry["score_samples"] = list(saved)
+            self._watchlist[sym] = WatchlistEntry(**entry)
         self._demotion_tracking = data.get("_demotion_tracking", {})
         self._recently_demoted = data.get("_recently_demoted", {})
         self._dominant_pairs = data.get("_dominant_pairs", {})

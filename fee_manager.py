@@ -159,6 +159,11 @@ class FeeManager:
         # Referrer commission tracking (display-only, user's personal account)
         self._total_referrer_earnings: float = 0.0
         self._referrer_earnings_per_exchange: dict[str, float] = {}
+        # Version counter — bumped whenever the routing-relevant config
+        # state changes (apply_auto_disable, save_fee_settings, etc.).
+        # Read by the orchestrator's globally-allowed cache to detect
+        # when its (symbol, exchange) filter needs rebuilding.
+        self._version: int = 0
 
         if not self._configs:
             self._configs = self._build_defaults()
@@ -308,6 +313,7 @@ class FeeManager:
         Caller should persist via to_settings_dict + save_settings.
         """
         diffs: dict[str, dict] = {}
+        any_change = False
         for exchange, new_list in per_exchange.items():
             cfg = self._configs.get(exchange)
             if cfg is None:
@@ -320,6 +326,9 @@ class FeeManager:
             cfg.auto_disabled_symbols = sorted(new_set)
             if added or removed:
                 diffs[exchange] = {"added": added, "removed": removed, "kept": kept}
+                any_change = True
+        if any_change:
+            self._version += 1
         return diffs
 
     def get_fee_model(self, exchange: str) -> str:
@@ -450,6 +459,7 @@ class FeeManager:
         """Hot-apply fee config changes from dashboard settings."""
         for exchange, data in fee_configs.items():
             self._configs[exchange] = ExchangeFeeConfig.from_dict(exchange, data)
+        self._version += 1
         logger.info("[Fee] Fee configs updated from settings")
 
     def to_settings_dict(self) -> dict:
