@@ -4,7 +4,7 @@
 2026-02-22
 
 ## Current Version
-**v0.32.0-beta** — VPS storage hardening release. Adds environment-controlled CSV snapshot retention, configurable bot log retention, and a repeatable cleanup helper for full-disk recovery. The multi-config architecture introduced in **v0.31.0-beta** remains the canonical runtime model; earlier sections describe the original single-config bot, and most facts still apply per-config.
+**v0.32.1-beta** — Dashboard config-import reliability patch. Large registry imports now fit within the dashboard WebSocket message limit, import success/failure is surfaced in the UI, and the v0.32 storage hardening controls remain active. The multi-config architecture introduced in **v0.31.0-beta** remains the canonical runtime model; earlier sections describe the original single-config bot, and most facts still apply per-config.
 
 ## Instructions
 - Never run `git checkout` or `git commit` commands without my confirmation.
@@ -1504,7 +1504,18 @@ Detailed reference documents in `documentations/`:
 
 ---
 
-## v0.32.0-beta — VPS Storage Hardening (current version)
+## v0.32.1-beta — Dashboard Config Import Reliability (current version)
+
+Large exported registries can exceed the `websockets` library's default 1 MiB incoming message limit. A full 54-config registry export is ~5 MiB, so importing it from the dashboard could close the socket before the backend import handler ran.
+
+Fixes:
+
+- `DASHBOARD_WS_MAX_SIZE_MB=32` controls the dashboard WebSocket incoming message limit.
+- Config import accepts both raw registry JSON and a wrapped `config_export_response` payload.
+- Import requests now log the incoming group/config counts before the registry swap.
+- Dashboard import now waits for `config_ack` / `config_error` and shows success or failure instead of only showing a hopeful "Importing" toast.
+
+## v0.32.0-beta — VPS Storage Hardening
 
 Production/VPS runs can now control disk growth without editing code:
 
@@ -1513,6 +1524,7 @@ CSV_SNAPSHOTS_ENABLED=0
 SNAPSHOT_INTERVAL_SECONDS=60
 CSV_MAX_FILE_MB=10
 BOT_LOG_BACKUP_DAYS=7
+DASHBOARD_WS_MAX_SIZE_MB=32
 ```
 
 - `CSV_SNAPSHOTS_ENABLED=0` stops raw per-symbol CSV snapshots while keeping live in-memory market data for the bot.
