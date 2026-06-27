@@ -205,7 +205,9 @@ export function useWebSocket() {
             || data.type === 'hard_stop_result' || data.type === 'distribute_result' || data.type === 'distribute_error'
             || data.type === 'volumes_response'
             || data.type === 'config_settings_response'
-            || data.type === 'config_export_response') {
+            || data.type === 'config_export_response'
+            || data.type === 'config_ack'
+            || data.type === 'config_error') {
           exportCallbackRef.current?.(data);
           exportCallbackRef.current = null;
           return;

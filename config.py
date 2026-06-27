@@ -682,6 +682,7 @@ del _n
 
 # Dashboard WebSocket server
 DASHBOARD_WS_PORT: int = 8765
+DASHBOARD_WS_MAX_SIZE_MB: int = _env_int("DASHBOARD_WS_MAX_SIZE_MB", 32, min_value=1)
 
 # Dashboard authentication (loaded from .env)
 import sys as _sys

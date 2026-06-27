@@ -31,6 +31,7 @@ from config import (
     ALLOWED_ORIGINS,
     DASHBOARD_BIND_HOST,
     DASHBOARD_USERNAME,
+    DASHBOARD_WS_MAX_SIZE_MB,
     DASHBOARD_WS_PORT,
     RECAPTCHA_SECRET_KEY,
     RECAPTCHA_SITE_KEY,
@@ -751,6 +752,7 @@ class DashboardServer:
         serve_kwargs: dict[str, Any] = {
             "ping_interval": 20,
             "ping_timeout": 60,
+            "max_size": DASHBOARD_WS_MAX_SIZE_MB * 1024 * 1024,
         }
         if ALLOWED_ORIGINS:
             serve_kwargs["process_request"] = self._check_origin
@@ -2112,13 +2114,27 @@ class DashboardServer:
                 # closed first); new configs are built; existing configs are
                 # rebuilt if their settings changed.
                 payload = msg.get("payload")
+                if isinstance(payload, dict) and isinstance(payload.get("payload"), dict):
+                    # Tolerate operators uploading a raw config_export_response
+                    # envelope instead of the downloaded registry payload.
+                    payload = payload["payload"]
                 if not isinstance(payload, dict) or "groups" not in payload:
                     return await _err("Invalid import payload: missing 'groups'")
+                groups_payload = payload.get("groups")
+                if not isinstance(groups_payload, list):
+                    return await _err("Invalid import payload: 'groups' must be an array")
                 # Validate schema_version
                 if payload.get("schema_version") not in (None, 2):
                     return await _err(
                         f"Unsupported schema_version: {payload.get('schema_version')}"
                     )
+                incoming_configs = sum(
+                    len(g.get("configs", [])) for g in groups_payload if isinstance(g, dict)
+                )
+                logger.info(
+                    f"[Config] Import requested: "
+                    f"{len(groups_payload)} group(s), {incoming_configs} config(s)"
+                )
                 # Close real hedge positions on every existing bundle BEFORE
                 # the registry swap — otherwise teardown might race against
                 # the import.

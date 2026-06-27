@@ -1130,6 +1130,9 @@ export default function ConfigGroupsTab({
         toast.show(`Invalid JSON: ${err}`, 'error', 4000);
         return;
       }
+      if (payload && typeof payload === 'object' && payload.payload && typeof payload.payload === 'object') {
+        payload = payload.payload;
+      }
       if (!payload || typeof payload !== 'object' || !Array.isArray(payload.groups)) {
         toast.show('Invalid file: missing "groups" array', 'error', 4000);
         return;
@@ -1161,7 +1164,17 @@ export default function ConfigGroupsTab({
         confirmLabel: 'Import (Overwrite)',
         destructive: true,
         onConfirm: () => {
-          onSendMessage({ type: 'config_import_all', payload });
+          onSendWithCallback({ type: 'config_import_all', payload }, (data: any) => {
+            if (data?.ok) {
+              toast.show(
+                `Imported ${data.groups ?? incomingGroups} group(s) / ${data.configs ?? incomingConfigs} config(s)`,
+                'success',
+                4000,
+              );
+            } else {
+              toast.show(`Import failed: ${data?.error ?? 'unknown error'}`, 'error', 6000);
+            }
+          });
           toast.show('Importing — registry will reload momentarily', 'info', 3000);
         },
       });
