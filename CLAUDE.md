@@ -4,7 +4,7 @@
 2026-02-22
 
 ## Current Version
-**v0.31.0-beta** — Multi-config orchestrator architecture. See the **v0.31.0-beta — Multi-Config Architecture** section near the bottom of this file for the canonical reference. Earlier sections describe the original single-config bot — most facts (exchange list, fees, symbol tiers, fetcher details, slippage simulation, anomaly logic, fee management) still apply per-config in v0.31, but anything that says "the bot does X" should be read as "each config's bundle does X" in multi-config mode.
+**v0.32.0-beta** — VPS storage hardening release. Adds environment-controlled CSV snapshot retention, configurable bot log retention, and a repeatable cleanup helper for full-disk recovery. The multi-config architecture introduced in **v0.31.0-beta** remains the canonical runtime model; earlier sections describe the original single-config bot, and most facts still apply per-config.
 
 ## Instructions
 - Never run `git checkout` or `git commit` commands without my confirmation.
@@ -1498,13 +1498,30 @@ Detailed reference documents in `documentations/`:
 - **Language:** Python 3.12+
 - **Async:** asyncio + websockets library
 - **Dashboard:** React 18 + TypeScript + Vite + Tailwind CSS + react-router-dom (HashRouter) + recharts
-- **Data:** CSV snapshots per exchange per symbol (1s intervals)
+- **Data:** Optional CSV snapshots per exchange per symbol; production/VPS runs should disable or cap them via `.env`
 - **Architecture (v0.31+):** Multi-config orchestrator drives a round-robin sweep across N per-config bundles. Each bundle owns its own BalanceTracker / ArbitrageMonitor / SymbolOptimizer / FeeManager / HedgeManager. Shared resources: BaseFetchers (9 exchanges), ExchangeInfoManager, FundingMonitor, VolumeFetcher, DemoFetcher, DashboardServer, StateManager.
 - **Output:** Real-time dashboard + XLSX export + per-config bot logs
 
 ---
 
-## v0.31.0-beta — Multi-Config Architecture (current version)
+## v0.32.0-beta — VPS Storage Hardening (current version)
+
+Production/VPS runs can now control disk growth without editing code:
+
+```env
+CSV_SNAPSHOTS_ENABLED=0
+SNAPSHOT_INTERVAL_SECONDS=60
+CSV_MAX_FILE_MB=10
+BOT_LOG_BACKUP_DAYS=7
+```
+
+- `CSV_SNAPSHOTS_ENABLED=0` stops raw per-symbol CSV snapshots while keeping live in-memory market data for the bot.
+- `SNAPSHOT_INTERVAL_SECONDS` controls snapshot cadence when CSV snapshots are enabled.
+- `CSV_MAX_FILE_MB` truncates each per-symbol CSV after it reaches the configured size.
+- `BOT_LOG_BACKUP_DAYS` controls the daily rotated `logs/arbitragebot.log.*` retention count.
+- `scripts/cleanup_storage.sh` provides a dry-run-first cleanup path for VPS disk-full recovery.
+
+## v0.31.0-beta — Multi-Config Architecture
 
 The bot runs **N independent strategy configs in parallel** against the same live market data. The operator can A/B/C/… test variations simultaneously and compare results within a single session. Each config has its own balances, trades, P&L, anomaly state, hedge state. Fetchers, funding, exchange info, and the dashboard auth server are shared.
 

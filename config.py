@@ -6,7 +6,7 @@ All symbols, exchange settings, and operational parameters.
 
 import os
 
-__version__ = "0.31.0-beta"
+__version__ = "0.32.0-beta"
 
 
 def _env_bool(name: str, default: bool) -> bool:
