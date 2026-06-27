@@ -27,7 +27,9 @@ from typing import Any
 import websockets
 
 from config import (
+    CSV_MAX_FILE_MB,
     CSV_COLUMNS,
+    CSV_SNAPSHOTS_ENABLED,
     DATA_DIR,
     RECONNECT_BACKOFF_FACTOR,
     RECONNECT_INITIAL_DELAY,
@@ -162,7 +164,10 @@ class BaseFetcher(abc.ABC):
     async def run(self) -> None:
         """Main entry point. Connects to WebSocket and runs until stopped."""
         self._running = True
-        self._ensure_output_dir()
+        if CSV_SNAPSHOTS_ENABLED:
+            self._ensure_output_dir()
+        else:
+            logger.info(f"[{self.exchange_name}] CSV snapshots disabled")
         logger.info(f"[{self.exchange_name}] Starting fetcher for {len(self.symbols)} symbols")
 
         while self._running:
@@ -196,15 +201,18 @@ class BaseFetcher(abc.ABC):
 
             await self._on_connect(ws)
 
-            listener_task = asyncio.create_task(self._listen(ws))
-            snapshot_task = asyncio.create_task(self._snapshot_loop())
-            keepalive_task = asyncio.create_task(self._keep_alive(ws))
-            staleness_task = asyncio.create_task(self._staleness_watchdog(ws))
-            latency_task = asyncio.create_task(self._latency_log_loop())
+            tasks = [
+                asyncio.create_task(self._listen(ws)),
+                asyncio.create_task(self._keep_alive(ws)),
+                asyncio.create_task(self._staleness_watchdog(ws)),
+                asyncio.create_task(self._latency_log_loop()),
+            ]
+            if CSV_SNAPSHOTS_ENABLED:
+                tasks.append(asyncio.create_task(self._snapshot_loop()))
 
             try:
                 done, pending = await asyncio.wait(
-                    [listener_task, snapshot_task, keepalive_task, staleness_task, latency_task],
+                    tasks,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 for task in pending:
@@ -296,8 +304,17 @@ class BaseFetcher(abc.ABC):
         """Append a single row to the symbol's CSV file."""
         csv_path = self._output_dir / f"{symbol}.csv"
 
-        if symbol not in self._csv_files_initialized:
-            if not csv_path.exists() or csv_path.stat().st_size == 0:
+        if CSV_MAX_FILE_MB > 0 and csv_path.exists():
+            max_bytes = int(CSV_MAX_FILE_MB * 1024 * 1024)
+            if csv_path.stat().st_size >= max_bytes:
+                self._csv_files_initialized.add(symbol)
+                with open(csv_path, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(CSV_COLUMNS)
+
+        needs_header = not csv_path.exists() or csv_path.stat().st_size == 0
+        if symbol not in self._csv_files_initialized or needs_header:
+            if needs_header:
                 with open(csv_path, "w", newline="") as f:
                     writer = csv.writer(f)
                     writer.writerow(CSV_COLUMNS)

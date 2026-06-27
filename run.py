@@ -40,7 +40,15 @@ def load_env() -> None:
 # Load .env BEFORE importing config (which reads os.environ at module level)
 load_env()
 
-from config import ACTIVE_SYMBOLS, SYMBOLS, __version__
+from config import (
+    ACTIVE_SYMBOLS,
+    BOT_LOG_BACKUP_DAYS,
+    CSV_MAX_FILE_MB,
+    CSV_SNAPSHOTS_ENABLED,
+    SNAPSHOT_INTERVAL_SECONDS,
+    SYMBOLS,
+    __version__,
+)
 from dashboard_server import DashboardLogHandler, DashboardServer
 from exchange_info import ExchangeInfoManager
 from fetchers.binance import BinanceFetcher
@@ -108,7 +116,7 @@ def setup_logging() -> tuple[Path, DashboardLogHandler, "logging.handlers.QueueL
     console.setLevel(logging.WARNING)
 
     file_h = logging.handlers.TimedRotatingFileHandler(
-        log_file, when="midnight", utc=True, backupCount=30,
+        log_file, when="midnight", utc=True, backupCount=BOT_LOG_BACKUP_DAYS,
     )
     file_h.suffix = "%Y-%m-%d"
     file_h.setFormatter(fmt)
@@ -155,6 +163,13 @@ async def main() -> None:
     log_file, log_handler, log_listener = setup_logging()
     logger = logging.getLogger(__name__)
     logger.info(f"ArbitrageBot v{__version__} starting — log: {log_file}")
+    logger.info(
+        "[Config] Storage: "
+        f"csv_snapshots={CSV_SNAPSHOTS_ENABLED} "
+        f"snapshot_interval={SNAPSHOT_INTERVAL_SECONDS}s "
+        f"csv_max_file_mb={CSV_MAX_FILE_MB} "
+        f"log_backup_days={BOT_LOG_BACKUP_DAYS}"
+    )
 
     # GC tuning — at 48 configs the bot accumulates millions of long-lived
     # SymbolTick / aggregate / state objects in optimizer/monitor/balance.

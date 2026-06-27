@@ -31,7 +31,7 @@ from typing import Any
 
 import websockets
 
-from config import MEXC_EXCHANGE_NAME, MEXC_WS_URL
+from config import CSV_SNAPSHOTS_ENABLED, MEXC_EXCHANGE_NAME, MEXC_WS_URL
 from fetchers.base import BaseFetcher, PriceState
 
 logger = logging.getLogger(__name__)
@@ -308,20 +308,25 @@ class MEXCFetcher(BaseFetcher):
         if len(self.symbols) <= 30:
             # Single bookTicker + single depth connection
             self._running = True
-            self._ensure_output_dir()
+            if CSV_SNAPSHOTS_ENABLED:
+                self._ensure_output_dir()
+            else:
+                logger.info(f"[{self.exchange_name}] CSV snapshots disabled")
             self._connect_time = time.time()
             self._first_data_time = 0.0
 
             ticker_sub = _MEXCSubFetcher(self, self.symbols)
             depth_sub = _MEXCDepthSubFetcher(self, self.symbols)
+            tasks = [
+                ticker_sub.run(),
+                depth_sub.run(),
+                self._latency_log_loop(),
+            ]
+            if CSV_SNAPSHOTS_ENABLED:
+                tasks.append(self._snapshot_loop())
 
             try:
-                await asyncio.gather(
-                    ticker_sub.run(),
-                    depth_sub.run(),
-                    self._snapshot_loop(),
-                    self._latency_log_loop(),
-                )
+                await asyncio.gather(*tasks)
             except Exception as e:
                 if self._running:
                     logger.error(f"[{self.exchange_name}] Multi-connection error: {e}")
@@ -342,19 +347,24 @@ class MEXCFetcher(BaseFetcher):
         depth2 = _MEXCDepthSubFetcher(self, batch2)
 
         self._running = True
-        self._ensure_output_dir()
+        if CSV_SNAPSHOTS_ENABLED:
+            self._ensure_output_dir()
+        else:
+            logger.info(f"[{self.exchange_name}] CSV snapshots disabled")
         self._connect_time = time.time()
         self._first_data_time = 0.0
+        tasks = [
+            ticker1.run(),
+            ticker2.run(),
+            depth1.run(),
+            depth2.run(),
+            self._latency_log_loop(),
+        ]
+        if CSV_SNAPSHOTS_ENABLED:
+            tasks.append(self._snapshot_loop())
 
         try:
-            await asyncio.gather(
-                ticker1.run(),
-                ticker2.run(),
-                depth1.run(),
-                depth2.run(),
-                self._snapshot_loop(),
-                self._latency_log_loop(),
-            )
+            await asyncio.gather(*tasks)
         except Exception as e:
             if self._running:
                 logger.error(f"[{self.exchange_name}] Multi-connection error: {e}")

@@ -26,7 +26,7 @@ from typing import Any
 
 import websockets
 
-from config import BITFINEX_EXCHANGE_NAME, BITFINEX_WS_URL
+from config import BITFINEX_EXCHANGE_NAME, BITFINEX_WS_URL, CSV_SNAPSHOTS_ENABLED
 from fetchers.base import BaseFetcher, PriceState
 
 logger = logging.getLogger(__name__)
@@ -210,20 +210,25 @@ class BitfinexFetcher(BaseFetcher):
         if len(self.symbols) <= 30:
             # Single ticker + single book connection
             self._running = True
-            self._ensure_output_dir()
+            if CSV_SNAPSHOTS_ENABLED:
+                self._ensure_output_dir()
+            else:
+                logger.info(f"[{self.exchange_name}] CSV snapshots disabled")
             self._connect_time = time.time()
             self._first_data_time = 0.0
 
             ticker_sub = _BitfinexSubFetcher(self, self.symbols)
             book_sub = _BitfinexBookSubFetcher(self, self.symbols)
+            tasks = [
+                ticker_sub.run(),
+                book_sub.run(),
+                self._latency_log_loop(),
+            ]
+            if CSV_SNAPSHOTS_ENABLED:
+                tasks.append(self._snapshot_loop())
 
             try:
-                await asyncio.gather(
-                    ticker_sub.run(),
-                    book_sub.run(),
-                    self._snapshot_loop(),
-                    self._latency_log_loop(),
-                )
+                await asyncio.gather(*tasks)
             except Exception as e:
                 if self._running:
                     logger.error(f"[{self.exchange_name}] Error in multi-connection run: {e}")
@@ -245,19 +250,24 @@ class BitfinexFetcher(BaseFetcher):
         book2 = _BitfinexBookSubFetcher(self, batch2)
 
         self._running = True
-        self._ensure_output_dir()
+        if CSV_SNAPSHOTS_ENABLED:
+            self._ensure_output_dir()
+        else:
+            logger.info(f"[{self.exchange_name}] CSV snapshots disabled")
         self._connect_time = time.time()
         self._first_data_time = 0.0
+        tasks = [
+            ticker1.run(),
+            ticker2.run(),
+            book1.run(),
+            book2.run(),
+            self._latency_log_loop(),
+        ]
+        if CSV_SNAPSHOTS_ENABLED:
+            tasks.append(self._snapshot_loop())
 
         try:
-            await asyncio.gather(
-                ticker1.run(),
-                ticker2.run(),
-                book1.run(),
-                book2.run(),
-                self._snapshot_loop(),
-                self._latency_log_loop(),
-            )
+            await asyncio.gather(*tasks)
         except Exception as e:
             if self._running:
                 logger.error(f"[{self.exchange_name}] Error in multi-connection run: {e}")

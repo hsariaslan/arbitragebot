@@ -33,6 +33,7 @@ from typing import Any
 import websockets
 
 from config import (
+    CSV_SNAPSHOTS_ENABLED,
     PIONEX_EXCHANGE_NAME,
     PIONEX_WS_URL,
     RECONNECT_BACKOFF_FACTOR,
@@ -181,7 +182,10 @@ class PionexFetcher(BaseFetcher):
     async def run(self) -> None:
         """Split symbols across multiple connections to avoid topic limit."""
         self._running = True
-        self._ensure_output_dir()
+        if CSV_SNAPSHOTS_ENABLED:
+            self._ensure_output_dir()
+        else:
+            logger.info(f"[{self.exchange_name}] CSV snapshots disabled")
         self._connect_time = time.time()
         self._first_data_time = 0.0
         logger.info(
@@ -205,13 +209,12 @@ class PionexFetcher(BaseFetcher):
             _PionexSubConnection(self, batch, index=i)
             for i, batch in enumerate(batches)
         ]
+        tasks = [*(sub.run() for sub in subs), self._latency_log_loop()]
+        if CSV_SNAPSHOTS_ENABLED:
+            tasks.append(self._snapshot_loop())
 
         try:
-            await asyncio.gather(
-                *(sub.run() for sub in subs),
-                self._snapshot_loop(),
-                self._latency_log_loop(),
-            )
+            await asyncio.gather(*tasks)
         except Exception as e:
             if self._running:
                 logger.error(f"[{self.exchange_name}] Error in multi-connection run: {e}")

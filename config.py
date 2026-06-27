@@ -8,6 +8,39 @@ import os
 
 __version__ = "0.31.0-beta"
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float, *, min_value: float | None = None) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if min_value is not None and value < min_value:
+        return default
+    return value
+
+
+def _env_int(name: str, default: int, *, min_value: int | None = None) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if min_value is not None and value < min_value:
+        return default
+    return value
+
 # Trading symbols (Spot, USDT pairs) - 60 symbols sorted by 24h volume
 # All available on 7/7 exchanges unless noted
 SYMBOLS: list[str] = [
@@ -81,8 +114,12 @@ SYMBOLS: list[str] = [
     "NEOUSDT",
 ]
 
-# Snapshot interval - how often to write CSV rows and print to console
-SNAPSHOT_INTERVAL_SECONDS: float = 1.0
+# Snapshot storage controls. Defaults preserve the historical research setup;
+# production/VPS runs can disable or slow snapshots via .env.
+CSV_SNAPSHOTS_ENABLED: bool = _env_bool("CSV_SNAPSHOTS_ENABLED", True)
+SNAPSHOT_INTERVAL_SECONDS: float = _env_float("SNAPSHOT_INTERVAL_SECONDS", 1.0, min_value=0.1)
+CSV_MAX_FILE_MB: float = _env_float("CSV_MAX_FILE_MB", 0.0, min_value=0.0)
+BOT_LOG_BACKUP_DAYS: int = _env_int("BOT_LOG_BACKUP_DAYS", 30, min_value=1)
 
 # Maximum age (seconds) before exchange data is considered stale and skipped
 MAX_DATA_AGE_SECONDS: float = 10.0
