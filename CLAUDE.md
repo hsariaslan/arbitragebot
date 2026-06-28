@@ -4,7 +4,7 @@
 2026-02-22
 
 ## Current Version
-**v0.32.1-beta** — Dashboard config-import reliability patch. Large registry imports now fit within the dashboard WebSocket message limit, import success/failure is surfaced in the UI, and the v0.32 storage hardening controls remain active. The multi-config architecture introduced in **v0.31.0-beta** remains the canonical runtime model; earlier sections describe the original single-config bot, and most facts still apply per-config.
+**v0.32.2-beta** — Deficit recovery expansion patch. Net-negative configs still block normal rotations and unrestricted expansion, but under-filled configs can now perform one bounded, low-cost recovery expansion toward `num_active_symbols` so they do not stay trapped with one inactive symbol after tiny setup fees. The v0.32 storage hardening and dashboard import reliability controls remain active. The multi-config architecture introduced in **v0.31.0-beta** remains the canonical runtime model; earlier sections describe the original single-config bot, and most facts still apply per-config.
 
 ## Instructions
 - Never run `git checkout` or `git commit` commands without my confirmation.
@@ -571,7 +571,8 @@ In `try_rebalance()`, crypto rebalance runs BEFORE USDT rebalance. This ensures 
 ### Net Profit Awareness
 
 The optimizer tracks whether net profit (trading P&L - **external** transfer fees + credited cashback) is positive. Uses external-only fees (withdrawal fees) not total transfer fees (which includes internal taker fees). Supports grace period: `update_profit_state(net_profit, hourly_rate, grace_active)` — during grace period, rotation gate stays open. Logs transitions: `[Optimizer] Rotation gate CLOSED/OPENED`. When in deficit (after grace):
-- Rotations, expansions, AND rebalancing are blocked
+- Rotations, unrestricted expansion, AND rebalancing are blocked
+- Bounded recovery expansion may add one low-cost symbol per evaluation when below `num_active_symbols`
 - Demotions still run to remove dead symbols
 - Updated by dashboard server every state broadcast via `update_profit_state()`
 
@@ -1504,7 +1505,20 @@ Detailed reference documents in `documentations/`:
 
 ---
 
-## v0.32.1-beta — Dashboard Config Import Reliability (current version)
+## v0.32.2-beta — Deficit Recovery Expansion (current version)
+
+The per-config deficit gate correctly prevents fee churn when `trading_pnl + cashback < external transfer fees`, but the 2026-06-28 log showed a recovery deadlock: several Maximize Profits configs had `active=1/N`, paid tiny setup fees, then could not expand into better symbols because `_evaluate_rotation()` returned immediately while net-negative.
+
+Fixes:
+
+- Deficit mode still suppresses normal rotations and unrestricted expansion.
+- Under-filled configs may run bounded recovery expansion until `len(active_symbols) >= num_active_symbols`.
+- Recovery expansion uses the same activation threshold, stability, setup-profit, and pair-fee viability gates as normal expansion.
+- Recovery activates at most one symbol per evaluation while net-negative.
+- Immediate recovery setup fee is capped by `DEFICIT_RECOVERY_SETUP_COST_PCT_OF_TRADE` (`0.3%`), `DEFICIT_RECOVERY_MIN_SETUP_COST_USD` (`$0.02`), and `DEFICIT_RECOVERY_MAX_SETUP_COST_USD` (`$0.50`).
+- Logs use `RECOVERY_EXPAND_*` prefixes so recovery attempts can be distinguished from regular `EXPAND_*` activity.
+
+## v0.32.1-beta — Dashboard Config Import Reliability
 
 Large exported registries can exceed the `websockets` library's default 1 MiB incoming message limit. A full 54-config registry export is ~5 MiB, so importing it from the dashboard could close the socket before the backend import handler ran.
 
