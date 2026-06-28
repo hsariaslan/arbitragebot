@@ -1714,13 +1714,19 @@ class SymbolOptimizer:
                 f"({pairs['num_exchanges']} exchanges)"
             )
 
-        # v0.30: capital architecture
+        # v0.30/v0.33: capital architecture
+        #   - Futures reserve (Binance USD-M): not available for spot trading
         #   - Trading float (Bitfinex): bounded by trade_amount × multiplier
         #   - Custody hub (Bybit by default): receives the rest
         #   - Symbol allocations come out of "allocatable_capital" = remainder
         # The reserve_amount variable name is preserved for downstream compat
         # but its value now reflects trading float, not capital%.
         trade_amount = self._balance._trade_amount if self._balance else 40.0
+        futures_reserve = (
+            float(getattr(self._balance, "binance_futures_usdt", 0.0) or 0.0)
+            if self._balance else 0.0
+        )
+        spot_capital = max(0.0, total_capital - futures_reserve)
         float_mult = (
             self._balance._trading_float_multiplier if self._balance else 8.0
         )
@@ -1730,12 +1736,18 @@ class SymbolOptimizer:
         reserve_amount = 0.0
         if "Bitfinex" in all_exchanges and float_mult > 0:
             reserve_amount = trade_amount * float_mult
+            if reserve_amount > spot_capital:
+                logger.warning(
+                    f"[Capital] Trading float capped by spot capital: "
+                    f"target=${reserve_amount:.2f} spot_capital=${spot_capital:.2f}"
+                )
+                reserve_amount = spot_capital
             logger.info(
                 f"[Capital] Trading float: ${reserve_amount:.0f} on Bitfinex "
                 f"(trade_amount ${trade_amount:.0f} × {float_mult:.1f}x), "
                 f"custody hub = {custody_hub}"
             )
-        allocatable_capital = total_capital - reserve_amount
+        allocatable_capital = max(0.0, spot_capital - reserve_amount)
 
         # Score-weighted capital distribution across symbols
         best_scores = {sym: self._scores[sym].score for sym in best_symbols if sym in self._scores}
@@ -1811,7 +1823,13 @@ class SymbolOptimizer:
         logger.info(
             f"[Optimizer] Discovery complete! "
             f"Best symbols: {', '.join(s.replace('USDT', '') for s in best_symbols)} | "
-            f"Symmetric 50/50 allocation, ${total_capital:.0f} total"
+            f"Symmetric 50/50 allocation, spot=${spot_capital:.0f}"
+            + (
+                f" + futures_reserve=${futures_reserve:.0f}"
+                if futures_reserve > 0
+                else ""
+            )
+            + f" = ${total_capital:.0f} total"
         )
 
         # Update optimizer state (only symbols change, exchanges stay the same)

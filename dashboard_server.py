@@ -70,6 +70,82 @@ def _safe_task(coro, name: str = "task") -> asyncio.Task:
     return task
 
 
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_bool(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
+def _futures_reserve_target_from_settings(
+    settings: dict[str, Any],
+    total_capital: float,
+) -> float:
+    if not _as_bool(settings.get("hedging_enabled", True), True):
+        return 0.0
+    pct = max(
+        0.0,
+        min(0.90, _as_float(settings.get("futures_capital_target_pct", 0.40), 0.40)),
+    )
+    return round(max(0.0, total_capital) * pct, 2)
+
+
+def _spot_capital_from_settings(
+    settings: dict[str, Any],
+    total_capital: float,
+) -> float:
+    reserve = _futures_reserve_target_from_settings(settings, total_capital)
+    return max(0.0, total_capital - reserve)
+
+
+def _futures_reserve_for_sizing(
+    balance: Any,
+    settings: dict[str, Any],
+    total_capital: float,
+) -> float:
+    if not _as_bool(settings.get("hedging_enabled", True), True):
+        return 0.0
+    current = _as_float(getattr(balance, "binance_futures_usdt", 0.0), 0.0)
+    if current > 0:
+        return current
+    return _futures_reserve_target_from_settings(settings, total_capital)
+
+
+def _spot_value_for_sizing(
+    balance: Any,
+    settings: dict[str, Any],
+    portfolio_value: float,
+    total_capital: float,
+) -> float:
+    reserve = _futures_reserve_for_sizing(balance, settings, total_capital)
+    return max(0.0, portfolio_value - reserve)
+
+
+def _capital_basis_for_display(balance: Any, monitor: Any, fallback: float) -> float:
+    saved = _as_float(getattr(balance, "_initial_investment", fallback), fallback)
+    configured_candidates = [
+        v for v in (
+            _as_float(getattr(monitor, "_total_capital", 0.0), 0.0),
+            _as_float(fallback, 0.0),
+        )
+        if v > 0
+    ]
+    configured = min(configured_candidates) if configured_candidates else 0.0
+    if configured > 0 and saved > configured + max(1.0, configured * 0.05):
+        return configured
+    return saved
+
+
 class DashboardLogHandler(logging.Handler):
     """Captures recent log entries in memory for dashboard broadcast and export.
 
@@ -2463,12 +2539,12 @@ class DashboardServer:
         )
 
     def _rescale_trade_amount(self, reason: str) -> bool:
-        """Recompute trade_amount from current portfolio value × trade_amount_pct.
+        """Recompute trade_amount from spot portfolio value × trade_amount_pct.
 
         Auto-scaling mode: when `trade_amount_pct > 0`, the bot's per-trade size
-        should grow with capital. Without this rescale, trade_amount is locked to
-        `configured_capital × pct` at startup/settings-apply time and never moves
-        as profits compound.
+        should grow with spot-usable capital. Without this rescale, trade_amount
+        is locked to startup/settings-apply time and never moves as profits
+        compound.
 
         Triggered:
         - hourly during normal operation (`hourly_tick`)
@@ -2520,9 +2596,16 @@ class DashboardServer:
         if portfolio_value <= 0:
             return False
 
-        new_trade_amount = round(portfolio_value * pct, 2)
         old_trade_amount = float(self._monitor._trade_amount)
         old_capital = float(self._monitor._total_capital)
+        sizing_value = _spot_value_for_sizing(
+            self._balance,
+            self._settings,
+            portfolio_value,
+            old_capital,
+        )
+        futures_reserve = max(0.0, portfolio_value - sizing_value)
+        new_trade_amount = round(sizing_value * pct, 2)
         if abs(new_trade_amount - old_trade_amount) < 0.01 and abs(portfolio_value - old_capital) < 0.01:
             return False  # within rounding noise
 
@@ -2544,6 +2627,7 @@ class DashboardServer:
             f"({delta_pct:+.2f}%, Δ${delta_amount:+.2f}) | "
             f"capital ${old_capital:.2f} → ${portfolio_value:.2f} "
             f"({capital_delta_pct:+.2f}%, Δ${capital_delta:+.2f}) | "
+            f"spot_sizing=${sizing_value:.2f} futures_reserve=${futures_reserve:.2f} | "
             f"pct={pct * 100:.2f}%"
         )
         self._last_trade_amount_rescale_ts = time.time()
@@ -3355,12 +3439,20 @@ class DashboardServer:
         """
         old_settings = dict(self._settings)  # snapshot for change detection
         trade_amount_pct = float(settings.get("trade_amount_pct", 0.0))
-        total_capital = settings.get("total_capital", 1800.0)
+        total_capital = _as_float(settings.get("total_capital", 1800.0), 1800.0)
+        spot_capital = _spot_capital_from_settings(settings, total_capital)
+        futures_reserve = max(0.0, total_capital - spot_capital)
         if trade_amount_pct > 0:
-            trade_amount = round(total_capital * trade_amount_pct, 2)
+            trade_amount = round(spot_capital * trade_amount_pct, 2)
             logger.info(
                 f"[Settings] Auto trade amount: ${trade_amount} "
-                f"({trade_amount_pct * 100:.1f}% of ${total_capital})"
+                f"({trade_amount_pct * 100:.1f}% of ${spot_capital:.0f} spot"
+                + (
+                    f", ${futures_reserve:.0f} futures reserve"
+                    if futures_reserve > 0
+                    else ""
+                )
+                + f", ${total_capital:.0f} total)"
             )
         else:
             trade_amount = settings.get("trade_amount_usd", self._monitor._trade_amount)
@@ -3431,6 +3523,8 @@ class DashboardServer:
         if "rebalance_roi_horizon" in settings:
             self._monitor._rebalance_roi_horizon = int(settings["rebalance_roi_horizon"])
         self._monitor._total_capital = total_capital
+        if "trade_amount_usd" in settings or "trade_amount_pct" in settings:
+            self._monitor._trade_amount = trade_amount
 
         # Net P&L gate params
         if "net_pnl_gate_warmup_trades" in settings:
@@ -4306,8 +4400,19 @@ class DashboardServer:
         # Trade amount
         trade_pct = float(s.get("trade_amount_pct", 0))
         capital = float(s.get("total_capital", 1800))
+        spot_capital = _spot_capital_from_settings(s, capital)
+        futures_reserve = max(0.0, capital - spot_capital)
         if trade_pct > 0:
-            ta_str = f"${round(capital * trade_pct, 2)} ({trade_pct * 100:.1f}% of ${capital:.0f})"
+            ta_str = (
+                f"${round(spot_capital * trade_pct, 2)} "
+                f"({trade_pct * 100:.1f}% of ${spot_capital:.0f} spot"
+                + (
+                    f", ${futures_reserve:.0f} futures"
+                    if futures_reserve > 0
+                    else ""
+                )
+                + f", ${capital:.0f} total)"
+            )
         else:
             ta_str = f"${s.get('trade_amount_usd', 10)} (fixed, capital=${capital:.0f})"
 
@@ -4365,7 +4470,10 @@ class DashboardServer:
         tf_mult = float(s.get("trading_float_multiplier", 8.0))
         tf_trigger = float(s.get("trading_float_replenish_trigger", 3.0))
         tf_overflow = float(s.get("trading_float_overflow_multiplier", 1.5))
-        trade_amt_for_log = float(s.get("trade_amount_usd", 40.0))
+        if trade_pct > 0:
+            trade_amt_for_log = round(spot_capital * trade_pct, 2)
+        else:
+            trade_amt_for_log = float(s.get("trade_amount_usd", 40.0))
         tf_target_dollar = trade_amt_for_log * tf_mult
 
         lines = [
@@ -4606,8 +4714,9 @@ class DashboardServer:
                     if getattr(monitor, "_fee_manager", None) else 0.0
                 )
                 hedge_funding = float(hedge_state.get("cumulative_funding_usd", 0.0))
+                capital_basis = _capital_basis_for_display(balance, monitor, fallback)
                 portfolio_value = (
-                    float(getattr(balance, "_initial_investment", fallback) or fallback)
+                    capital_basis
                     + float(getattr(monitor, "_cumulative_pnl", 0.0))
                     - float(getattr(balance, "total_transfer_fees", 0.0))
                     + float(credited_cashback)
@@ -4643,7 +4752,11 @@ class DashboardServer:
         # the header stats bar resolve to the same number. Includes hedge
         # unrealized PnL (shadow preview or real testnet/live position PnL)
         # so drawdown reflects net spot+futures exposure.
-        initial = self._balance._initial_investment
+        initial = _capital_basis_for_display(
+            self._balance,
+            self._monitor,
+            self._balance._initial_investment,
+        )
         portfolio_value, hedge_pnl_usd = self._compute_bundle_portfolio_value(
             self._balance,
             self._monitor,
@@ -4666,10 +4779,10 @@ class DashboardServer:
             self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
         )
         realized_value = (
-            self._balance.get_realized_capital(
-                trading_pnl=trading_pnl,
-                credited_cashback=credited_cashback_for_peak,
-            )
+            initial
+            + trading_pnl
+            - self._balance.total_external_transfer_fees
+            + credited_cashback_for_peak
             if self._balance.initialized else initial
         )
 
@@ -5025,10 +5138,7 @@ class DashboardServer:
             # group capital they configured. Same helper as _build_state to
             # guarantee the dashboard's selected-config view and this row
             # resolve to the same number (single source of truth).
-            fallback = float(
-                getattr(bundle.balance, "_initial_investment", 0.0)
-                or group.initial_capital
-            )
+            fallback = float(group.initial_capital)
             portfolio_value, bundle_hedge_pnl = self._compute_bundle_portfolio_value(
                 bundle.balance,
                 bundle.monitor,
@@ -5088,11 +5198,16 @@ class DashboardServer:
                 bundle_credited_cb = (
                     bundle.fee_manager._total_credited_cashback if bundle.fee_manager else 0.0
                 )
+                bundle_initial = _capital_basis_for_display(
+                    bundle.balance,
+                    bundle.monitor,
+                    float(group.initial_capital),
+                )
                 bundle_realized = (
-                    bundle.balance.get_realized_capital(
-                        trading_pnl=trading_pnl,
-                        credited_cashback=bundle_credited_cb,
-                    )
+                    bundle_initial
+                    + trading_pnl
+                    - bundle.balance.total_external_transfer_fees
+                    + bundle_credited_cb
                     if bundle.balance and bundle.balance.initialized
                     else float(group.initial_capital)
                 )
@@ -5126,7 +5241,13 @@ class DashboardServer:
             try:
                 bundle_pct = float(cfg.settings.get("trade_amount_pct", 0.0))
                 if bundle_pct > 0 and bundle.balance and bundle.balance.initialized:
-                    new_amt = round(portfolio_value * bundle_pct, 2)
+                    sizing_value = _spot_value_for_sizing(
+                        bundle.balance,
+                        cfg.settings,
+                        portfolio_value,
+                        initial_capital,
+                    )
+                    new_amt = round(sizing_value * bundle_pct, 2)
                     cur_amt = float(bundle.monitor._trade_amount)
                     if new_amt > 0 and abs(new_amt - cur_amt) > 0.01:
                         bundle.monitor._trade_amount = new_amt
