@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ArbitrageBot v0.32.2-beta — multi-config orchestrator entrypoint.
+ArbitrageBot multi-config orchestrator entrypoint.
 
 Boots SHARED resources once (fetchers, ExchangeInfoManager,
 TransferFeeManager, FundingMonitor, futures executor, demo fetcher,

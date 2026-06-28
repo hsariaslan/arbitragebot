@@ -5,8 +5,19 @@ All symbols, exchange settings, and operational parameters.
 """
 
 import os
+from pathlib import Path
 
-__version__ = "0.32.2-beta"
+
+def _load_version() -> str:
+    version_file = Path(__file__).with_name("__version__")
+    try:
+        version = version_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "0.0.0-dev"
+    return version or "0.0.0-dev"
+
+
+__version__ = _load_version()
 
 
 def _env_bool(name: str, default: bool) -> bool:
