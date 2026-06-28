@@ -1009,3 +1009,194 @@ Lower priority:
 - Quantity-rounding investigation (PENDLE Trade #5 anomaly)
 - Optional: "soft demote" for marginally-failing strong candidates instead of full liquidation
 - Optional: tighten discovery extension when candidate set is thin (1h+ idle gaps are wasteful)
+
+### Session #29 — 2026-06-28 (v0.32.3-beta, multi-config simulation hedge audit)
+
+#### Context
+
+This session documents the investigation around `logs/bot-logs-2026-06-28-13-40-48.log`, plus the operator discussion immediately after it:
+
+- Wallet page showed portfolios materially above/below `initial capital + realized net P&L`.
+- Example: `Group 3: $3k — Discovery & Scoring Tuning / Aggressive (Permissive Scoring)` showed about `$3,126` portfolio against `$78.92` net P&L, where accounting equity should be around `$3,078.92`.
+- Bitfinex was confirmed as spot-only for this bot; futures hedging is only via Binance USD-M Futures.
+- The wallets page showed total trades capped at `10,000` while total net P&L kept moving.
+- Before adding live futures capital allocation, the latest log was re-audited and all issues were recorded here.
+
+#### Latest Log Summary
+
+| Metric | Value |
+|---|---:|
+| Log file | `logs/bot-logs-2026-06-28-13-40-48.log` |
+| Runtime window | 2026-06-28 07:44:44 -> 13:40:29 |
+| Version | `v0.32.3-beta` |
+| Configs with session lines | 46 |
+| Execution mode | `simulation` for all configs |
+| Hedge mode | `simulation` for all hedged configs |
+| Real Binance Futures orders | 0 |
+| Positive / negative net configs | 37 / 9 |
+| Summed trading P&L | +$740.13 |
+| Summed transfer fees | $287.24 |
+| Summed net P&L | +$580.63 |
+| Summed trades reported | exactly 10,000 (capped counter bug) |
+| Log warnings / errors | 1,465 warnings / 0 errors |
+| Anomaly pauses / warnings / symbol blocks | 0 / 0 / 0 |
+| Hedge eval errors | 0 |
+| No-space / connection errors | 0 / 0 |
+
+The aggregate P&L is a parameter-grid aggregate, not one real portfolio result. It sums all 46 simulated configs.
+
+#### Best/Worst Configs By Realized Net
+
+| Config | Net | Trading P&L | Fees | Trades | Final wallet total | Drift vs `initial + net` |
+|---|---:|---:|---:|---:|---:|---:|
+| G3 Aggressive (Permissive Scoring) | +$78.92 | +$82.50 | $16.59 | 469 | $3,126 | +$47.08 |
+| G3 Short Scoring Window (10min) | +$41.49 | +$45.52 | $12.91 | 341 | $3,076 | +$34.51 |
+| G4 Wide (8 active) | +$36.05 | +$38.26 | $11.53 | 282 | $4,077 | +$40.95 |
+| G5 Aggressive (Rapid Shifts) | +$28.55 | +$36.78 | $11.71 | 330 | $5,048 | +$19.45 |
+| G4 Maximize Profits | +$25.94 | +$29.01 | $7.01 | 484 | $4,028 | +$2.06 |
+| G1 All 8 Exchanges | -$1.52 | +$3.63 | $5.60 | 114 | $1,001 | +$2.52 |
+| G1 + Gate.io | -$1.51 | +$3.70 | $5.66 | 121 | $998 | -$0.49 |
+| G1 + KuCoin | -$1.24 | +$3.40 | $5.13 | 122 | $1,001 | +$2.24 |
+| G5 No BFX Buyer Boost | -$0.94 | +$0.45 | $1.38 | 33 | $5,012 | +$12.94 |
+| G5 Maximize Profits | -$0.07 | +$0.00 | $0.07 | 0 | $5,015 | +$15.07 |
+
+#### Main Finding: Hedge Display Was Real, But In Simulation Mode
+
+All relevant configs in this log were running:
+
+`hedging: enabled=True, mode=simulation, dust=$10, eval_interval=60s, margin_buffer=20%, adjust_threshold=1%`
+
+So the reported wallet mismatch was not a failed real Binance Futures hedge. No real futures positions existed. The dashboard/wallet accounting was mixing:
+
+- raw spot mark-to-market wallet value, with
+- realized trade P&L accounting, while
+- simulation hedge offsets were not treated as accounting equity for wallet totals.
+
+That is why configs could show large portfolio gains/losses unrelated to realized net P&L.
+
+Largest observed portfolio drifts:
+
+| Config | Wallet total | Expected `initial + net` | Drift | Hedge notional |
+|---|---:|---:|---:|---:|
+| G3 Aggressive (Permissive Scoring) | $3,126 | $3,078.92 | +$47.08 | $1,568.90 |
+| G4 Wide (8 active) | $4,077 | $4,036.05 | +$40.95 | $1,556.70 |
+| G3 Short Scoring Window | $3,076 | $3,041.49 | +$34.51 | $831.32 |
+| G4 No Auto-Expand | $4,046 | $4,018.74 | +$27.26 | $1,172.54 |
+| G4 Neutral (4 active) | $4,045 | $4,018.33 | +$26.67 | $1,172.29 |
+| G5 Conservative (Sticky) | $4,978 | $5,000.13 | -$22.13 | $2,515.88 |
+| G5 No Boosts (Pure Score) | $4,989 | $5,007.26 | -$18.26 | $2,468.28 |
+| G5 Loose Inventory Drift | $4,992 | $5,003.45 | -$11.45 | $2,793.87 |
+
+This confirms the operator's concern: the positive cases were in our favor in this run, but the same accounting path can understate equity when spot moves against the simulated portfolio.
+
+#### Post-Log Fixes Implemented In Working Tree
+
+The following fixes were implemented after reading this log and are intentionally not committed until operator confirmation:
+
+- Dashboard portfolio value for simulation-hedged configs now uses accounting equity (`initial + realized net P&L` plus the hedge funding/cashback/fee components) instead of raw spot MTM, unless there are material unhedged targets.
+- Dashboard selected config `net_pnl` now uses realized `net_profit`; `price_pnl` carries the residual price effect.
+- `monitor.py` balance snapshots now log hedged/accounting/drift diagnostics so future logs expose this class directly.
+- Hedge target sizing now includes in-transit crypto, because in-transit crypto is still price exposure.
+- Total trade count now uses `_cumulative_trade_count` instead of `len(_trades)`.
+- Orchestrator dirty/change detection now also uses `_cumulative_trade_count`; previously once `_trades` hit its maxlen, new trades might not wake hedge reconciliation/state save.
+- Wallets UI now formats large trade counts without implying a 10k hard stop.
+
+Validation already run:
+
+- `python3 -m py_compile dashboard_server.py monitor.py orchestrator.py hedge_manager.py`
+- `git diff --check`
+- `npm --prefix dashboard run build`
+- Smoke tests for simulation hedge accounting fallback and in-transit hedge sizing.
+
+#### Trade Counter Cap
+
+The log shows the cap clearly:
+
+`[Capacity] ... configs=46 dirty=0 trades=10000 transfers=9378 ...`
+
+The parsed last session lines across all configs also sum to exactly `10,000` trades. This was not a real stop in trading. It was a reporting/data-structure bug: `_trades` is a bounded deque (`maxlen=5000` per monitor), but dashboard/capacity code used `len(_trades)` as if it were the lifetime total. P&L continued moving because `_cumulative_pnl` was separate.
+
+#### Operational Issues Found In The Log
+
+| Severity | Issue | Evidence |
+|---|---|---|
+| HIGH | Wallet/portfolio value was not hedge-accounting aware in simulation hedge mode | Large drift between wallet totals and `initial + realized net`, e.g. G3 Aggressive +$47.08 drift |
+| HIGH | Trade totals were capped at 10,000 | Capacity logs repeatedly printed `trades=10000`; aggregate parsed session trades exactly 10,000 |
+| HIGH | Live mode has no Binance Futures capital allocator yet | Current code only checks futures available margin before placing a hedge; no reserve, no auto-transfer, no spot/futures split |
+| HIGH | Bybit fee validation key is expired | 1,363 warnings: `Bybit fee rate query failed: Your api key has expired.` Fee assumptions may become stale. |
+| MEDIUM | Bitfinex subscription set still includes unsupported symbols | 56 warnings across 28 symbols, including `GRTUSDT`, `WIFUSDT`, `FETUSDT`, `PENDLEUSDT`, `SNXUSDT`, and Bitfinex-formatted `tARUST/tWUST/tOPUST`. Symbol availability filtering should be stricter. |
+| MEDIUM | Many configs were effectively inventory-starved | 15,827 `SIZE_ZERO` lines and 11,757 `SKIP ... trade_size=0` lines; mostly `GRTUSDT`. |
+| MEDIUM | Rebalance gating blocked many opportunities during weak regime | 9,406 exact `regime_weak` rebalance blocks. This reduced churn but also left many profitable-looking opportunities unfilled. |
+| MEDIUM | Negative-net rotation suppression fired heavily | 1,955 `Rotation suppressed: net profit is negative` lines. This confirms the deficit guard was active and can trap weak configs in stale states. |
+| MEDIUM | Discovery often had no tradeable symbols | 34 `Discovery: NO tradeable symbols` warnings and 12 `All symbols demoted` warnings. |
+| LOW | DemoCompare is noisy in simulation | 264 `missing_position` messages. This is expected when sim inventory is compared to demo exchange balances with no demo order placement, but it can hide real mismatches. |
+| LOW | Maximize Profits variants are not reliably maximizing | G5 Maximize had 0 trades, -$0.07 net, and +$15.07 portfolio drift; G4 Maximize performed well, but other "maximize" configs were constrained by fees/guarding/discovery. |
+
+#### Live Futures Capital Design Decision
+
+Current code:
+
+- Uses Binance USD-M Futures as the only real futures executor.
+- Does not use Bitfinex futures.
+- Does not transfer funds between Binance Spot and Binance Futures.
+- Does not reserve any portion of total capital for futures margin.
+- Uses 1x isolated margin and a 20% margin buffer in the current hedge manager.
+
+Recommended live design before real money:
+
+| Parameter | Recommendation |
+|---|---:|
+| Futures venue | Binance USD-M Futures only |
+| Initial live leverage | 2x isolated |
+| Hedge notional | Equal to spot crypto exposure, never larger |
+| Binance Futures target reserve | 40% of total capital |
+| Auto top-up threshold | 35% |
+| Stop-new-trades threshold | 30% |
+| 1x alternative | 52-55% futures reserve |
+| 3-5x leverage | Not recommended for first live version |
+
+Reasoning:
+
+- Leverage does not change hedge dollar P&L if hedge notional remains equal to spot exposure. A `$1,000` spot gain/loss offset requires a `$1,000` short hedge regardless of 1x/2x/5x.
+- Leverage only reduces collateral requirement and increases liquidation sensitivity.
+- At 1x + 20% buffer, the bot needs roughly 52-55% of total capital in Binance Futures to support hedges for 60% spot capital.
+- At 2x, 40% futures reserve is a better first live compromise: capital-efficient enough, but not overly close to liquidation for volatile alts.
+
+#### Implementation Requirements For The Next Feature
+
+Before live hedging is enabled:
+
+1. Add explicit futures capital settings:
+   - `hedge_leverage`
+   - `futures_capital_target_pct`
+   - `futures_capital_topup_pct`
+   - `futures_capital_emergency_pct`
+   - `futures_capital_overflow_pct`
+   - `futures_capital_transfer_min_usd`
+2. Make allocation reserve Binance Futures capital first, then distribute remaining spot capital across spot exchanges.
+3. Add Binance Spot <-> USD-M Futures auto-transfer support using Binance universal transfer types:
+   - `MAIN_UMFUTURE`
+   - `UMFUTURE_MAIN`
+4. Block new spot buys if futures available margin is below emergency reserve.
+5. Surface Binance Futures wallet/reserve status in the wallets page.
+6. Log expected hedge notional, futures collateral, margin usage, free margin, and liquidation buffer.
+7. Keep `arbitragebot-configs.json` synchronized if config defaults/settings change, and remind the operator to import it to the VPS.
+
+#### Conclusion
+
+For this log, the hedge problem visible in wallets was primarily an accounting/display bug because hedging was simulation-only. The deeper live-readiness issue is real: the bot cannot safely go live with hedge execution until it manages Binance Futures collateral as part of total capital. The next feature should be a capital allocator/reserve manager, not just a hedge-order change.
+
+#### Follow-Up Implementation: Weak-Regime Refill Policy
+
+The inventory-starvation issue should not be solved by fully disabling the weak-regime guard. The implemented policy splits weak-hour rebalance behavior into three modes:
+
+- `strict`: block all weak-hour rebalances, matching the legacy `regime_weak_disable_rebalance=true` behavior.
+- `refill_only`: allow local/internal refills and near-free external refills while keeping expensive rebalances blocked.
+- `off`: ignore the weak-regime rebalance gate and use normal ROI/net-P&L/fee-cap gates.
+
+New settings:
+
+- `regime_weak_rebalance_policy` default `refill_only`
+- `regime_weak_refill_max_fee_usd` default `$0.10`
+
+This lets profitable routes recover from inventory starvation during weak hours without reopening the expensive transfer churn that the original strict gate was trying to prevent.

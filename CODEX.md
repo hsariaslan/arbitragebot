@@ -10,6 +10,16 @@ Do not add current-version or release-history notes to `CLAUDE.md`. Keep runtime
 
 ## Version History
 
+### v0.33.0-beta — Hedge Capital Allocation & Weak-Regime Refills
+
+- Added Binance USD-M Futures capital allocation with 2x isolated leverage, 40% futures reserve target, 35% top-up threshold, 30% emergency threshold, and 45% overflow threshold.
+- Spot allocations now reserve futures collateral first, so hedged simulations no longer double-count capital across spot wallets and futures margin.
+- Added live Binance Spot ↔ USD-M Futures universal-transfer support for futures reserve top-ups and overflow sweeps.
+- Hedge margin checks now use leveraged initial margin plus buffer, and new spot exposure is blocked when futures reserve health is unsafe.
+- Dashboard and config editing now expose futures reserve status, reserve policy, leverage, and transfer settings.
+- Added weak-regime rebalance policy modes: `strict`, `refill_only`, and `off`; default `refill_only` allows internal/cheap inventory refills while keeping expensive weak-hour rebalances blocked.
+- Updated `settings.json` and `arbitragebot-configs.json` with the v0.33.0-beta reserve and weak-regime refill settings for all 46 configs.
+
 ### v0.32.3-beta — Hedge Inventory Coverage
 
 - Hedge targets now include active symbols plus any positive held spot inventory, including residual inventory from demoted symbols.
