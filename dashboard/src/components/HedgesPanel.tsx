@@ -35,6 +35,10 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
   const badge = modeBadge(hedges.execution_mode);
   const totalCum = hedges.cumulative_funding_usd;
   const totalUnreal = hedges.total_unrealized_pnl_usd;
+  const totalGap = hedges.total_hedge_gap_usd ?? 0;
+  const gapClass = Math.abs(totalGap) <= 5 ? 'text-slate-200' : 'text-amber-400';
+  const unhedgedTargets = hedges.unhedged_targets ?? [];
+  const materialUnhedged = unhedgedTargets.filter(t => t.reason !== 'dust');
 
   return (
     <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
@@ -48,6 +52,11 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
         {hedges.safety_paused && (
           <span className="px-2 py-0.5 text-[10px] font-semibold rounded border bg-amber-700/40 text-amber-300 border-amber-600">
             OPENS PAUSED
+          </span>
+        )}
+        {materialUnhedged.length > 0 && (
+          <span className="px-2 py-0.5 text-[10px] font-semibold rounded border bg-amber-700/40 text-amber-300 border-amber-600">
+            UNHEDGED {materialUnhedged.length}
           </span>
         )}
         {!hedges.reconciled && hedges.execution_mode !== 'simulation' && (
@@ -65,7 +74,7 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
       </div>
 
       {/* Aggregate totals */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3">
         <div className="bg-slate-900/40 rounded p-2">
           <div className="text-[10px] text-slate-500 uppercase">Open hedges</div>
           <div className="text-lg font-mono text-slate-200">{hedges.open_count}</div>
@@ -73,6 +82,10 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
         <div className="bg-slate-900/40 rounded p-2">
           <div className="text-[10px] text-slate-500 uppercase">Total notional</div>
           <div className="text-lg font-mono text-slate-200">${hedges.total_notional_usd.toFixed(0)}</div>
+        </div>
+        <div className="bg-slate-900/40 rounded p-2">
+          <div className="text-[10px] text-slate-500 uppercase">Hedge gap</div>
+          <div className={`text-lg font-mono ${gapClass}`}>{fmtUsd(totalGap, 2)}</div>
         </div>
         <div className="bg-slate-900/40 rounded p-2">
           <div className="text-[10px] text-slate-500 uppercase">Unrealized P&L</div>
@@ -91,7 +104,11 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
       {/* Open hedges table */}
       {hedges.open_hedges.length === 0 ? (
         <p className="text-slate-500 text-xs">
-          No open hedges. {hedges.execution_mode === 'simulation' ? 'Shadow-only mode — see [Hedge] WOULD_OPEN logs in Bot Logs for decisions.' : 'Bot will hedge when active symbols accumulate above the dust threshold ($' + hedges.dust_threshold_usd.toFixed(0) + ').'}
+          No open hedges. {materialUnhedged.length > 0
+            ? `${materialUnhedged.length} held target(s) are waiting for a hedge decision.`
+            : hedges.execution_mode === 'simulation'
+              ? 'Shadow-only mode — see [Hedge] WOULD_OPEN logs in Bot Logs for decisions.'
+              : 'Bot will hedge when active symbols accumulate above the dust threshold ($' + hedges.dust_threshold_usd.toFixed(0) + ').'}
         </p>
       ) : (
         <div className="overflow-x-auto">
@@ -104,6 +121,8 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
                 <th className="text-right py-1.5 px-2">Entry</th>
                 <th className="text-right py-1.5 px-2">Mark</th>
                 <th className="text-right py-1.5 px-2">Notional</th>
+                <th className="text-right py-1.5 px-2">Target</th>
+                <th className="text-right py-1.5 px-2">Gap</th>
                 <th className="text-right py-1.5 px-2">Unrealized</th>
                 <th className="text-right py-1.5 px-2">Funding</th>
                 <th className="text-right py-1.5 px-2">Rate (ann)</th>
@@ -116,6 +135,8 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
                 const fundingClass = h.accumulated_funding_usd >= 0 ? 'text-emerald-400' : 'text-red-400';
                 const ann = h.annualized_short_pct ?? 0;
                 const annClass = ann >= 0 ? 'text-emerald-400' : ann < -10 ? 'text-red-400' : 'text-amber-400';
+                const gap = h.notional_gap_usd ?? 0;
+                const rowGapClass = Math.abs(gap) <= 5 ? 'text-slate-500' : 'text-amber-400';
                 return (
                   <tr key={h.symbol} className="border-b border-slate-800/50 hover:bg-slate-700/30">
                     <td className="py-1.5 px-2 font-mono text-slate-200">{h.symbol.replace(/USDT$/, '')}</td>
@@ -124,6 +145,8 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
                     <td className="text-right py-1.5 px-2 font-mono text-slate-400">${h.entry_price.toFixed(4)}</td>
                     <td className="text-right py-1.5 px-2 font-mono text-slate-300">${h.mark_price.toFixed(4)}</td>
                     <td className="text-right py-1.5 px-2 font-mono text-slate-300">${h.notional_usd.toFixed(2)}</td>
+                    <td className="text-right py-1.5 px-2 font-mono text-slate-400">${(h.target_notional_usd ?? h.notional_usd).toFixed(2)}</td>
+                    <td className={`text-right py-1.5 px-2 font-mono ${rowGapClass}`}>{fmtUsd(gap, 2)}</td>
                     <td className={`text-right py-1.5 px-2 font-mono ${pnlClass}`}>{fmtUsd(h.unrealized_pnl_usd, 4)}</td>
                     <td className={`text-right py-1.5 px-2 font-mono ${fundingClass}`}>{fmtUsd(h.accumulated_funding_usd, 4)}</td>
                     <td className={`text-right py-1.5 px-2 font-mono ${annClass}`}>

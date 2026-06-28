@@ -476,9 +476,9 @@ HEDGING_ENABLED: bool = True
 # "testnet" (Phase D — Binance Futures testnet), "live" (Phase G — mainnet).
 HEDGE_EXECUTION_MODE: str = "simulation"
 HEDGE_DUST_THRESHOLD_USD: float = 10.0        # min spot notional to hedge
-HEDGE_EVALUATION_INTERVAL_SECONDS: float = 300.0  # 5 min between hedge eval cycles
+HEDGE_EVALUATION_INTERVAL_SECONDS: float = 60.0   # periodic hedge sanity check
 HEDGE_MARGIN_BUFFER_PCT: float = 0.20         # keep margin >= 1.2× position size
-HEDGE_ADJUST_THRESHOLD_PCT: float = 0.10      # only adjust if drift > 10% of size
+HEDGE_ADJUST_THRESHOLD_PCT: float = 0.01      # adjust when inventory drifts > 1%
 
 # Anomaly protection (configurable via settings page)
 ANOMALY_PROTECTION_ENABLED: bool = True

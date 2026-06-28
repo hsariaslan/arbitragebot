@@ -187,9 +187,9 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [hedgingEnabled, setHedgingEnabled] = useState(currentSettings.hedging_enabled ?? true);
   const [hedgeExecutionMode, setHedgeExecutionMode] = useState(currentSettings.hedge_execution_mode ?? 'simulation');
   const [hedgeDustThreshold, setHedgeDustThreshold] = useState(currentSettings.hedge_dust_threshold_usd ?? 20.0);
-  const [hedgeEvalInterval, setHedgeEvalInterval] = useState(currentSettings.hedge_evaluation_interval_seconds ?? 300.0);
+  const [hedgeEvalInterval, setHedgeEvalInterval] = useState(currentSettings.hedge_evaluation_interval_seconds ?? 60.0);
   const [hedgeMarginBuffer, setHedgeMarginBuffer] = useState(currentSettings.hedge_margin_buffer_pct ?? 0.20);
-  const [hedgeAdjustThreshold, setHedgeAdjustThreshold] = useState(currentSettings.hedge_adjust_threshold_pct ?? 0.10);
+  const [hedgeAdjustThreshold, setHedgeAdjustThreshold] = useState(currentSettings.hedge_adjust_threshold_pct ?? 0.01);
   const [anomalyEnabled, setAnomalyEnabled] = useState(currentSettings.anomaly_protection_enabled ?? true);
   const [cbWindow, setCbWindow] = useState(currentSettings.circuit_breaker_window ?? 900);
   const [cbThreshold, setCbThreshold] = useState(currentSettings.circuit_breaker_threshold ?? -5.0);
@@ -361,9 +361,9 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setHedgingEnabled(currentSettings.hedging_enabled ?? true);
       setHedgeExecutionMode(currentSettings.hedge_execution_mode ?? 'simulation');
       setHedgeDustThreshold(currentSettings.hedge_dust_threshold_usd ?? 20.0);
-      setHedgeEvalInterval(currentSettings.hedge_evaluation_interval_seconds ?? 300.0);
+      setHedgeEvalInterval(currentSettings.hedge_evaluation_interval_seconds ?? 60.0);
       setHedgeMarginBuffer(currentSettings.hedge_margin_buffer_pct ?? 0.20);
-      setHedgeAdjustThreshold(currentSettings.hedge_adjust_threshold_pct ?? 0.10);
+      setHedgeAdjustThreshold(currentSettings.hedge_adjust_threshold_pct ?? 0.01);
       setIpWhitelistEnabled(currentSettings.ip_whitelist_enabled ?? false);
       setIpWhitelist((currentSettings.ip_whitelist ?? []).join(', '));
       setAnomalyEnabled(currentSettings.anomaly_protection_enabled ?? true);

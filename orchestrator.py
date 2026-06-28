@@ -519,15 +519,26 @@ class Orchestrator:
                 finally:
                     reset_config_context(token)
 
-                # Post-tick: mark dirty if anything material changed. Keeps
-                # the periodic save efficient at 80x scale (only mutated
-                # configs hit disk).
-                if cfg is not None and not cfg._dirty:
-                    if (
-                        len(bundle.monitor._trades) != pre_trades
-                        or len(bundle.balance.transfers) != pre_transfers
-                        or tuple(bundle.optimizer._active_symbols) != pre_active
-                    ):
+                # Post-tick: mark hedge + state dirty if anything material
+                # changed. The hedge wake-up is independent of the state dirty
+                # flag because a config can already be dirty and still need an
+                # immediate hedge resync after a later trade/transfer.
+                changed_reasons: list[str] = []
+                if len(bundle.monitor._trades) != pre_trades:
+                    changed_reasons.append("trade")
+                if len(bundle.balance.transfers) != pre_transfers:
+                    changed_reasons.append("transfer")
+                if tuple(bundle.optimizer._active_symbols) != pre_active:
+                    changed_reasons.append("active_symbols")
+                if changed_reasons:
+                    try:
+                        if bundle.hedge_manager:
+                            bundle.hedge_manager.mark_inventory_changed(
+                                ",".join(changed_reasons)
+                            )
+                    except Exception:
+                        pass
+                    if cfg is not None and not cfg._dirty:
                         cfg.mark_dirty()
 
                 # Yield between configs so a slow one doesn't starve
@@ -1077,9 +1088,9 @@ class ConfigFactory:
             enabled=bool(s.get("hedging_enabled", True)),
             execution_mode=effective_hedge,
             dust_threshold_usd=float(s.get("hedge_dust_threshold_usd", 20.0)),
-            evaluation_interval_seconds=float(s.get("hedge_evaluation_interval_seconds", 300.0)),
+            evaluation_interval_seconds=float(s.get("hedge_evaluation_interval_seconds", 60.0)),
             margin_buffer_pct=float(s.get("hedge_margin_buffer_pct", 0.20)),
-            adjust_threshold_pct=float(s.get("hedge_adjust_threshold_pct", 0.10)),
+            adjust_threshold_pct=float(s.get("hedge_adjust_threshold_pct", 0.01)),
         )
         monitor.set_hedge_manager(hedge_manager)
 

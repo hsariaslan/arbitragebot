@@ -347,6 +347,11 @@ export interface OpenHedge {
   entry_price: number;
   mark_price: number;
   notional_usd: number;
+  target_qty?: number;
+  target_notional_usd?: number;
+  quantity_gap?: number;
+  quantity_gap_pct?: number;
+  notional_gap_usd?: number;
   unrealized_pnl_usd: number;
   opened_at: number;
   held_seconds: number;
@@ -369,6 +374,15 @@ export interface HedgeEvent {
   last_adjusted_at: number;
 }
 
+export interface UnhedgedTarget {
+  symbol: string;
+  target_qty: number;
+  target_notional_usd: number;
+  mark_price: number;
+  mark_source: 'futures' | 'spot';
+  reason: string;
+}
+
 export interface HedgeState {
   enabled: boolean;
   execution_mode: 'simulation' | 'testnet' | 'live';
@@ -379,7 +393,10 @@ export interface HedgeState {
   adjust_threshold_pct: number;
   open_count: number;
   open_hedges: OpenHedge[];
+  unhedged_targets?: UnhedgedTarget[];
   total_notional_usd: number;
+  total_target_notional_usd?: number;
+  total_hedge_gap_usd?: number;
   total_unrealized_pnl_usd: number;
   cumulative_funding_usd: number;
   total_opens: number;

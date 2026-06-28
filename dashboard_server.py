@@ -4340,9 +4340,9 @@ class DashboardServer:
             f"hedging: enabled={s.get('hedging_enabled', True)}, "
             f"mode={s.get('hedge_execution_mode', 'simulation')}, "
             f"dust=${s.get('hedge_dust_threshold_usd', 20.0):.0f}, "
-            f"eval_interval={s.get('hedge_evaluation_interval_seconds', 300.0):.0f}s, "
+            f"eval_interval={s.get('hedge_evaluation_interval_seconds', 60.0):.0f}s, "
             f"margin_buffer={s.get('hedge_margin_buffer_pct', 0.20)*100:.0f}%, "
-            f"adjust_threshold={s.get('hedge_adjust_threshold_pct', 0.10)*100:.0f}%",
+            f"adjust_threshold={s.get('hedge_adjust_threshold_pct', 0.01)*100:.0f}%",
             f"fee_real_mode={s.get('fee_real_mode', False)}",
             f"exchanges: {' '.join(fee_parts)}",
             f"role_boosts: {' '.join(boost_parts) if boost_parts else 'all neutral (1.0x)'}",

@@ -108,9 +108,9 @@ class HedgeManager:
         enabled: bool = True,
         execution_mode: str = "simulation",       # simulation | testnet | live
         dust_threshold_usd: float = 20.0,
-        evaluation_interval_seconds: float = 300.0,
+        evaluation_interval_seconds: float = 60.0,
         margin_buffer_pct: float = 0.20,
-        adjust_threshold_pct: float = 0.10,       # only adjust if drift > 10% of current size
+        adjust_threshold_pct: float = 0.01,       # only adjust if drift > 1% of current size
         leverage: int = 1,                        # set on each symbol before first open
     ) -> None:
         self._balance = balance
@@ -363,6 +363,18 @@ class HedgeManager:
         if adjust_threshold_pct is not None:
             self._adjust_threshold_pct = float(adjust_threshold_pct)
 
+    def mark_inventory_changed(self, reason: str = "") -> None:
+        """Wake the next evaluate() call after spot inventory changes.
+
+        The monitor calls evaluate() every tick, but evaluate() is normally
+        throttled. A trade, rebalance, expansion, or demotion changes the
+        target hedge immediately, so the next tick should reconcile instead
+        of waiting for the periodic interval.
+        """
+        self._last_evaluation_ts = 0.0
+        if reason and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"[Hedge] inventory changed: {reason} — next eval unthrottled")
+
     # ── Sizing primitives ─────────────────────────────────────────────
 
     def compute_target_hedge_qty(self, spot_symbol: str) -> float:
@@ -376,6 +388,22 @@ class HedgeManager:
 
     def compute_target_hedge_usd(self, spot_symbol: str, price: float) -> float:
         return self.compute_target_hedge_qty(spot_symbol) * price
+
+    def _held_symbols(self) -> set[str]:
+        """Symbols with any positive spot inventory, including demoted residuals."""
+        held: set[str] = set()
+        for ex in self._balance._exchanges:
+            for sym, qty in self._balance.crypto.get(ex, {}).items():
+                if qty > 0:
+                    held.add(sym)
+        return held
+
+    def _target_symbols(self) -> list[str]:
+        """Symbols that need a hedge decision: active symbols plus held inventory."""
+        active_symbols = list(self._optimizer._active_symbols) if self._optimizer else []
+        active_set = set(active_symbols)
+        residual_symbols = sorted(self._held_symbols() - active_set)
+        return active_symbols + residual_symbols
 
     def is_available_on_futures(self, spot_symbol: str) -> bool:
         """True if Binance Futures has a perpetual for this symbol.
@@ -732,21 +760,23 @@ class HedgeManager:
         if self._is_real_mode() and not self._reconciled:
             await self.reconcile_with_executor()
 
-        active_symbols = list(self._optimizer._active_symbols)
-        if not active_symbols:
-            # No active symbols → close all open hedges
+        target_symbols = self._target_symbols()
+        if not target_symbols:
+            # No active/held symbols → close all open hedges.
             for sym in list(self._shadows.keys()):
                 if self._shadows[sym].qty > 0:
                     async with self._lock_for(sym):
                         price = self._lookup_price(sym)
-                        await self._close(sym, price, now, "no_active_symbols")
+                        await self._close(sym, price, now, "no_spot_inventory")
             return
 
-        prices = self._get_prices_for(active_symbols)
+        prices = self._get_prices_for(target_symbols)
 
-        # 1) For each active symbol: decide hedge
+        # 1) For each active or held symbol: decide hedge. Residual crypto from
+        # demoted symbols remains real spot exposure until sold, so it must stay
+        # hedged instead of being closed only because the symbol left active set.
         seen: set[str] = set()
-        for sym in active_symbols:
+        for sym in target_symbols:
             seen.add(sym)
             price = prices.get(sym, 0.0)
             if price <= 0:
@@ -787,12 +817,13 @@ class HedgeManager:
                         # No adjustment needed — just accumulate funding
                         self._accumulate_funding(sym, now)
 
-        # 2) For shadows of symbols no longer active: close them
+        # 2) For shadows of symbols with no active role and no held inventory:
+        # close them. Dust-sized held positions close via should_hedge().
         for sym in list(self._shadows.keys()):
             if sym not in seen and self._shadows[sym].qty > 0:
                 async with self._lock_for(sym):
                     price = self._lookup_price(sym)
-                    await self._close(sym, price, now, "symbol_demoted")
+                    await self._close(sym, price, now, "no_spot_inventory")
 
         # 3) Periodic summary log (every evaluation)
         n_open = sum(1 for s in self._shadows.values() if s.qty > 0)
@@ -1009,19 +1040,26 @@ class HedgeManager:
         # Using spot mid as proxy created phantom drawdowns (S25/S26): when
         # spot/futures basis spread, the offset between spot crypto MTM and
         # hedge unrealized was wrong by the basis. Now they truly net out.
-        if self._shadows and self._optimizer is not None:
-            spot_prices = self._get_prices_for([s for s in self._shadows.keys()])
+        target_symbols = self._target_symbols()
+        price_symbols = set(self._shadows.keys()) | set(target_symbols)
+        if price_symbols and self._optimizer is not None:
+            spot_prices = self._get_prices_for(list(price_symbols))
         else:
             spot_prices = {}
 
         open_hedges: list[dict] = []
+        unhedged_targets: list[dict] = []
         total_notional = 0.0
         total_unrealized_pnl = 0.0
+        total_target_notional = 0.0
+        total_gap_notional = 0.0
         futures_mark_used = 0
         spot_fallback_used = 0
+        open_symbols: set[str] = set()
         for s in self._shadows.values():
             if s.qty <= 0:
                 continue
+            open_symbols.add(s.spot_symbol)
             entry = s.entry_price
             # Prefer Binance Futures mark — actual hedge venue
             futures_mark = self._funding_monitor.get_mark_price(s.spot_symbol)
@@ -1037,6 +1075,11 @@ class HedgeManager:
             # Short PnL: (entry - mark) × qty (positive when price drops)
             unrealized_pnl = (entry - mark) * s.qty
             notional = s.qty * (mark if mark > 0 else entry)
+            target_qty = self.compute_target_hedge_qty(s.spot_symbol)
+            target_notional = target_qty * (mark if mark > 0 else entry)
+            gap_qty = target_qty - s.qty
+            gap_notional = gap_qty * (mark if mark > 0 else entry)
+            gap_pct = abs(gap_qty) / max(s.qty, 1e-12) if s.qty > 0 else 0.0
             funding_rate = self._funding_monitor.get_funding_rate(s.spot_symbol)
             ann_short = self._funding_monitor.get_annualized_short_pct(s.spot_symbol)
             open_hedges.append({
@@ -1047,6 +1090,11 @@ class HedgeManager:
                 "mark_price": mark,
                 "mark_source": mark_source,  # "futures" or "spot" (fallback)
                 "notional_usd": notional,
+                "target_qty": target_qty,
+                "target_notional_usd": target_notional,
+                "quantity_gap": gap_qty,
+                "quantity_gap_pct": gap_pct,
+                "notional_gap_usd": gap_notional,
                 "unrealized_pnl_usd": unrealized_pnl,
                 "opened_at": s.opened_at,
                 "held_seconds": (now - s.opened_at) if s.opened_at > 0 else 0.0,
@@ -1058,6 +1106,39 @@ class HedgeManager:
             })
             total_notional += notional
             total_unrealized_pnl += unrealized_pnl
+            total_target_notional += target_notional
+            total_gap_notional += gap_notional
+
+        for sym in target_symbols:
+            if sym in open_symbols:
+                continue
+            target_qty = self.compute_target_hedge_qty(sym)
+            if target_qty <= 0:
+                continue
+            futures_mark = self._funding_monitor.get_mark_price(sym)
+            if futures_mark is not None and futures_mark > 0:
+                mark = futures_mark
+                mark_source = "futures"
+            else:
+                mark = spot_prices.get(sym, 0.0)
+                mark_source = "spot"
+            if mark <= 0:
+                continue
+            target_notional = target_qty * mark
+            total_target_notional += target_notional
+            total_gap_notional += target_notional
+            unhedged_targets.append({
+                "symbol": sym,
+                "target_qty": target_qty,
+                "target_notional_usd": target_notional,
+                "mark_price": mark,
+                "mark_source": mark_source,
+                "reason": (
+                    "dust"
+                    if target_notional < self._dust_threshold_usd
+                    else "no_open_hedge"
+                ),
+            })
 
         # v0.30.1+: log when first futures-mark snapshot is taken (one-time
         # transition from spot fallback to futures mark) — confirms Fix B
@@ -1080,9 +1161,12 @@ class HedgeManager:
             "adjust_threshold_pct": self._adjust_threshold_pct,
             "open_count": len(open_hedges),
             "open_hedges": open_hedges,
+            "unhedged_targets": unhedged_targets,
             # Backward-compat alias for shadow-only callers
             "open_shadows": open_hedges,
             "total_notional_usd": total_notional,
+            "total_target_notional_usd": total_target_notional,
+            "total_hedge_gap_usd": total_gap_notional,
             "total_unrealized_pnl_usd": total_unrealized_pnl,
             "cumulative_funding_usd": self._cumulative_funding_usd,
             "total_opens": self._total_opens,
