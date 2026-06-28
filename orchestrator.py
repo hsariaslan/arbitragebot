@@ -479,8 +479,12 @@ class Orchestrator:
                 cfg = self._registry.find_config(bundle.config_id)
 
                 # Pre-tick markers for change detection (dirty-flag triggers
-                # without touching component internals)
-                pre_trades = len(bundle.monitor._trades)
+                # without touching component internals). `_trades` is a
+                # bounded recent deque, so use the cumulative counter for
+                # trade detection after the deque reaches maxlen.
+                pre_trades = int(
+                    getattr(bundle.monitor, "_cumulative_trade_count", len(bundle.monitor._trades))
+                )
                 pre_transfers = len(bundle.balance.transfers)
                 pre_active = tuple(bundle.optimizer._active_symbols)
 
@@ -524,7 +528,10 @@ class Orchestrator:
                 # flag because a config can already be dirty and still need an
                 # immediate hedge resync after a later trade/transfer.
                 changed_reasons: list[str] = []
-                if len(bundle.monitor._trades) != pre_trades:
+                post_trades = int(
+                    getattr(bundle.monitor, "_cumulative_trade_count", len(bundle.monitor._trades))
+                )
+                if post_trades != pre_trades:
                     changed_reasons.append("trade")
                 if len(bundle.balance.transfers) != pre_transfers:
                     changed_reasons.append("transfer")
@@ -637,7 +644,9 @@ class Orchestrator:
                     gc_counts = (-1, -1, -1)
                     gc_thresh = (-1, -1, -1)
 
-                # Aggregate per-config collection sizes
+                # Aggregate per-config totals. `_trades` is a bounded recent
+                # deque, so true lifetime trade count must come from the
+                # cumulative counter.
                 n_trades_total = 0
                 n_transfers_total = 0
                 n_dirty = 0
@@ -647,7 +656,9 @@ class Orchestrator:
                 n_ticks_max = 0   # MAX deque size (any sym, any config)
                 for b in bundles:
                     try:
-                        n_trades_total += len(b.monitor._trades)
+                        n_trades_total += int(
+                            getattr(b.monitor, "_cumulative_trade_count", len(b.monitor._trades))
+                        )
                         n_transfers_total += len(b.balance.transfers)
                         n_watchlist_total += len(b.optimizer._watchlist)
                         n_rotations_total += len(b.optimizer._rotations)
@@ -942,9 +953,17 @@ class ConfigFactory:
 
         # ── Capital from group ─────────────────────────────────────────
         total_capital = float(group.initial_capital)
+        hedging_enabled = bool(s.get("hedging_enabled", True))
+        futures_reserve_pct = (
+            max(0.0, min(0.90, float(s.get("futures_capital_target_pct", 0.40))))
+            if hedging_enabled
+            else 0.0
+        )
+        futures_reserve_usdt = round(total_capital * futures_reserve_pct, 2)
+        spot_capital = max(0.0, total_capital - futures_reserve_usdt)
         trade_amount_pct = float(s.get("trade_amount_pct", 0.0))
         if trade_amount_pct > 0:
-            trade_amount = round(total_capital * trade_amount_pct, 2)
+            trade_amount = round(spot_capital * trade_amount_pct, 2)
         else:
             trade_amount = float(s.get("trade_amount_usd", 25.0))
 
@@ -977,7 +996,7 @@ class ConfigFactory:
         active_symbols = list(self._active_symbols_default)
 
         # ── Initial allocations ────────────────────────────────────────
-        per_exchange = total_capital / max(1, len(active_exchanges))
+        per_exchange = spot_capital / max(1, len(active_exchanges))
         num_positions = 1 + len(active_symbols)
         per_position = per_exchange / max(1, num_positions)
         allocations = {
@@ -1002,6 +1021,7 @@ class ConfigFactory:
             hourly_external_transfer_cap=float(s.get("hourly_external_transfer_cap", 2.0)),
             bitfinex_reserve_pct=float(s.get("bitfinex_reserve_pct", 0.15)),
             bitfinex_reserve_hard_floor=float(s.get("bitfinex_reserve_hard_floor", 0.05)),
+            futures_reserve_usdt=futures_reserve_usdt,
         )
 
         # ── ArbitrageMonitor ───────────────────────────────────────────
@@ -1091,6 +1111,13 @@ class ConfigFactory:
             evaluation_interval_seconds=float(s.get("hedge_evaluation_interval_seconds", 60.0)),
             margin_buffer_pct=float(s.get("hedge_margin_buffer_pct", 0.20)),
             adjust_threshold_pct=float(s.get("hedge_adjust_threshold_pct", 0.01)),
+            leverage=int(s.get("hedge_leverage", 2)),
+            total_capital=total_capital,
+            futures_capital_target_pct=float(s.get("futures_capital_target_pct", 0.40)),
+            futures_capital_topup_pct=float(s.get("futures_capital_topup_pct", 0.35)),
+            futures_capital_emergency_pct=float(s.get("futures_capital_emergency_pct", 0.30)),
+            futures_capital_overflow_pct=float(s.get("futures_capital_overflow_pct", 0.45)),
+            futures_capital_transfer_min_usd=float(s.get("futures_capital_transfer_min_usd", 10.0)),
         )
         monitor.set_hedge_manager(hedge_manager)
 
@@ -1121,11 +1148,22 @@ class ConfigFactory:
                     # a different default), reset to fresh allocations so
                     # the per-config view matches the user's expectation.
                     saved_initial = float(getattr(balance, "_initial_investment", 0.0) or 0.0)
-                    if abs(saved_initial - total_capital) > 0.5:
+                    saved_balance_state = saved.get("balance", {}) if isinstance(saved, dict) else {}
+                    needs_futures_reserve_migration = (
+                        futures_reserve_usdt > 0.5
+                        and isinstance(saved_balance_state, dict)
+                        and "binance_futures_usdt" not in saved_balance_state
+                    )
+                    if abs(saved_initial - total_capital) > 0.5 or needs_futures_reserve_migration:
+                        reset_reason = (
+                            "futures reserve allocation missing"
+                            if needs_futures_reserve_migration
+                            else "capital mismatch"
+                        )
                         logger.warning(
-                            f"[State] Capital mismatch on config {config.id[:8]}…: "
+                            f"[State] Balance reset on config {config.id[:8]}…: "
                             f"saved=${saved_initial:.2f} group=${total_capital:.2f} — "
-                            f"resetting balance to group capital"
+                            f"resetting balance to group capital ({reset_reason})"
                         )
                         balance = BalanceTracker(
                             exchanges=active_exchanges,
@@ -1144,10 +1182,12 @@ class ConfigFactory:
                             bitfinex_reserve_hard_floor=float(
                                 s.get("bitfinex_reserve_hard_floor", 0.05)
                             ),
+                            futures_reserve_usdt=futures_reserve_usdt,
                         )
                         # Re-wire monitor/optimizer to the fresh balance
                         monitor._balance = balance
                         optimizer._balance = balance
+                        hedge_manager._balance = balance
                         # Skip restoring monitor/optimizer state since the
                         # capital basis has changed
                         if "fee_manager" in saved:
@@ -1166,7 +1206,7 @@ class ConfigFactory:
                             balance.update_symbols(optimizer._active_symbols)
                         logger.info(
                             f"[State] Restored config {config.id[:8]}…: "
-                            f"{len(monitor._trades)} trades, "
+                            f"{getattr(monitor, '_cumulative_trade_count', len(monitor._trades))} trades, "
                             f"{len(balance.transfers)} transfers, "
                             f"{len(optimizer._active_symbols)} active symbols"
                         )

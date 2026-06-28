@@ -97,6 +97,7 @@ class BalanceTracker:
         trading_float_multiplier: float = 8.0,
         trading_float_replenish_trigger: float = 3.0,
         trading_float_overflow_multiplier: float = 1.5,
+        futures_reserve_usdt: float = 0.0,
     ) -> None:
         self._fee_manager = fee_manager
         self._transfer_fee_mgr = transfer_fee_manager
@@ -110,6 +111,7 @@ class BalanceTracker:
         self._adaptive_mode = adaptive_mode
         self._estimated_profit_per_trade: float = 0.02
         self._allocations = allocations
+        self.binance_futures_usdt: float = max(0.0, float(futures_reserve_usdt))
 
         # Initialize balances from allocations
         if allocations:
@@ -128,6 +130,7 @@ class BalanceTracker:
             for ex in self._exchanges:
                 for sym in self._symbols:
                     self._initial_investment += self._crypto_usd[ex][sym]
+            self._initial_investment += self.binance_futures_usdt
         else:
             # Uniform default: $80 USDT + $80 crypto per symbol per exchange
             half = INITIAL_BALANCE_PER_SYMBOL / 2.0
@@ -137,6 +140,7 @@ class BalanceTracker:
             }
             self._initial_investment = (
                 INITIAL_BALANCE_PER_SYMBOL * len(self._symbols) * len(self._exchanges)
+                + self.binance_futures_usdt
             )
 
         # Crypto quantities per (exchange, symbol) — set on initialization
@@ -290,6 +294,7 @@ class BalanceTracker:
             for ex in self._exchanges:
                 for sym in self._symbols:
                     self._initial_investment += self._crypto_usd[ex][sym]
+            self._initial_investment += self.binance_futures_usdt
         else:
             half = INITIAL_BALANCE_PER_SYMBOL / 2.0
             self.usdt = {ex: half * len(self._symbols) for ex in self._exchanges}
@@ -298,6 +303,7 @@ class BalanceTracker:
             }
             self._initial_investment = (
                 INITIAL_BALANCE_PER_SYMBOL * len(self._symbols) * len(self._exchanges)
+                + self.binance_futures_usdt
             )
 
         # Reset crypto quantities and initialization
@@ -358,7 +364,16 @@ class BalanceTracker:
         logger.info(
             f"[Balance] Initialized (${self._initial_investment:.0f} total): "
             + " | ".join(parts)
+            + (
+                f" | Binance Futures reserve: ${self.binance_futures_usdt:.0f}"
+                if self.binance_futures_usdt > 0
+                else ""
+            )
         )
+
+    def set_futures_reserve_usdt(self, amount: float) -> None:
+        """Set the simulated/accounting Binance USD-M Futures reserve balance."""
+        self.binance_futures_usdt = max(0.0, float(amount))
 
     # ── D-17: In-transit fund tracking ──────────────────────────────────
 
@@ -441,6 +456,7 @@ class BalanceTracker:
         symbol: str,
         trade_amount: float,
         prices: dict[str, float],
+        max_external_fee_usd: float | None = None,
     ) -> list[Transfer]:
         """
         Attempt to rebalance so the trade can execute.
@@ -462,7 +478,11 @@ class BalanceTracker:
         # External crypto ($0.10) is cheaper than internal buy ($0.24).
         if not has_crypto:
             transfer = self._rebalance_crypto(
-                sell_exchange, symbol, prices.get(symbol, 0.0), now
+                sell_exchange,
+                symbol,
+                prices.get(symbol, 0.0),
+                now,
+                max_external_fee_usd=max_external_fee_usd,
             )
             if transfer:
                 transfers.append(transfer)
@@ -472,14 +492,217 @@ class BalanceTracker:
             buy_exchange, sell_exchange, symbol, trade_amount, sell_price
         )
         if not has_usdt:
-            transfer = self._rebalance_usdt(buy_exchange, prices, now)
+            transfer = self._rebalance_usdt(
+                buy_exchange,
+                prices,
+                now,
+                max_external_fee_usd=max_external_fee_usd,
+            )
             if transfer:
                 transfers.append(transfer)
 
         return transfers
 
+    def preview_refill_rebalance(
+        self,
+        buy_exchange: str,
+        sell_exchange: str,
+        symbol: str,
+        trade_amount: float,
+        prices: dict[str, float],
+        max_external_fee_usd: float = 0.10,
+    ) -> dict:
+        """Dry-run whether a missed trade can be fixed as a cheap refill.
+
+        Used by weak-regime gating: allow balance refills that are local or
+        near-free, but keep expensive cross-exchange rotation suppressed.
+        The actual rebalance still runs normal cooldown/ROI/hourly-cap checks.
+        """
+        sell_price = prices.get(symbol, 0.0)
+        if sell_price <= 0:
+            return {"allowed": False, "reason": "missing_price", "plan": []}
+
+        has_usdt, has_crypto = self.can_execute(
+            buy_exchange, sell_exchange, symbol, trade_amount, sell_price
+        )
+        plan: list[dict] = []
+        if not has_crypto:
+            plan.append(self._preview_crypto_refill(
+                sell_exchange, symbol, sell_price, max_external_fee_usd
+            ))
+        if not has_usdt:
+            plan.append(self._preview_usdt_refill(
+                buy_exchange, prices, max_external_fee_usd
+            ))
+        if not plan:
+            return {"allowed": True, "reason": "no_refill_needed", "plan": []}
+
+        blocked = [p for p in plan if not p.get("allowed")]
+        if blocked:
+            return {
+                "allowed": False,
+                "reason": ";".join(str(p.get("reason", "blocked")) for p in blocked),
+                "plan": plan,
+            }
+        types = ",".join(str(p.get("type", "unknown")) for p in plan)
+        return {"allowed": True, "reason": f"cheap_refill:{types}", "plan": plan}
+
+    def _preview_usdt_refill(
+        self,
+        exchange: str,
+        prices: dict[str, float],
+        max_external_fee_usd: float,
+    ) -> dict:
+        rebal = self.compute_rebalance_amount(exchange) if self._adaptive_mode else self._rebalance_amount
+        buf = self._rebalance_buffer
+
+        internal_cost = float("inf")
+        internal_sym = None
+        best_value = 0.0
+        for sym in self._symbols:
+            qty = self.crypto[exchange].get(sym, 0.0)
+            p = prices.get(sym, 0.0)
+            val = qty * p
+            if val > best_value:
+                best_value = val
+                internal_sym = sym
+        if internal_sym and best_value >= rebal + buf:
+            fee_rate = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
+            internal_cost = rebal * fee_rate
+
+        external_cost = float("inf")
+        external_source = None
+        eligible = [
+            ex for ex in self._exchanges
+            if ex != exchange and self._available_usdt_for_rebalance(ex) >= rebal + buf
+        ]
+        if not eligible:
+            min_rebal = self._trade_amount
+            eligible = [
+                ex for ex in self._exchanges
+                if ex != exchange and self._available_usdt_for_rebalance(ex) >= min_rebal + buf
+            ]
+        if eligible:
+            external_source = min(eligible, key=lambda ex: self._get_withdrawal_fee(ex))
+            external_cost = self._get_withdrawal_fee(external_source)
+
+        if external_source and external_cost <= internal_cost:
+            if external_cost <= max_external_fee_usd:
+                return {
+                    "allowed": True,
+                    "type": "external_usdt",
+                    "fee_usd": external_cost,
+                    "from_exchange": external_source,
+                    "to_exchange": exchange,
+                }
+            return {
+                "allowed": False,
+                "reason": f"external_usdt_fee>${max_external_fee_usd:.2f}",
+                "type": "external_usdt",
+                "fee_usd": external_cost,
+            }
+
+        if internal_cost < float("inf"):
+            return {
+                "allowed": True,
+                "type": "internal_sell",
+                "fee_usd": internal_cost,
+                "to_exchange": exchange,
+            }
+
+        return {
+            "allowed": False,
+            "reason": "no_usdt_refill_source",
+            "best_other_usdt": max(
+                (self._available_usdt_for_rebalance(ex) for ex in self._exchanges if ex != exchange),
+                default=0.0,
+            ),
+            "best_crypto_value": best_value,
+        }
+
+    def _preview_crypto_refill(
+        self,
+        exchange: str,
+        symbol: str,
+        price: float,
+        max_external_fee_usd: float,
+    ) -> dict:
+        rebal = self.compute_rebalance_amount(exchange, symbol) if self._adaptive_mode else self._rebalance_amount
+        crypto_sources = []
+        for ex in self._exchanges:
+            if ex == exchange:
+                continue
+            crypto_val = self.crypto[ex].get(symbol, 0.0) * price
+            if crypto_val >= rebal * 1.2:
+                crypto_sources.append(ex)
+        if not crypto_sources:
+            min_rebal = self._trade_amount
+            for ex in self._exchanges:
+                if ex == exchange:
+                    continue
+                crypto_val = self.crypto[ex].get(symbol, 0.0) * price
+                if crypto_val >= min_rebal * 1.2:
+                    crypto_sources.append(ex)
+                    rebal = min_rebal
+
+        internal_buy_cost = rebal * (self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001)
+        if crypto_sources:
+            best_source = min(crypto_sources, key=lambda ex: self._get_withdrawal_fee(ex))
+            external_cost = self._get_withdrawal_fee(best_source)
+            if external_cost < internal_buy_cost:
+                if external_cost <= max_external_fee_usd:
+                    return {
+                        "allowed": True,
+                        "type": "external_crypto",
+                        "fee_usd": external_cost,
+                        "from_exchange": best_source,
+                        "to_exchange": exchange,
+                    }
+                return {
+                    "allowed": False,
+                    "reason": f"external_crypto_fee>${max_external_fee_usd:.2f}",
+                    "type": "external_crypto",
+                    "fee_usd": external_cost,
+                }
+
+        if self.usdt.get(exchange, 0.0) >= rebal:
+            return {
+                "allowed": True,
+                "type": "internal_buy",
+                "fee_usd": internal_buy_cost,
+                "to_exchange": exchange,
+            }
+
+        eligible = [
+            ex for ex in self._exchanges
+            if ex != exchange and self._available_usdt_for_rebalance(ex) >= rebal + self._rebalance_buffer
+        ]
+        if eligible:
+            best_source = min(eligible, key=lambda ex: self._get_withdrawal_fee(ex))
+            external_cost = self._get_withdrawal_fee(best_source)
+            if external_cost <= max_external_fee_usd:
+                return {
+                    "allowed": True,
+                    "type": "external_usdt_buy",
+                    "fee_usd": external_cost,
+                    "from_exchange": best_source,
+                    "to_exchange": exchange,
+                }
+            return {
+                "allowed": False,
+                "reason": f"external_usdt_buy_fee>${max_external_fee_usd:.2f}",
+                "type": "external_usdt_buy",
+                "fee_usd": external_cost,
+            }
+
+        return {"allowed": False, "reason": "no_crypto_refill_source"}
+
     def _rebalance_usdt(
-        self, exchange: str, prices: dict[str, float], now: float
+        self,
+        exchange: str,
+        prices: dict[str, float],
+        now: float,
+        max_external_fee_usd: float | None = None,
     ) -> Transfer | None:
         """
         Get more USDT on an exchange. Always picks the cheapest option.
@@ -546,6 +769,18 @@ class BalanceTracker:
 
             # Hourly external transfer budget check
             if external_source and not self._check_hourly_transfer_budget(external_cost):
+                external_cost = float("inf")
+                external_source = None
+            if (
+                external_source
+                and max_external_fee_usd is not None
+                and external_cost > max_external_fee_usd
+            ):
+                logger.debug(
+                    f"[Balance] External transfer {external_source}→{exchange} "
+                    f"blocked by weak-regime refill cap: "
+                    f"${external_cost:.2f} > ${max_external_fee_usd:.2f}"
+                )
                 external_cost = float("inf")
                 external_source = None
 
@@ -651,7 +886,12 @@ class BalanceTracker:
         return None
 
     def _rebalance_crypto(
-        self, exchange: str, symbol: str, price: float, now: float
+        self,
+        exchange: str,
+        symbol: str,
+        price: float,
+        now: float,
+        max_external_fee_usd: float | None = None,
     ) -> Transfer | None:
         """
         Get more crypto on an exchange.
@@ -738,6 +978,17 @@ class BalanceTracker:
             # Hourly external transfer budget check
             if crypto_sources and not self._check_hourly_transfer_budget(external_crypto_cost):
                 crypto_sources = []  # Skip, fall through to internal
+            if (
+                crypto_sources
+                and max_external_fee_usd is not None
+                and external_crypto_cost > max_external_fee_usd
+            ):
+                logger.debug(
+                    f"[Balance] External crypto {best_source}→{exchange} "
+                    f"blocked by weak-regime refill cap: "
+                    f"${external_crypto_cost:.2f} > ${max_external_fee_usd:.2f}"
+                )
+                crypto_sources = []
 
             # Prefer external crypto if cheaper than internal buy
             if crypto_sources and external_crypto_cost < internal_buy_cost:
@@ -828,6 +1079,13 @@ class BalanceTracker:
 
             # Hourly external transfer budget check
             if not self._check_hourly_transfer_budget(withdrawal_fee):
+                return None
+            if max_external_fee_usd is not None and withdrawal_fee > max_external_fee_usd:
+                logger.debug(
+                    f"[Balance] External+buy {richest_ex}→{exchange} "
+                    f"blocked by weak-regime refill cap: "
+                    f"${withdrawal_fee:.2f} > ${max_external_fee_usd:.2f}"
+                )
                 return None
 
             fee_rate = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
@@ -1651,9 +1909,10 @@ class BalanceTracker:
         Falls back to flat `prices` dict for any (exchange, symbol) missing
         from `prices_per_exchange`.
 
-        Includes spot USDT + spot crypto value + in-transit USDT/crypto
-        (debited from source, not yet credited to destination — D-17 demo
-        mode network delay) + optional futures hedge unrealized PnL.
+        Includes spot USDT + spot crypto value + Binance Futures reserve +
+        in-transit USDT/crypto (debited from source, not yet credited to
+        destination — D-17 demo mode network delay) + optional futures hedge
+        unrealized PnL.
 
         v0.31.0-beta+: in-transit funds MUST be counted. Without them,
         a burst of USDT rebalances in demo mode reads as a phantom
@@ -1663,7 +1922,7 @@ class BalanceTracker:
         $1000 portfolio (32%) that crossed the emergency drawdown
         threshold and triggered a false sell-all.
         """
-        total = sum(self.usdt.values())
+        total = sum(self.usdt.values()) + float(getattr(self, "binance_futures_usdt", 0.0) or 0.0)
         for ex in self._exchanges:
             ex_prices = (prices_per_exchange or {}).get(ex, {})
             for sym, qty in self.crypto[ex].items():
@@ -1728,6 +1987,9 @@ class BalanceTracker:
                 if qty > 0:
                     ex_total += qty * prices.get(sym, 0.0)
             parts.append(f"{ex} ${ex_total:.0f}")
+        futures_reserve = float(getattr(self, "binance_futures_usdt", 0.0) or 0.0)
+        if futures_reserve > 0:
+            parts.append(f"BinanceFutures ${futures_reserve:.0f}")
         portfolio = self.get_portfolio_value(prices)
         transfer_count = len(self.transfers)
         return [
@@ -1745,6 +2007,7 @@ class BalanceTracker:
         return {
             "usdt": dict(self.usdt),
             "crypto": {ex: dict(syms) for ex, syms in self.crypto.items()},
+            "binance_futures_usdt": float(getattr(self, "binance_futures_usdt", 0.0) or 0.0),
             "_crypto_usd": {ex: dict(syms) for ex, syms in self._crypto_usd.items()},
             "_initial_investment": self._initial_investment,
             "_initialized": self._initialized,
@@ -1772,6 +2035,7 @@ class BalanceTracker:
         saved_usdt = data["usdt"]
         saved_crypto = data["crypto"]
         saved_crypto_usd = data["_crypto_usd"]
+        self.binance_futures_usdt = float(data.get("binance_futures_usdt", 0.0) or 0.0)
         for ex in self._exchanges:
             if ex in saved_usdt:
                 self.usdt[ex] = saved_usdt[ex]

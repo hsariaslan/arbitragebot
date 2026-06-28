@@ -188,6 +188,8 @@ class ArbitrageMonitor:
         self._regime_strong_hours: set[int] = {7, 15, 20, 21, 22}
         self._regime_neutral_hours: set[int] = {0, 1, 5, 6, 8, 9, 11}
         self._regime_weak_min_net_multiplier: float = 2.0
+        self._regime_weak_rebalance_policy: str = "refill_only"  # strict | refill_only | off
+        self._regime_weak_refill_max_fee_usd: float = 0.10
         self._regime_weak_disable_rebalance: bool = True
         self._regime_last_logged_regime: str = ""  # track transitions for logging
 
@@ -329,6 +331,7 @@ class ArbitrageMonitor:
         # 0→N or N→0, the anomaly tracker's peak basis changes (spot-only ↔
         # spot+hedge_pnl) and we reset peak so drawdown is apples-to-apples.
         self._prev_hedge_count: int = 0
+        self._hedge_reserve_gate_skips: int = 0
 
     def set_optimizer(self, optimizer: "SymbolOptimizer") -> None:
         """Store optimizer reference for score-based rebalance gating."""
@@ -552,7 +555,7 @@ class ArbitrageMonitor:
         #   - Less than 60 seconds elapsed → just give it a minute.
         # Operator wants $/hr visible quickly, so keep the floor short.
         WARMUP_SECONDS = 60.0
-        if len(self._trades) == 0 or elapsed_seconds < WARMUP_SECONDS:
+        if self._cumulative_trade_count == 0 or elapsed_seconds < WARMUP_SECONDS:
             session_hourly_rate = 0.0
         else:
             session_hourly_rate = net_profit / (elapsed_seconds / 3600)
@@ -620,7 +623,37 @@ class ArbitrageMonitor:
             return self._min_net_profit_pct * self._regime_weak_min_net_multiplier
         return self._min_net_profit_pct
 
-    def _should_rebalance(self, buy_ex: str, sell_ex: str) -> tuple[bool, str]:
+    def _weak_rebalance_policy(self) -> str:
+        """Return normalized weak-regime rebalance behavior.
+
+        `regime_weak_disable_rebalance` is kept as a legacy boolean. New
+        configs use `regime_weak_rebalance_policy`:
+          - strict: block all weak-hour rebalances
+          - refill_only: allow only local/cheap inventory refills
+          - off: no weak-hour rebalance restriction
+        """
+        policy = str(getattr(self, "_regime_weak_rebalance_policy", "") or "").strip().lower()
+        if policy in {"strict", "refill_only", "off"}:
+            return policy
+        return "strict" if self._regime_weak_disable_rebalance else "off"
+
+    def _rebalance_external_fee_cap(self) -> float | None:
+        if (
+            self._regime_gating_enabled
+            and self._current_regime() == "weak"
+            and self._weak_rebalance_policy() == "refill_only"
+        ):
+            return max(0.0, float(self._regime_weak_refill_max_fee_usd))
+        return None
+
+    def _should_rebalance(
+        self,
+        buy_ex: str,
+        sell_ex: str,
+        symbol: str = "",
+        trade_amount: float | None = None,
+        prices: dict[str, float] | None = None,
+    ) -> tuple[bool, str]:
         """Check if rebalancing is worthwhile based on ROI and net P&L.
 
         Returns (allowed, reason). reason is non-empty only when blocked.
@@ -628,15 +661,28 @@ class ArbitrageMonitor:
         if not self._balance or not self._adaptive_mode:
             return True, ""
 
-        # Regime gate: block rebalances during weak hours (saves transfer
-        # fees during thin spread windows). The bot can still trade
-        # existing positions but won't pay setup costs to chase new ones.
+        # Regime gate: weak hours can either block all rebalances, allow only
+        # low-cost refill attempts, or behave normally.
         if (
             self._regime_gating_enabled
-            and self._regime_weak_disable_rebalance
             and self._current_regime() == "weak"
         ):
-            return False, "regime_weak (no rebalance during thin hours)"
+            policy = self._weak_rebalance_policy()
+            if policy == "strict":
+                return False, "regime_weak (strict rebalance block)"
+            if policy == "refill_only":
+                if not symbol or trade_amount is None or prices is None:
+                    return False, "regime_weak_refill_only (missing preview context)"
+                preview = self._balance.preview_refill_rebalance(
+                    buy_ex,
+                    sell_ex,
+                    symbol,
+                    trade_amount,
+                    prices,
+                    max_external_fee_usd=max(0.0, float(self._regime_weak_refill_max_fee_usd)),
+                )
+                if not preview.get("allowed"):
+                    return False, f"regime_weak_refill_only ({preview.get('reason', 'blocked')})"
 
         # Quiet-period gate: when no trade has fired for the configured
         # pause window, suppress rebalance attempts. Transfer fees during
@@ -1451,7 +1497,7 @@ class ArbitrageMonitor:
         logger.info(
             f"[Monitor] Reconfigured: {len(self._symbols)} symbols, "
             f"{len(self._active_exchanges)} exchanges, ${self._trade_amount}/trade "
-            f"(cumulative: {len(self._trades)} trades, tick #{self._tick_count})"
+            f"(cumulative: {self._cumulative_trade_count} trades, tick #{self._tick_count})"
         )
 
     def tick_once(self) -> None:
@@ -1951,17 +1997,27 @@ class ArbitrageMonitor:
                                 # Gates: optimizer score + ROI + net P&L
                                 score_ok = self._optimizer and self._optimizer.should_allow_rebalance(sym)
                                 if score_ok:
-                                    rebal_ok, rebal_reason = self._should_rebalance(buy_ex, sell_ex)
+                                    prices = self._get_current_prices()
+                                    rebal_ok, rebal_reason = self._should_rebalance(
+                                        buy_ex, sell_ex, sym, self._trade_amount, prices
+                                    )
                                 else:
                                     rebal_ok = False
+                                    prices = None
                                     sym_score_obj = self._optimizer.get_symbol_score(sym) if self._optimizer else None
                                     score_val = sym_score_obj.score if sym_score_obj else 0.0
                                     rebal_reason = f"score_gate (score={score_val:.4f} < 0.01)"
 
                                 if score_ok and rebal_ok:
-                                    prices = self._get_current_prices()
+                                    if prices is None:
+                                        prices = self._get_current_prices()
                                     rebal_transfers = self._balance.try_rebalance(
-                                        buy_ex, sell_ex, sym, self._trade_amount, prices
+                                        buy_ex,
+                                        sell_ex,
+                                        sym,
+                                        self._trade_amount,
+                                        prices,
+                                        max_external_fee_usd=self._rebalance_external_fee_cap(),
                                     )
                                     if rebal_transfers:
                                         self._miss_streak[miss_key] = 0
@@ -2015,6 +2071,25 @@ class ArbitrageMonitor:
                                             buy_ex, sell_ex, sym, trade_size, bid_p
                                         )
                                         can_trade = has_usdt and has_crypto
+
+                        if can_trade and self._hedge_manager is not None:
+                            if getattr(self._hedge_manager, "_execution_mode", "simulation") in ("testnet", "live"):
+                                try:
+                                    _safe_task(
+                                        self._hedge_manager.refresh_reserve_status(allow_transfer=True),
+                                        "hedge_reserve_refresh_before_trade",
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"[Hedge] reserve refresh before trade failed: {e}")
+                            reserve_ok, reserve_reason = self._hedge_manager.can_open_spot_position()
+                            if not reserve_ok:
+                                self._hedge_reserve_gate_skips += 1
+                                if self._hedge_reserve_gate_skips == 1 or self._hedge_reserve_gate_skips % 60 == 0:
+                                    logger.warning(
+                                        f"[Hedge] SPOT_TRADE_BLOCKED {sym} {buy_ex}->{sell_ex}: "
+                                        f"{reserve_reason} size=${trade_size:.2f}"
+                                    )
+                                can_trade = False
 
                         # Execute the trade or count the skip
                         if can_trade:
@@ -2185,17 +2260,27 @@ class ArbitrageMonitor:
                             else:
                                 score_ok = self._optimizer and self._optimizer.should_allow_rebalance(sym)
                                 if score_ok:
-                                    rebal_ok, rebal_reason = self._should_rebalance(buy_ex, sell_ex)
+                                    prices = self._get_current_prices()
+                                    rebal_ok, rebal_reason = self._should_rebalance(
+                                        buy_ex, sell_ex, sym, self._trade_amount, prices
+                                    )
                                 else:
                                     rebal_ok = False
+                                    prices = None
                                     sym_score_obj = self._optimizer.get_symbol_score(sym) if self._optimizer else None
                                     score_val = sym_score_obj.score if sym_score_obj else 0.0
                                     rebal_reason = f"score_gate (score={score_val:.4f} < 0.01)"
 
                                 if score_ok and rebal_ok:
-                                    prices = self._get_current_prices()
+                                    if prices is None:
+                                        prices = self._get_current_prices()
                                     rebal_transfers = self._balance.try_rebalance(
-                                        buy_ex, sell_ex, sym, self._trade_amount, prices
+                                        buy_ex,
+                                        sell_ex,
+                                        sym,
+                                        self._trade_amount,
+                                        prices,
+                                        max_external_fee_usd=self._rebalance_external_fee_cap(),
                                     )
                                     if rebal_transfers:
                                         self._miss_streak[miss_key] = 0
@@ -2280,9 +2365,44 @@ class ArbitrageMonitor:
                 parts.append(f"{ex}=${ex_total:.0f}")
             ext_fees_snap = self._balance.total_external_transfer_fees
             total_fees_snap = self._balance.total_transfer_fees
+            credited_cb = (
+                self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
+            )
+            pending_cb = (
+                self._fee_manager._total_pending_cashback if self._fee_manager else 0.0
+            )
+            hedge_extra = ""
+            if self._hedge_manager is not None:
+                try:
+                    hedge_state = self._hedge_manager.get_debug_state()
+                    hedge_pnl = float(hedge_state.get("total_unrealized_pnl_usd", 0.0))
+                    hedge_funding = float(hedge_state.get("cumulative_funding_usd", 0.0))
+                    hedged_total = total + hedge_pnl
+                    hedge_extra = (
+                        f" | hedged=${hedged_total:.0f} "
+                        f"(hedge_pnl=${hedge_pnl:+.2f})"
+                    )
+                    if (
+                        hedge_state.get("enabled", False)
+                        and str(hedge_state.get("execution_mode", "simulation")) == "simulation"
+                    ):
+                        accounting_total = (
+                            self._balance._initial_investment
+                            + self._cumulative_pnl
+                            - total_fees_snap
+                            + credited_cb
+                            + hedge_funding
+                        )
+                        hedge_extra += (
+                            f" accounting=${accounting_total:.0f} "
+                            f"drift=${hedged_total - accounting_total:+.2f}"
+                        )
+                except Exception:
+                    hedge_extra = ""
             logger.info(
                 f"[Balance] Snapshot: {' '.join(parts)} | total=${total:.0f} "
                 f"| fees: ${total_fees_snap:.2f} (ext=${ext_fees_snap:.2f})"
+                f"{hedge_extra}"
             )
 
             # Session P&L summary
@@ -2290,16 +2410,10 @@ class ArbitrageMonitor:
             hours = elapsed / 3600
             minutes = int(elapsed // 60)
             h, m = divmod(minutes, 60)
-            trade_count = len(self._trades)
-            trading_pnl = sum(t.profit_usd for t in self._trades)
+            trade_count = self._cumulative_trade_count
+            trading_pnl = self._cumulative_pnl
             xfer_fees = self._balance.total_transfer_fees
             ext_fees = self._balance.total_external_transfer_fees
-            credited_cb = (
-                self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
-            )
-            pending_cb = (
-                self._fee_manager._total_pending_cashback if self._fee_manager else 0.0
-            )
             net = trading_pnl - xfer_fees + credited_cb
             hourly = net / hours if hours > 0 else 0.0
             ref_earn = (
@@ -2433,8 +2547,8 @@ class ArbitrageMonitor:
         """
         if not self._log_file:
             return
-        total_profit = sum(t.profit_usd for t in self._trades)
-        total_trades = len(self._trades)
+        total_profit = self._cumulative_pnl
+        total_trades = self._cumulative_trade_count
 
         lines: list[str] = []
         connected = sum(
@@ -2485,8 +2599,8 @@ class ArbitrageMonitor:
         """Print discovery report. Called on shutdown."""
         elapsed = time.time() - self._start_time if self._start_time else 0
         minutes = elapsed / 60
-        total_trades = len(self._trades)
-        trading_pnl = sum(t.profit_usd for t in self._trades)
+        total_trades = self._cumulative_trade_count
+        trading_pnl = self._cumulative_pnl
         transfer_fees = self._balance.total_transfer_fees if self._balance else 0.0
 
         lines: list[str] = []
@@ -2622,7 +2736,7 @@ class ArbitrageMonitor:
             lines.append(f"  {ex:<8} ${usdt:.2f} USDT{crypto_str} = ${ex_total:.2f}")
 
         initial = self._balance._initial_investment
-        trading_pnl = sum(t.profit_usd for t in self._trades)
+        trading_pnl = self._cumulative_pnl
         transfer_fees = self._balance.total_transfer_fees
         lines.append(
             f"  Total: ${grand_total:.2f} (init ${initial:.0f}, "

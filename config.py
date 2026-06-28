@@ -488,8 +488,14 @@ HEDGING_ENABLED: bool = True
 HEDGE_EXECUTION_MODE: str = "simulation"
 HEDGE_DUST_THRESHOLD_USD: float = 10.0        # min spot notional to hedge
 HEDGE_EVALUATION_INTERVAL_SECONDS: float = 60.0   # periodic hedge sanity check
-HEDGE_MARGIN_BUFFER_PCT: float = 0.20         # keep margin >= 1.2× position size
+HEDGE_LEVERAGE: int = 2                       # isolated USD-M leverage; 2x keeps margin practical without aggressive liquidation risk
+HEDGE_MARGIN_BUFFER_PCT: float = 0.20         # keep available margin >= initial_margin × 1.2
 HEDGE_ADJUST_THRESHOLD_PCT: float = 0.01      # adjust when inventory drifts > 1%
+FUTURES_CAPITAL_TARGET_PCT: float = 0.40      # reserve 40% of group capital in Binance USD-M futures at 2x
+FUTURES_CAPITAL_TOPUP_PCT: float = 0.35       # top up from Binance Spot when futures reserve falls below 35%
+FUTURES_CAPITAL_EMERGENCY_PCT: float = 0.30   # block new spot exposure when futures reserve falls below 30%
+FUTURES_CAPITAL_OVERFLOW_PCT: float = 0.45    # sweep excess futures idle USDT back to Binance Spot above 45%
+FUTURES_CAPITAL_TRANSFER_MIN_USD: float = 10.0  # avoid dust internal transfers
 
 # Anomaly protection (configurable via settings page)
 ANOMALY_PROTECTION_ENABLED: bool = True

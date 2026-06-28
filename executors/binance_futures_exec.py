@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 _TESTNET_BASE_URL = "https://testnet.binancefuture.com"
 _LIVE_BASE_URL = "https://fapi.binance.com"
+_SPOT_LIVE_BASE_URL = "https://api.binance.com"
 
 
 class BinanceFuturesExecutor(ExecutionEngine):
@@ -84,6 +85,7 @@ class BinanceFuturesExecutor(ExecutionEngine):
         # Loaded lazily on first need from /fapi/v1/exchangeInfo.
         self._symbol_filters: dict[str, dict] = {}
         self._exchange_info_loaded: bool = False
+        self._sapi_base_url = _SPOT_LIVE_BASE_URL
 
     # ── Internal helpers ──────────────────────────────────────────────
 
@@ -133,6 +135,38 @@ class BinanceFuturesExecutor(ExecutionEngine):
         params["recvWindow"] = str(recv_window)
         signed = self._sign(params)
         url = f"{self._base_url}{path}?{signed}"
+
+        try:
+            async with session.request(method, url, headers=self._headers()) as resp:
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    data = {"raw": await resp.text()}
+                return (resp.status, data if isinstance(data, dict) else {"data": data})
+        except Exception as e:
+            return (0, {"error": f"request_exception: {e}"})
+
+    async def _sapi_signed_request(
+        self,
+        method: str,
+        path: str,
+        params: dict,
+        recv_window: int = 5000,
+    ) -> tuple[int, dict]:
+        """Make a signed Binance Spot/SAPI request using the live REST host."""
+        if self._mode != "live":
+            return (0, {"error": "sapi_universal_transfer_requires_live_mode"})
+        if not self._credentials_ok():
+            return (0, {"error": "credentials not configured"})
+        if not await self._rate_limiter.acquire():
+            return (0, {"error": "rate_limited"})
+
+        session = await self._ensure_session()
+        params = dict(params)
+        params["timestamp"] = str(int(time.time() * 1000))
+        params["recvWindow"] = str(recv_window)
+        signed = self._sign(params)
+        url = f"{self._sapi_base_url}{path}?{signed}"
 
         try:
             async with session.request(method, url, headers=self._headers()) as resp:
@@ -453,6 +487,64 @@ class BinanceFuturesExecutor(ExecutionEngine):
             if row.get("asset") == asset:
                 return float(row.get("availableBalance", 0.0))
         return 0.0
+
+    async def transfer_spot_to_futures(
+        self,
+        amount_usdt: float,
+        asset: str = "USDT",
+    ) -> dict:
+        """Move funds from Binance Spot wallet to USD-M Futures wallet.
+
+        Uses Binance Universal Transfer (`MAIN_UMFUTURE`). The live API key
+        needs the Universal Transfer permission. Testnet has no equivalent
+        SAPI universal-transfer environment, so this method returns a
+        structured failure outside live mode.
+        """
+        amount = float(amount_usdt)
+        if amount <= 0:
+            return {"success": False, "error": "amount_must_be_positive"}
+        status, data = await self._sapi_signed_request(
+            "POST",
+            "/sapi/v1/asset/transfer",
+            {
+                "type": "MAIN_UMFUTURE",
+                "asset": asset,
+                "amount": f"{amount:.8f}",
+            },
+        )
+        if status == 200 and ("tranId" in data or "data" in data):
+            return {"success": True, "direction": "spot_to_futures", **data}
+        logger.warning(
+            f"[BinanceFutures] spot→futures transfer failed: "
+            f"amount={amount:.2f} resp={data}"
+        )
+        return {"success": False, "direction": "spot_to_futures", "status": status, "error": data}
+
+    async def transfer_futures_to_spot(
+        self,
+        amount_usdt: float,
+        asset: str = "USDT",
+    ) -> dict:
+        """Move idle funds from USD-M Futures wallet back to Binance Spot."""
+        amount = float(amount_usdt)
+        if amount <= 0:
+            return {"success": False, "error": "amount_must_be_positive"}
+        status, data = await self._sapi_signed_request(
+            "POST",
+            "/sapi/v1/asset/transfer",
+            {
+                "type": "UMFUTURE_MAIN",
+                "asset": asset,
+                "amount": f"{amount:.8f}",
+            },
+        )
+        if status == 200 and ("tranId" in data or "data" in data):
+            return {"success": True, "direction": "futures_to_spot", **data}
+        logger.warning(
+            f"[BinanceFutures] futures→spot transfer failed: "
+            f"amount={amount:.2f} resp={data}"
+        )
+        return {"success": False, "direction": "futures_to_spot", "status": status, "error": data}
 
     # ── Cleanup ───────────────────────────────────────────────────────
 

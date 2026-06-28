@@ -111,7 +111,13 @@ class HedgeManager:
         evaluation_interval_seconds: float = 60.0,
         margin_buffer_pct: float = 0.20,
         adjust_threshold_pct: float = 0.01,       # only adjust if drift > 1% of current size
-        leverage: int = 1,                        # set on each symbol before first open
+        leverage: int = 2,                        # set on each symbol before first open
+        total_capital: float = 0.0,
+        futures_capital_target_pct: float = 0.40,
+        futures_capital_topup_pct: float = 0.35,
+        futures_capital_emergency_pct: float = 0.30,
+        futures_capital_overflow_pct: float = 0.45,
+        futures_capital_transfer_min_usd: float = 10.0,
     ) -> None:
         self._balance = balance
         self._funding_monitor = funding_monitor
@@ -123,7 +129,17 @@ class HedgeManager:
         self._evaluation_interval = float(evaluation_interval_seconds)
         self._margin_buffer_pct = float(margin_buffer_pct)
         self._adjust_threshold_pct = float(adjust_threshold_pct)
-        self._leverage = int(leverage)
+        self._leverage = max(1, int(leverage))
+        self._total_capital = max(0.0, float(total_capital))
+        self._futures_capital_target_pct = max(0.0, float(futures_capital_target_pct))
+        self._futures_capital_topup_pct = max(0.0, float(futures_capital_topup_pct))
+        self._futures_capital_emergency_pct = max(0.0, float(futures_capital_emergency_pct))
+        self._futures_capital_overflow_pct = max(0.0, float(futures_capital_overflow_pct))
+        self._futures_capital_transfer_min_usd = max(0.0, float(futures_capital_transfer_min_usd))
+        self._last_reserve_check_ts: float = 0.0
+        self._last_reserve_transfer_ts: float = 0.0
+        self._last_reserve_error: str = ""
+        self._reserve_status: dict = self._make_reserve_status("unknown")
 
         # Per-symbol shadow state
         self._shadows: dict[str, ShadowHedge] = {}
@@ -152,7 +168,10 @@ class HedgeManager:
             f"mode={self._execution_mode} dust=${self._dust_threshold_usd:.0f} "
             f"eval_interval={self._evaluation_interval:.0f}s "
             f"margin_buffer={self._margin_buffer_pct*100:.0f}% "
-            f"leverage={self._leverage}x"
+            f"leverage={self._leverage}x "
+            f"futures_reserve_target={self._futures_capital_target_pct*100:.0f}% "
+            f"topup={self._futures_capital_topup_pct*100:.0f}% "
+            f"emergency={self._futures_capital_emergency_pct*100:.0f}%"
         )
 
     # ── Public lifecycle hooks ────────────────────────────────────────
@@ -166,6 +185,74 @@ class HedgeManager:
 
     def _is_real_mode(self) -> bool:
         return self._execution_mode in ("testnet", "live") and self._executor is not None
+
+    def _reserve_amounts(self) -> dict[str, float]:
+        capital = float(self._total_capital or 0.0)
+        return {
+            "total_capital_usd": capital,
+            "target_usd": capital * self._futures_capital_target_pct,
+            "topup_usd": capital * self._futures_capital_topup_pct,
+            "emergency_usd": capital * self._futures_capital_emergency_pct,
+            "overflow_usd": capital * self._futures_capital_overflow_pct,
+        }
+
+    def _make_reserve_status(
+        self,
+        status: str,
+        *,
+        wallet_balance_usd: float = 0.0,
+        margin_balance_usd: float = 0.0,
+        available_usd: float = 0.0,
+        max_withdraw_usd: float = 0.0,
+        last_error: str = "",
+    ) -> dict:
+        amounts = self._reserve_amounts()
+        notional = self._current_target_notional_usd()
+        required_initial = notional / max(1, self._leverage)
+        required_buffered = required_initial * (1.0 + self._margin_buffer_pct)
+        can_open = status not in ("emergency", "unavailable", "unknown")
+        return {
+            "status": status,
+            "execution_mode": self._execution_mode,
+            "leverage": self._leverage,
+            "margin_buffer_pct": self._margin_buffer_pct,
+            "target_pct": self._futures_capital_target_pct,
+            "topup_pct": self._futures_capital_topup_pct,
+            "emergency_pct": self._futures_capital_emergency_pct,
+            "overflow_pct": self._futures_capital_overflow_pct,
+            "transfer_min_usd": self._futures_capital_transfer_min_usd,
+            "wallet_balance_usd": wallet_balance_usd,
+            "margin_balance_usd": margin_balance_usd,
+            "available_usd": available_usd,
+            "max_withdraw_usd": max_withdraw_usd,
+            "required_initial_margin_usd": required_initial,
+            "required_buffered_margin_usd": required_buffered,
+            "can_open_new_hedges": can_open,
+            "last_check_ts": self._last_reserve_check_ts,
+            "last_transfer_ts": self._last_reserve_transfer_ts,
+            "last_error": last_error or self._last_reserve_error,
+            **amounts,
+        }
+
+    def _classify_reserve(self, available_usd: float) -> str:
+        amounts = self._reserve_amounts()
+        if amounts["target_usd"] <= 0:
+            return "disabled"
+        if available_usd < amounts["emergency_usd"]:
+            return "emergency"
+        if available_usd < amounts["topup_usd"]:
+            return "topup_needed"
+        return "healthy"
+
+    def _current_target_notional_usd(self) -> float:
+        total = 0.0
+        if self._optimizer is None:
+            return 0.0
+        for sym in self._target_symbols():
+            price = self._lookup_price(sym)
+            if price > 0:
+                total += self.compute_target_hedge_usd(sym, price)
+        return total
 
     # ── Phase E: anomaly / emergency / demotion integration ────────────
 
@@ -349,6 +436,13 @@ class HedgeManager:
         evaluation_interval_seconds: float | None = None,
         margin_buffer_pct: float | None = None,
         adjust_threshold_pct: float | None = None,
+        leverage: int | None = None,
+        total_capital: float | None = None,
+        futures_capital_target_pct: float | None = None,
+        futures_capital_topup_pct: float | None = None,
+        futures_capital_emergency_pct: float | None = None,
+        futures_capital_overflow_pct: float | None = None,
+        futures_capital_transfer_min_usd: float | None = None,
     ) -> None:
         if enabled is not None:
             self._enabled = bool(enabled)
@@ -362,6 +456,21 @@ class HedgeManager:
             self._margin_buffer_pct = float(margin_buffer_pct)
         if adjust_threshold_pct is not None:
             self._adjust_threshold_pct = float(adjust_threshold_pct)
+        if leverage is not None:
+            self._leverage = max(1, int(leverage))
+        if total_capital is not None:
+            self._total_capital = max(0.0, float(total_capital))
+        if futures_capital_target_pct is not None:
+            self._futures_capital_target_pct = max(0.0, float(futures_capital_target_pct))
+        if futures_capital_topup_pct is not None:
+            self._futures_capital_topup_pct = max(0.0, float(futures_capital_topup_pct))
+        if futures_capital_emergency_pct is not None:
+            self._futures_capital_emergency_pct = max(0.0, float(futures_capital_emergency_pct))
+        if futures_capital_overflow_pct is not None:
+            self._futures_capital_overflow_pct = max(0.0, float(futures_capital_overflow_pct))
+        if futures_capital_transfer_min_usd is not None:
+            self._futures_capital_transfer_min_usd = max(0.0, float(futures_capital_transfer_min_usd))
+        self._reserve_status = self._make_reserve_status(self._reserve_status.get("status", "unknown"))
 
     def mark_inventory_changed(self, reason: str = "") -> None:
         """Wake the next evaluate() call after spot inventory changes.
@@ -378,12 +487,22 @@ class HedgeManager:
     # ── Sizing primitives ─────────────────────────────────────────────
 
     def compute_target_hedge_qty(self, spot_symbol: str) -> float:
-        """Total spot quantity held across all exchanges for a symbol."""
+        """Total spot quantity held across all exchanges for a symbol.
+
+        Includes crypto in transit: it has left the source wallet but still
+        belongs to the portfolio, so price movement remains spot exposure
+        until delivery.
+        """
         total = 0.0
         for ex in self._balance._exchanges:
             qty = self._balance.crypto.get(ex, {}).get(spot_symbol, 0.0)
             if qty > 0:
                 total += qty
+        for fund in getattr(self._balance, "_in_transit", []):
+            if getattr(fund, "asset", None) == spot_symbol:
+                qty = float(getattr(fund, "amount", 0.0) or 0.0)
+                if qty > 0:
+                    total += qty
         return total
 
     def compute_target_hedge_usd(self, spot_symbol: str, price: float) -> float:
@@ -396,6 +515,11 @@ class HedgeManager:
             for sym, qty in self._balance.crypto.get(ex, {}).items():
                 if qty > 0:
                     held.add(sym)
+        for fund in getattr(self._balance, "_in_transit", []):
+            asset = getattr(fund, "asset", None)
+            qty = float(getattr(fund, "amount", 0.0) or 0.0)
+            if asset and asset != "USDT" and qty > 0:
+                held.add(asset)
         return held
 
     def _target_symbols(self) -> list[str]:
@@ -696,15 +820,170 @@ class HedgeManager:
             return False
         return True
 
+    async def refresh_reserve_status(self, allow_transfer: bool = True) -> dict:
+        """Refresh Binance Futures reserve health and optionally rebalance it.
+
+        Reserve health is based on futures margin balance (wallet + unrealized
+        PnL), not free available balance. Initial-margin capacity is checked
+        separately before each grow/open order.
+        """
+        now = time.time()
+        self._last_reserve_check_ts = now
+
+        if self._futures_capital_target_pct <= 0 or self._total_capital <= 0:
+            wallet = margin = available = max_withdraw = 0.0
+            if self._is_real_mode() and self._executor is not None:
+                info = await self._executor.get_account_info()
+                if info:
+                    wallet = float(info.get("total_wallet_balance", 0.0) or 0.0)
+                    margin = float(info.get("total_margin_balance", 0.0) or wallet)
+                    available = float(info.get("available_balance", 0.0) or 0.0)
+                    max_withdraw = float(info.get("max_withdraw_amount", 0.0) or 0.0)
+            else:
+                available = float(getattr(self._balance, "binance_futures_usdt", 0.0) or 0.0)
+                wallet = margin = max_withdraw = available
+            self._reserve_status = self._make_reserve_status(
+                "disabled",
+                wallet_balance_usd=wallet,
+                margin_balance_usd=margin,
+                available_usd=available,
+                max_withdraw_usd=max_withdraw,
+            )
+            return self._reserve_status
+
+        if not self._is_real_mode():
+            reserve = float(getattr(self._balance, "binance_futures_usdt", 0.0) or 0.0)
+            status = self._classify_reserve(reserve)
+            self._reserve_status = self._make_reserve_status(
+                status,
+                wallet_balance_usd=reserve,
+                margin_balance_usd=reserve,
+                available_usd=reserve,
+                max_withdraw_usd=reserve,
+            )
+            return self._reserve_status
+
+        if self._executor is None:
+            self._reserve_status = self._make_reserve_status(
+                "unavailable",
+                last_error="futures_executor_missing",
+            )
+            return self._reserve_status
+
+        info = await self._executor.get_account_info()
+        if not info:
+            self._last_reserve_error = "futures_account_info_unavailable"
+            self._reserve_status = self._make_reserve_status(
+                "unavailable",
+                last_error=self._last_reserve_error,
+            )
+            return self._reserve_status
+
+        wallet = float(info.get("total_wallet_balance", 0.0) or 0.0)
+        margin = float(info.get("total_margin_balance", 0.0) or wallet)
+        available = float(info.get("available_balance", 0.0) or 0.0)
+        max_withdraw = float(info.get("max_withdraw_amount", 0.0) or 0.0)
+        equity = margin if margin > 0 else wallet
+        status = self._classify_reserve(equity)
+
+        amounts = self._reserve_amounts()
+        transfer_min = self._futures_capital_transfer_min_usd
+        transfer_gap_ok = (now - self._last_reserve_transfer_ts) >= 30.0
+        self._last_reserve_error = ""
+
+        if (
+            allow_transfer
+            and self._execution_mode == "live"
+            and status in ("emergency", "topup_needed")
+            and transfer_gap_ok
+        ):
+            amount = max(0.0, amounts["target_usd"] - equity)
+            if amount >= transfer_min:
+                result = await self._executor.transfer_spot_to_futures(amount)
+                if result.get("success"):
+                    self._last_reserve_transfer_ts = now
+                    logger.info(
+                        f"[Hedge] FUTURES_RESERVE_TOPUP amount=${amount:.2f} "
+                        f"target=${amounts['target_usd']:.2f} equity=${equity:.2f}"
+                    )
+                    info = await self._executor.get_account_info()
+                    if info:
+                        wallet = float(info.get("total_wallet_balance", 0.0) or 0.0)
+                        margin = float(info.get("total_margin_balance", 0.0) or wallet)
+                        available = float(info.get("available_balance", 0.0) or 0.0)
+                        max_withdraw = float(info.get("max_withdraw_amount", 0.0) or 0.0)
+                        equity = margin if margin > 0 else wallet
+                        status = self._classify_reserve(equity)
+                else:
+                    self._last_reserve_error = str(result.get("error") or result)
+                    logger.warning(
+                        f"[Hedge] FUTURES_RESERVE_TOPUP_FAILED amount=${amount:.2f}: "
+                        f"{self._last_reserve_error}"
+                    )
+
+        if (
+            allow_transfer
+            and self._execution_mode == "live"
+            and equity > amounts["overflow_usd"]
+            and transfer_gap_ok
+        ):
+            amount = min(max(0.0, equity - amounts["target_usd"]), max_withdraw)
+            if amount >= transfer_min:
+                result = await self._executor.transfer_futures_to_spot(amount)
+                if result.get("success"):
+                    self._last_reserve_transfer_ts = now
+                    logger.info(
+                        f"[Hedge] FUTURES_RESERVE_OVERFLOW amount=${amount:.2f} "
+                        f"target=${amounts['target_usd']:.2f} equity=${equity:.2f}"
+                    )
+                    info = await self._executor.get_account_info()
+                    if info:
+                        wallet = float(info.get("total_wallet_balance", 0.0) or 0.0)
+                        margin = float(info.get("total_margin_balance", 0.0) or wallet)
+                        available = float(info.get("available_balance", 0.0) or 0.0)
+                        max_withdraw = float(info.get("max_withdraw_amount", 0.0) or 0.0)
+                        equity = margin if margin > 0 else wallet
+                        status = self._classify_reserve(equity)
+                else:
+                    self._last_reserve_error = str(result.get("error") or result)
+                    logger.warning(
+                        f"[Hedge] FUTURES_RESERVE_OVERFLOW_FAILED amount=${amount:.2f}: "
+                        f"{self._last_reserve_error}"
+                    )
+
+        self._reserve_status = self._make_reserve_status(
+            status,
+            wallet_balance_usd=wallet,
+            margin_balance_usd=margin,
+            available_usd=available,
+            max_withdraw_usd=max_withdraw,
+            last_error=self._last_reserve_error,
+        )
+        return self._reserve_status
+
+    def can_open_spot_position(self) -> tuple[bool, str]:
+        """Whether monitor may add spot exposure without leaving it unhedgeable."""
+        if not self._enabled or self._futures_capital_target_pct <= 0:
+            return (True, "ok")
+        status = str(self._reserve_status.get("status", "unknown"))
+        if self._execution_mode in ("testnet", "live") and status in (
+            "unknown",
+            "unavailable",
+            "emergency",
+        ):
+            return (False, f"futures_reserve_{status}")
+        return (True, "ok")
+
     async def _has_margin_for(self, notional_usd: float) -> bool:
         """Check that available futures margin meets the buffered requirement."""
         if self._executor is None:
             return False
-        info = await self._executor.get_account_info()
-        if not info:
+        status = await self.refresh_reserve_status(allow_transfer=True)
+        reserve_status = str(status.get("status", "unknown"))
+        if reserve_status in ("emergency", "unavailable", "unknown"):
             return False
-        available = float(info.get("available_balance", 0.0))
-        required = notional_usd * (1.0 + self._margin_buffer_pct)
+        available = float(status.get("available_usd", 0.0) or 0.0)
+        required = (notional_usd / max(1, self._leverage)) * (1.0 + self._margin_buffer_pct)
         return available >= required
 
     def _accumulate_funding(self, spot_symbol: str, now: float) -> None:
@@ -759,6 +1038,8 @@ class HedgeManager:
         # Lazy reconciliation on first eval after startup, in real mode only
         if self._is_real_mode() and not self._reconciled:
             await self.reconcile_with_executor()
+
+        await self.refresh_reserve_status(allow_transfer=True)
 
         target_symbols = self._target_symbols()
         if not target_symbols:
@@ -835,6 +1116,9 @@ class HedgeManager:
                 f"[Hedge] Eval cycle: {n_open} hedges open ({self._execution_mode}), "
                 f"total_notional=${total_notional:.2f}, "
                 f"cumulative_funding=${self._cumulative_funding_usd:+.4f}, "
+                f"reserve={self._reserve_status.get('status', 'unknown')} "
+                f"equity=${self._reserve_status.get('margin_balance_usd', 0.0):.2f}/"
+                f"${self._reserve_status.get('target_usd', 0.0):.2f}, "
                 f"opens={self._total_opens} adjusts={self._total_adjusts} "
                 f"closes={self._total_closes} errors={self._total_executor_errors}"
             )
@@ -1157,8 +1441,10 @@ class HedgeManager:
             "safety_paused": self._safety_paused,
             "dust_threshold_usd": self._dust_threshold_usd,
             "evaluation_interval_seconds": self._evaluation_interval,
+            "leverage": self._leverage,
             "margin_buffer_pct": self._margin_buffer_pct,
             "adjust_threshold_pct": self._adjust_threshold_pct,
+            "futures_reserve": dict(self._reserve_status),
             "open_count": len(open_hedges),
             "open_hedges": open_hedges,
             "unhedged_targets": unhedged_targets,
