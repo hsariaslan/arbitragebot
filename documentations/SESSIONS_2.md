@@ -1200,3 +1200,23 @@ New settings:
 - `regime_weak_refill_max_fee_usd` default `$0.10`
 
 This lets profitable routes recover from inventory starvation during weak hours without reopening the expensive transfer churn that the original strict gate was trying to prevent.
+
+#### Follow-Up Fix: Reserve-Aware Portfolio Basis
+
+The `logs/bot-logs-2026-06-28-17-24-24.log` run exposed a v0.33.0 regression in the new futures-reserve model:
+
+- `$5k` configs logged `Auto trade amount: $200.0 (4.0% of $5000.0)` even though 40% of capital was reserved for Binance Futures. Correct spot sizing is `4% of $3000 = $120`.
+- Optimizer discovery logged `Symmetric 50/50 allocation, $5000 total`, then `BalanceTracker` added the `$2000` Binance Futures reserve, initializing `$7000 total`.
+- Periodic snapshots showed the actual spot/hedged wallet value around `$5000`, while accounting stayed around `$7000`, producing `drift=$-2000`.
+
+Implemented fix:
+
+- Optimizer post-discovery allocation now subtracts `binance_futures_usdt` first and allocates only spot capital.
+- Dashboard hot-apply, hourly rescale, per-config rescale, and settings logs now use reserve-aware spot capital for percentage trade sizing.
+- Dashboard portfolio accounting clamps stale over-inflated `_initial_investment` basis created by the bad v0.33.0 run, while keeping normal `initial + realized P&L` behavior intact.
+
+Validation:
+
+- `python3 -m py_compile optimizer.py dashboard_server.py orchestrator.py balance.py`
+- `./.venv/bin/python -m py_compile optimizer.py dashboard_server.py orchestrator.py balance.py`
+- `git diff --check`

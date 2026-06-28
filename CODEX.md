@@ -10,6 +10,13 @@ Do not add current-version or release-history notes to `CLAUDE.md`. Keep runtime
 
 ## Version History
 
+### v0.33.1-beta — Reserve-Aware Portfolio Accounting
+
+- Fixed post-discovery optimizer allocation so Binance Futures reserve is not double-counted as spot capital.
+- Percentage trade sizing now uses spot-usable capital after subtracting the futures reserve.
+- Dashboard portfolio accounting clamps stale over-inflated initial balance state created by the v0.33.0 reserve migration.
+- Settings and trade-size logs now report spot capital, futures reserve, and total capital explicitly.
+
 ### v0.33.0-beta — Hedge Capital Allocation & Weak-Regime Refills
 
 - Added Binance USD-M Futures capital allocation with 2x isolated leverage, 40% futures reserve target, 35% top-up threshold, 30% emergency threshold, and 45% overflow threshold.
