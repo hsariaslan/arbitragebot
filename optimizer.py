@@ -26,6 +26,10 @@ from config import (
     AUTO_EXPAND_ON_UNDERSTAFF,
     BITFINEX_OVER_TARGET_ENABLED,
     BITFINEX_OVER_TARGET_MULTIPLIER,
+    DEFICIT_RECOVERY_EXPAND_ENABLED,
+    DEFICIT_RECOVERY_MAX_SETUP_COST_USD,
+    DEFICIT_RECOVERY_MIN_SETUP_COST_USD,
+    DEFICIT_RECOVERY_SETUP_COST_PCT_OF_TRADE,
     INVENTORY_DRIFT_THRESHOLD,
     INVENTORY_REBALANCE_ENABLED,
     INVENTORY_REBALANCE_INTERVAL_HOURS,
@@ -467,6 +471,10 @@ class SymbolOptimizer:
         # Auto-expand on understaff (Feature 6)
         self._auto_expand_on_understaff: bool = AUTO_EXPAND_ON_UNDERSTAFF
         self._last_auto_expand_attempt: float = 0.0
+        self._deficit_recovery_expand_enabled: bool = DEFICIT_RECOVERY_EXPAND_ENABLED
+        self._deficit_recovery_setup_cost_pct: float = DEFICIT_RECOVERY_SETUP_COST_PCT_OF_TRADE
+        self._deficit_recovery_min_setup_cost: float = DEFICIT_RECOVERY_MIN_SETUP_COST_USD
+        self._deficit_recovery_max_setup_cost: float = DEFICIT_RECOVERY_MAX_SETUP_COST_USD
 
         # Time-based regime gating (mirrors monitor settings). When weak
         # hours are active, demotion + auto-expand are suppressed to
@@ -2957,6 +2965,36 @@ class SymbolOptimizer:
 
         return total_cost
 
+    def _estimate_expansion_immediate_fee(self, symbol: str, score: SymbolScore) -> float:
+        """Estimate only the immediate internal-buy fee that _expand_active pays."""
+        if not self._balance:
+            return 0.0
+
+        if score.score >= self._very_strong_threshold:
+            max_dir = 3
+        elif score.score >= self._strong_threshold:
+            max_dir = 2
+        else:
+            max_dir = 2
+        pairs = self._compute_dominant_pairs(symbol, max_per_direction=max_dir)
+
+        exchange_weights: dict[str, float] = {}
+        for ex, w in pairs["buyers"]:
+            exchange_weights[ex] = exchange_weights.get(ex, 0.0) + w
+        for ex, w in pairs["sellers"]:
+            exchange_weights[ex] = exchange_weights.get(ex, 0.0) + w
+
+        total_w = sum(exchange_weights.values())
+        total_alloc = self._trade_amount * len(self._balance._exchanges)
+        total_fee = 0.0
+        for ex, w in exchange_weights.items():
+            alloc = total_alloc * (w / total_w) * 0.5 if total_w > 0 else self._trade_amount * 0.5
+            if ex not in self._balance.usdt or self._balance.usdt[ex] < alloc:
+                continue
+            fee_rate = self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001
+            total_fee += alloc * fee_rate
+        return total_fee
+
     def _expand_active(self, symbol: str, score: SymbolScore) -> None:
         """Add a new confirmed symbol to the active set."""
         from balance import Transfer
@@ -3039,6 +3077,197 @@ class SymbolOptimizer:
             f"fees: ${total_fee:.4f}, active: {self._active_symbols}"
         )
 
+    def _average_active_fee_rate(self) -> float:
+        """Average taker fee across active exchanges for cost estimates."""
+        return (
+            sum(
+                (self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001)
+                for ex in self._active_exchanges
+            )
+            / max(len(self._active_exchanges), 1)
+        )
+
+    def _deficit_recovery_setup_cost_cap(self) -> float:
+        """Bound fee spend for one recovery expansion while net-negative."""
+        pct_cap = self._trade_amount * self._deficit_recovery_setup_cost_pct
+        return min(
+            self._deficit_recovery_max_setup_cost,
+            max(self._deficit_recovery_min_setup_cost, pct_cap),
+        )
+
+    def _evaluate_expansion(self, *, deficit_recovery: bool = False) -> bool:
+        """Add high-scoring symbols.
+
+        Normal expansion may fill up to max_active_symbols. Deficit recovery is
+        narrower: when a config is below min_active_symbols but net-negative,
+        allow at most one low-cost activation so the config can earn its way
+        out instead of staying stuck with one inactive symbol.
+        """
+        if not self._deficit_recovery_expand_enabled and deficit_recovery:
+            return False
+        if not self._balance:
+            return False
+
+        target_limit = self._max_active_symbols
+        if deficit_recovery:
+            if len(self._active_symbols) >= self._min_active_symbols:
+                return False
+            target_limit = min(self._min_active_symbols, self._max_active_symbols)
+
+        if len(self._active_symbols) >= target_limit:
+            return False
+
+        active_set = set(self._active_symbols)
+        cooldown_set_now = set(self._recently_demoted.keys())
+        avg_fee_rate = self._average_active_fee_rate()
+        expansion_cost = self._trade_amount * 2 * avg_fee_rate * 1.5
+
+        expansion_candidates = sorted(
+            [
+                s for s in self._scores.values()
+                if s.symbol not in active_set
+                and s.symbol not in cooldown_set_now
+                and s.score >= self._get_activation_threshold(s.symbol)
+                and s.total_ticks >= 30
+                and s.est_hourly_profit > expansion_cost * self._safety_multiplier
+            ],
+            key=lambda s: s.score * (1.0 if self._is_symbol_on_bitfinex(s.symbol) else 0.7),
+            reverse=True,
+        )
+
+        now = time.time()
+        recovery_cost_cap = (
+            self._deficit_recovery_setup_cost_cap() if deficit_recovery else None
+        )
+        log_prefix = "RECOVERY_EXPAND" if deficit_recovery else "EXPAND"
+        activated = False
+
+        for candidate in expansion_candidates:
+            if len(self._active_symbols) >= target_limit:
+                break
+
+            # Stability gate for expansion
+            wl_entry = self._watchlist.get(candidate.symbol)
+            if wl_entry is None:
+                # First seen — create watchlist entry to start tracking
+                self._watchlist[candidate.symbol] = WatchlistEntry(
+                    symbol=candidate.symbol,
+                    entered_at=now,
+                    confirmation_start=now,
+                    score_samples=[candidate.score],
+                    peak_score=candidate.score,
+                )
+                logger.info(
+                    f"[Candidate] {log_prefix}_TRACK {candidate.symbol}: "
+                    f"score={candidate.score:.6f} "
+                    f"avg_net={candidate.avg_profitable_net:.4f}% "
+                    f"freq={candidate.frequency:.1%} "
+                    f"ticks={candidate.profitable_ticks}/{candidate.total_ticks} "
+                    f"est_hourly=${candidate.est_hourly_profit:.4f} — "
+                    f"first seen, observing stability"
+                )
+                continue
+
+            wl_entry.add_sample(candidate.score)
+            if len(wl_entry.score_samples) >= 10:
+                wl_entry.peak_score = max(wl_entry.peak_score, candidate.score)
+            stable, reason = self._is_score_stable(wl_entry, candidate.score)
+            if not stable:
+                logger.info(
+                    f"[Candidate] {log_prefix}_WAIT {candidate.symbol}: "
+                    f"score={candidate.score:.6f} peak={wl_entry.peak_score:.6f} "
+                    f"avg_net={candidate.avg_profitable_net:.4f}% "
+                    f"freq={candidate.frequency:.1%} — "
+                    f"unstable: {reason}"
+                )
+                continue
+
+            # Expansion cost gate: estimate setup cost vs expected profit.
+            # Setup cost requires a stricter horizon than reallocation —
+            # `activation_profit_horizon_multiplier` raises the bar for NEW
+            # activations (which pay full setup). Reallocations between
+            # already-active exchanges keep using the base horizon since the
+            # inventory is already in place.
+            est_cost = self._estimate_expansion_cost(candidate.symbol, candidate)
+            immediate_fee = (
+                self._estimate_expansion_immediate_fee(candidate.symbol, candidate)
+                if deficit_recovery
+                else 0.0
+            )
+            if (
+                deficit_recovery
+                and recovery_cost_cap is not None
+                and immediate_fee > recovery_cost_cap
+            ):
+                logger.info(
+                    f"[Candidate] {log_prefix}_BLOCKED {candidate.symbol}: "
+                    f"immediate_fee=${immediate_fee:.4f} > "
+                    f"recovery_cap=${recovery_cost_cap:.4f} "
+                    f"(full_setup_cost=${est_cost:.4f}, "
+                    f"trade_amount=${self._trade_amount:.2f}, "
+                    f"cap_pct={self._deficit_recovery_setup_cost_pct:.3%})"
+                )
+                continue
+
+            effective_horizon = (
+                self._reallocation_cost_horizon * self._activation_profit_horizon_multiplier
+            )
+            est_benefit = candidate.est_hourly_profit * effective_horizon
+            if est_cost > 0 and est_benefit > 0 and est_cost > est_benefit:
+                logger.info(
+                    f"[Candidate] {log_prefix}_BLOCKED {candidate.symbol}: "
+                    f"setup_cost=${est_cost:.4f} > "
+                    f"est_benefit=${est_benefit:.4f} "
+                    f"(hourly=${candidate.est_hourly_profit:.4f} × "
+                    f"{effective_horizon:.1f}h, "
+                    f"base={self._reallocation_cost_horizon}h × "
+                    f"activation_mult={self._activation_profit_horizon_multiplier:.1f})"
+                )
+                continue
+
+            # Pair fee viability: block if dominant pair's combined fees exceed avg net%.
+            if self._fee_manager:
+                cand_pairs = self._compute_dominant_pairs(candidate.symbol, max_per_direction=2)
+                buyers = cand_pairs.get("buyers", [])
+                sellers = cand_pairs.get("sellers", [])
+                if buyers and sellers:
+                    buy_fee = self._fee_manager.get_taker_fee(buyers[0][0])
+                    sell_fee = self._fee_manager.get_taker_fee(sellers[0][0])
+                    combined_fee_pct = (buy_fee + sell_fee) * 100
+                    avg_net = candidate.avg_profitable_net
+                    if combined_fee_pct > avg_net * 0.8 and avg_net > 0:
+                        logger.info(
+                            f"[Candidate] {log_prefix}_BLOCKED {candidate.symbol}: "
+                            f"pair_fee={combined_fee_pct:.3f}% > "
+                            f"avg_net={avg_net:.3f}%×0.8={avg_net*0.8:.3f}% "
+                            f"({buyers[0][0]}→{sellers[0][0]}) — pair_fee_exceeds_net"
+                        )
+                        continue
+
+            immediate_fee_msg = (
+                f"immediate_fee=${immediate_fee:.4f} " if deficit_recovery else ""
+            )
+            logger.info(
+                f"[Candidate] {log_prefix}_READY {candidate.symbol}: "
+                f"score={candidate.score:.6f} peak={wl_entry.peak_score:.6f} "
+                f"avg_net={candidate.avg_profitable_net:.4f}% "
+                f"freq={candidate.frequency:.1%} "
+                f"ticks={candidate.profitable_ticks}/{candidate.total_ticks} "
+                f"est_hourly=${candidate.est_hourly_profit:.4f} "
+                f"setup_cost=${est_cost:.2f} "
+                f"{immediate_fee_msg}"
+                f"bfx={'yes' if self._is_symbol_on_bitfinex(candidate.symbol) else 'no'} "
+                f"— activating"
+            )
+            self._expand_active(candidate.symbol, candidate)
+            self._watchlist.pop(candidate.symbol, None)
+            activated = True
+
+            if deficit_recovery:
+                break
+
+        return activated
+
     # ── Rotation ─────────────────────────────────────────────────────────
 
     def _evaluate_rotation(self) -> None:
@@ -3048,7 +3277,8 @@ class SymbolOptimizer:
 
         now = time.time()
 
-        # Net profit gate: block rotations/expansions when in deficit
+        # Net profit gate: block rotations and unrestricted expansion when in deficit.
+        # A bounded recovery expansion can still run below min_active_symbols.
         if not self._rotation_budget_ok:
             logger.info(
                 "[Optimizer] Rotation suppressed: net profit is negative "
@@ -3057,6 +3287,7 @@ class SymbolOptimizer:
             # Still run demotions to remove truly dead symbols
             self._update_watchlist()
             self._evaluate_demotions()
+            self._evaluate_expansion(deficit_recovery=True)
             # Consolidate to Bitfinex hub even when in deficit (not gated by PnL)
             # Skip if no active symbol is tradeable on Bitfinex (avoids circular waste)
             if (
@@ -3170,214 +3401,98 @@ class SymbolOptimizer:
             for s in self._active_symbols
             if s in self._scores
         ]
-        if not active_scores:
-            return
+        if active_scores:
+            # Sort active symbols worst-first
+            active_scores.sort(key=lambda s: s.score)
 
-        # Sort active symbols worst-first
-        active_scores.sort(key=lambda s: s.score)
+            # Switching cost: uses actual exchange counts per symbol (concentrated)
+            avg_fee_rate = self._average_active_fee_rate()
 
-        # Switching cost: uses actual exchange counts per symbol (concentrated)
-        avg_fee_rate = (
-            sum(
-                (self._fee_manager.get_taker_fee(ex) if self._fee_manager else 0.001)
-                for ex in self._active_exchanges
+            # Symbols on demotion cooldown cannot be candidates
+            cooldown_set = set(self._recently_demoted.keys())
+
+            # Get confirmed watchlist candidates sorted best-first
+            active_set = set(self._active_symbols)
+            confirmed_candidates = sorted(
+                [
+                    self._scores[e.symbol]
+                    for e in self._watchlist.values()
+                    if e.confirmed and e.symbol not in active_set
+                    and e.symbol not in cooldown_set and e.symbol in self._scores
+                ],
+                key=lambda s: s.score,
+                reverse=True,
             )
-            / max(len(self._active_exchanges), 1)
-        )
 
-        # Symbols on demotion cooldown cannot be candidates
-        cooldown_set = set(self._recently_demoted.keys())
+            # No fallback: only confirmed watchlist candidates are eligible for rotation.
+            # This prevents premature rotations with unconfirmed symbols.
 
-        # Get confirmed watchlist candidates sorted best-first
-        active_set = set(self._active_symbols)
-        confirmed_candidates = sorted(
-            [
-                self._scores[e.symbol]
-                for e in self._watchlist.values()
-                if e.confirmed and e.symbol not in active_set
-                and e.symbol not in cooldown_set and e.symbol in self._scores
-            ],
-            key=lambda s: s.score,
-            reverse=True,
-        )
+            # Rotation: replace worst active with best confirmed candidate
+            # Only strong/very_strong candidates can be activated
+            for worst in active_scores:
+                if not confirmed_candidates:
+                    break
 
-        # No fallback: only confirmed watchlist candidates are eligible for rotation.
-        # This prevents premature rotations with unconfirmed symbols.
+                best_candidate = confirmed_candidates[0]
+                # Gate: candidate must meet activation threshold (elevated for frequently-demoted)
+                if best_candidate.score < self._get_activation_threshold(best_candidate.symbol):
+                    break
+                # Require candidate score to be at least 3x the worst active score
+                if best_candidate.score <= worst.score * 3:
+                    break
 
-        # Rotation: replace worst active with best confirmed candidate
-        # Only strong/very_strong candidates can be activated
-        for worst in active_scores:
-            if not confirmed_candidates:
-                break
+                # Per-pair switching cost using actual exchange counts
+                old_ex_count = len(self._get_symbol_exchanges(worst.symbol))
+                new_ex_count = len(self._get_symbol_exchanges(best_candidate.symbol))
+                switching_cost = self._trade_amount * (old_ex_count + new_ex_count) * avg_fee_rate * 1.5
 
-            best_candidate = confirmed_candidates[0]
-            # Gate: candidate must meet activation threshold (elevated for frequently-demoted)
-            if best_candidate.score < self._get_activation_threshold(best_candidate.symbol):
-                break
-            # Require candidate score to be at least 3x the worst active score
-            if best_candidate.score <= worst.score * 3:
-                break
-
-            # Per-pair switching cost using actual exchange counts
-            old_ex_count = len(self._get_symbol_exchanges(worst.symbol))
-            new_ex_count = len(self._get_symbol_exchanges(best_candidate.symbol))
-            switching_cost = self._trade_amount * (old_ex_count + new_ex_count) * avg_fee_rate * 1.5
-
-            hourly_improvement = (
-                best_candidate.est_hourly_profit - worst.est_hourly_profit
-            )
-            threshold = switching_cost * self._safety_multiplier
-
-            if hourly_improvement > threshold:
-                # Pair fee viability: block if dominant pair's combined fees exceed avg net%
-                # Same gate as expansion — prevents rotating into symbols that lose on every trade
-                pair_fee_blocked = False
-                if self._fee_manager:
-                    cand_pairs = self._compute_dominant_pairs(best_candidate.symbol, max_per_direction=2)
-                    buyers = cand_pairs.get("buyers", [])
-                    sellers = cand_pairs.get("sellers", [])
-                    if buyers and sellers:
-                        buy_fee = self._fee_manager.get_taker_fee(buyers[0][0])
-                        sell_fee = self._fee_manager.get_taker_fee(sellers[0][0])
-                        combined_fee_pct = (buy_fee + sell_fee) * 100
-                        avg_net = best_candidate.avg_profitable_net
-                        if combined_fee_pct > avg_net * 0.8 and avg_net > 0:
-                            logger.info(
-                                f"[Candidate] ROTATE_BLOCKED {best_candidate.symbol}: "
-                                f"pair_fee={combined_fee_pct:.3f}% > "
-                                f"avg_net={avg_net:.3f}%x0.8={avg_net*0.8:.3f}% "
-                                f"({buyers[0][0]}->{sellers[0][0]}) — pair_fee_exceeds_net"
-                            )
-                            pair_fee_blocked = True
-                if pair_fee_blocked:
-                    confirmed_candidates.pop(0)
-                    continue
-
-                self._execute_rotation(
-                    old_symbol=worst.symbol,
-                    new_symbol=best_candidate.symbol,
-                    old_score=worst,
-                    new_score=best_candidate,
-                    switching_cost=switching_cost,
-                    hourly_improvement=hourly_improvement,
+                hourly_improvement = (
+                    best_candidate.est_hourly_profit - worst.est_hourly_profit
                 )
-                # Remove from watchlist after activation
-                self._watchlist.pop(best_candidate.symbol, None)
-                confirmed_candidates.pop(0)
-            else:
-                break
+                threshold = switching_cost * self._safety_multiplier
+
+                if hourly_improvement > threshold:
+                    # Pair fee viability: block if dominant pair's combined fees exceed avg net%
+                    # Same gate as expansion — prevents rotating into symbols that lose on every trade
+                    pair_fee_blocked = False
+                    if self._fee_manager:
+                        cand_pairs = self._compute_dominant_pairs(best_candidate.symbol, max_per_direction=2)
+                        buyers = cand_pairs.get("buyers", [])
+                        sellers = cand_pairs.get("sellers", [])
+                        if buyers and sellers:
+                            buy_fee = self._fee_manager.get_taker_fee(buyers[0][0])
+                            sell_fee = self._fee_manager.get_taker_fee(sellers[0][0])
+                            combined_fee_pct = (buy_fee + sell_fee) * 100
+                            avg_net = best_candidate.avg_profitable_net
+                            if combined_fee_pct > avg_net * 0.8 and avg_net > 0:
+                                logger.info(
+                                    f"[Candidate] ROTATE_BLOCKED {best_candidate.symbol}: "
+                                    f"pair_fee={combined_fee_pct:.3f}% > "
+                                    f"avg_net={avg_net:.3f}%x0.8={avg_net*0.8:.3f}% "
+                                    f"({buyers[0][0]}->{sellers[0][0]}) — pair_fee_exceeds_net"
+                                )
+                                pair_fee_blocked = True
+                    if pair_fee_blocked:
+                        confirmed_candidates.pop(0)
+                        continue
+
+                    self._execute_rotation(
+                        old_symbol=worst.symbol,
+                        new_symbol=best_candidate.symbol,
+                        old_score=worst,
+                        new_score=best_candidate,
+                        switching_cost=switching_cost,
+                        hourly_improvement=hourly_improvement,
+                    )
+                    # Remove from watchlist after activation
+                    self._watchlist.pop(best_candidate.symbol, None)
+                    confirmed_candidates.pop(0)
+                else:
+                    break
 
         # Phase 4: Expansion — add high-scoring symbols if under max
         # Don't require watchlist confirmation for expansion (low risk, just adding)
-        if len(self._active_symbols) < self._max_active_symbols:
-            active_set = set(self._active_symbols)
-            cooldown_set_now = set(self._recently_demoted.keys())
-            expansion_cost = self._trade_amount * 2 * avg_fee_rate * 1.5
-
-            # Consider ALL scored symbols (not just confirmed watchlist)
-            expansion_candidates = sorted(
-                [
-                    s for s in self._scores.values()
-                    if s.symbol not in active_set
-                    and s.symbol not in cooldown_set_now
-                    and s.score >= self._get_activation_threshold(s.symbol)
-                    and s.total_ticks >= 30  # minimum data points
-                    and s.est_hourly_profit > expansion_cost * self._safety_multiplier
-                ],
-                key=lambda s: s.score * (1.0 if self._is_symbol_on_bitfinex(s.symbol) else 0.7),
-                reverse=True,
-            )
-            now = time.time()
-            for candidate in expansion_candidates:
-                if len(self._active_symbols) >= self._max_active_symbols:
-                    break
-                # Stability gate for expansion
-                wl_entry = self._watchlist.get(candidate.symbol)
-                if wl_entry is None:
-                    # First seen — create watchlist entry to start tracking
-                    self._watchlist[candidate.symbol] = WatchlistEntry(
-                        symbol=candidate.symbol,
-                        entered_at=now,
-                        confirmation_start=now,
-                        score_samples=[candidate.score],
-                        peak_score=candidate.score,
-                    )
-                    logger.info(
-                        f"[Candidate] EXPAND_TRACK {candidate.symbol}: "
-                        f"score={candidate.score:.6f} "
-                        f"avg_net={candidate.avg_profitable_net:.4f}% "
-                        f"freq={candidate.frequency:.1%} "
-                        f"ticks={candidate.profitable_ticks}/{candidate.total_ticks} "
-                        f"est_hourly=${candidate.est_hourly_profit:.4f} — "
-                        f"first seen, observing stability"
-                    )
-                    continue
-                wl_entry.add_sample(candidate.score)
-                if len(wl_entry.score_samples) >= 10:
-                    wl_entry.peak_score = max(wl_entry.peak_score, candidate.score)
-                stable, reason = self._is_score_stable(wl_entry, candidate.score)
-                if not stable:
-                    logger.info(
-                        f"[Candidate] EXPAND_WAIT {candidate.symbol}: "
-                        f"score={candidate.score:.6f} peak={wl_entry.peak_score:.6f} "
-                        f"avg_net={candidate.avg_profitable_net:.4f}% "
-                        f"freq={candidate.frequency:.1%} — "
-                        f"unstable: {reason}"
-                    )
-                    continue
-                # Expansion cost gate: estimate setup cost vs expected profit.
-                # Setup cost requires a stricter horizon than reallocation —
-                # `activation_profit_horizon_multiplier` raises the bar for
-                # NEW activations (which pay full setup). Reallocations
-                # between already-active exchanges keep using the base
-                # horizon since the inventory is already in place.
-                est_cost = self._estimate_expansion_cost(candidate.symbol, candidate)
-                effective_horizon = (
-                    self._reallocation_cost_horizon * self._activation_profit_horizon_multiplier
-                )
-                est_benefit = candidate.est_hourly_profit * effective_horizon
-                if est_cost > 0 and est_benefit > 0 and est_cost > est_benefit:
-                    logger.info(
-                        f"[Candidate] EXPAND_BLOCKED {candidate.symbol}: "
-                        f"setup_cost=${est_cost:.4f} > "
-                        f"est_benefit=${est_benefit:.4f} "
-                        f"(hourly=${candidate.est_hourly_profit:.4f} × "
-                        f"{effective_horizon:.1f}h, "
-                        f"base={self._reallocation_cost_horizon}h × "
-                        f"activation_mult={self._activation_profit_horizon_multiplier:.1f})"
-                    )
-                    continue
-                # Pair fee viability: block if dominant pair's combined fees exceed avg net%
-                if self._fee_manager:
-                    cand_pairs = self._compute_dominant_pairs(candidate.symbol, max_per_direction=2)
-                    buyers = cand_pairs.get("buyers", [])
-                    sellers = cand_pairs.get("sellers", [])
-                    if buyers and sellers:
-                        buy_fee = self._fee_manager.get_taker_fee(buyers[0][0])
-                        sell_fee = self._fee_manager.get_taker_fee(sellers[0][0])
-                        combined_fee_pct = (buy_fee + sell_fee) * 100  # convert to %
-                        avg_net = candidate.avg_profitable_net
-                        if combined_fee_pct > avg_net * 0.8 and avg_net > 0:
-                            logger.info(
-                                f"[Candidate] EXPAND_BLOCKED {candidate.symbol}: "
-                                f"pair_fee={combined_fee_pct:.3f}% > "
-                                f"avg_net={avg_net:.3f}%×0.8={avg_net*0.8:.3f}% "
-                                f"({buyers[0][0]}→{sellers[0][0]}) — pair_fee_exceeds_net"
-                            )
-                            continue
-                logger.info(
-                    f"[Candidate] EXPAND_READY {candidate.symbol}: "
-                    f"score={candidate.score:.6f} peak={wl_entry.peak_score:.6f} "
-                    f"avg_net={candidate.avg_profitable_net:.4f}% "
-                    f"freq={candidate.frequency:.1%} "
-                    f"ticks={candidate.profitable_ticks}/{candidate.total_ticks} "
-                    f"est_hourly=${candidate.est_hourly_profit:.4f} "
-                    f"setup_cost=${est_cost:.2f} "
-                    f"bfx={'yes' if self._is_symbol_on_bitfinex(candidate.symbol) else 'no'} "
-                    f"— activating"
-                )
-                self._expand_active(candidate.symbol, candidate)
-                self._watchlist.pop(candidate.symbol, None)
+        self._evaluate_expansion(deficit_recovery=False)
 
     def _execute_rotation(
         self,

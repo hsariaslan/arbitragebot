@@ -415,6 +415,10 @@ BITFINEX_OVER_TARGET_MULTIPLIER: float = 1.5  # Trigger when BFX USDT > reserve_
 
 # Auto-expand on understaff (Feature 6 — bypass eval interval when active symbols < min)
 AUTO_EXPAND_ON_UNDERSTAFF: bool = True
+DEFICIT_RECOVERY_EXPAND_ENABLED: bool = True
+DEFICIT_RECOVERY_SETUP_COST_PCT_OF_TRADE: float = 0.003  # Max immediate recovery setup fee = 0.3% of trade amount
+DEFICIT_RECOVERY_MIN_SETUP_COST_USD: float = 0.02        # Let free/near-free recovery through on tiny configs
+DEFICIT_RECOVERY_MAX_SETUP_COST_USD: float = 0.50        # Hard cap so deficit recovery cannot churn fees
 
 # Diversification floor (S21 follow-up — relax activation threshold when understaffed)
 # When `len(active_symbols) < num_active_symbols`, multiply the activation
