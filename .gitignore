@@ -12,6 +12,7 @@ export/
 screenshots/
 state/
 settings.json
+arbitragebot-configs.json
 misc/html/
 
 # Secrets
