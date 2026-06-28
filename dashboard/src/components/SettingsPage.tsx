@@ -188,8 +188,14 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [hedgeExecutionMode, setHedgeExecutionMode] = useState(currentSettings.hedge_execution_mode ?? 'simulation');
   const [hedgeDustThreshold, setHedgeDustThreshold] = useState(currentSettings.hedge_dust_threshold_usd ?? 20.0);
   const [hedgeEvalInterval, setHedgeEvalInterval] = useState(currentSettings.hedge_evaluation_interval_seconds ?? 60.0);
+  const [hedgeLeverage, setHedgeLeverage] = useState(currentSettings.hedge_leverage ?? 2);
   const [hedgeMarginBuffer, setHedgeMarginBuffer] = useState(currentSettings.hedge_margin_buffer_pct ?? 0.20);
   const [hedgeAdjustThreshold, setHedgeAdjustThreshold] = useState(currentSettings.hedge_adjust_threshold_pct ?? 0.01);
+  const [futuresCapitalTargetPct, setFuturesCapitalTargetPct] = useState(currentSettings.futures_capital_target_pct ?? 0.40);
+  const [futuresCapitalTopupPct, setFuturesCapitalTopupPct] = useState(currentSettings.futures_capital_topup_pct ?? 0.35);
+  const [futuresCapitalEmergencyPct, setFuturesCapitalEmergencyPct] = useState(currentSettings.futures_capital_emergency_pct ?? 0.30);
+  const [futuresCapitalOverflowPct, setFuturesCapitalOverflowPct] = useState(currentSettings.futures_capital_overflow_pct ?? 0.45);
+  const [futuresCapitalTransferMinUsd, setFuturesCapitalTransferMinUsd] = useState(currentSettings.futures_capital_transfer_min_usd ?? 10.0);
   const [anomalyEnabled, setAnomalyEnabled] = useState(currentSettings.anomaly_protection_enabled ?? true);
   const [cbWindow, setCbWindow] = useState(currentSettings.circuit_breaker_window ?? 900);
   const [cbThreshold, setCbThreshold] = useState(currentSettings.circuit_breaker_threshold ?? -5.0);
@@ -362,8 +368,14 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setHedgeExecutionMode(currentSettings.hedge_execution_mode ?? 'simulation');
       setHedgeDustThreshold(currentSettings.hedge_dust_threshold_usd ?? 20.0);
       setHedgeEvalInterval(currentSettings.hedge_evaluation_interval_seconds ?? 60.0);
+      setHedgeLeverage(currentSettings.hedge_leverage ?? 2);
       setHedgeMarginBuffer(currentSettings.hedge_margin_buffer_pct ?? 0.20);
       setHedgeAdjustThreshold(currentSettings.hedge_adjust_threshold_pct ?? 0.01);
+      setFuturesCapitalTargetPct(currentSettings.futures_capital_target_pct ?? 0.40);
+      setFuturesCapitalTopupPct(currentSettings.futures_capital_topup_pct ?? 0.35);
+      setFuturesCapitalEmergencyPct(currentSettings.futures_capital_emergency_pct ?? 0.30);
+      setFuturesCapitalOverflowPct(currentSettings.futures_capital_overflow_pct ?? 0.45);
+      setFuturesCapitalTransferMinUsd(currentSettings.futures_capital_transfer_min_usd ?? 10.0);
       setIpWhitelistEnabled(currentSettings.ip_whitelist_enabled ?? false);
       setIpWhitelist((currentSettings.ip_whitelist ?? []).join(', '));
       setAnomalyEnabled(currentSettings.anomaly_protection_enabled ?? true);
@@ -447,8 +459,14 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
     hedge_execution_mode: hedgeExecutionMode,
     hedge_dust_threshold_usd: hedgeDustThreshold,
     hedge_evaluation_interval_seconds: hedgeEvalInterval,
+    hedge_leverage: hedgeLeverage,
     hedge_margin_buffer_pct: hedgeMarginBuffer,
     hedge_adjust_threshold_pct: hedgeAdjustThreshold,
+    futures_capital_target_pct: futuresCapitalTargetPct,
+    futures_capital_topup_pct: futuresCapitalTopupPct,
+    futures_capital_emergency_pct: futuresCapitalEmergencyPct,
+    futures_capital_overflow_pct: futuresCapitalOverflowPct,
+    futures_capital_transfer_min_usd: futuresCapitalTransferMinUsd,
     anomaly_protection_enabled: anomalyEnabled,
     circuit_breaker_window: cbWindow,
     circuit_breaker_threshold: cbThreshold,

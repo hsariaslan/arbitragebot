@@ -28,6 +28,17 @@ function modeBadge(mode: string): { label: string; cls: string } {
   }
 }
 
+function reserveBadge(status: string): { label: string; cls: string } {
+  switch (status) {
+    case 'healthy': return { label: 'RESERVE OK', cls: 'bg-emerald-700/30 text-emerald-300 border-emerald-600' };
+    case 'topup_needed': return { label: 'TOP-UP NEEDED', cls: 'bg-amber-700/40 text-amber-300 border-amber-600' };
+    case 'emergency': return { label: 'RESERVE LOW', cls: 'bg-red-700/40 text-red-300 border-red-600' };
+    case 'unavailable': return { label: 'RESERVE UNKNOWN', cls: 'bg-red-700/40 text-red-300 border-red-600' };
+    case 'disabled': return { label: 'RESERVE OFF', cls: 'bg-slate-700/40 text-slate-400 border-slate-600' };
+    default: return { label: 'RESERVE PENDING', cls: 'bg-blue-700/40 text-blue-300 border-blue-600' };
+  }
+}
+
 export default function HedgesPanel({ hedges }: HedgesPanelProps) {
   if (!hedges || !hedges.enabled) {
     return null;
@@ -39,6 +50,8 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
   const gapClass = Math.abs(totalGap) <= 5 ? 'text-slate-200' : 'text-amber-400';
   const unhedgedTargets = hedges.unhedged_targets ?? [];
   const materialUnhedged = unhedgedTargets.filter(t => t.reason !== 'dust');
+  const reserve = hedges.futures_reserve;
+  const reserveUi = reserveBadge(reserve?.status ?? 'unknown');
 
   return (
     <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
@@ -49,6 +62,11 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
         <span className={`px-2 py-0.5 text-[10px] font-semibold rounded border ${badge.cls}`}>
           {badge.label}
         </span>
+        {reserve && (
+          <span className={`px-2 py-0.5 text-[10px] font-semibold rounded border ${reserveUi.cls}`}>
+            {reserveUi.label}
+          </span>
+        )}
         {hedges.safety_paused && (
           <span className="px-2 py-0.5 text-[10px] font-semibold rounded border bg-amber-700/40 text-amber-300 border-amber-600">
             OPENS PAUSED
@@ -72,6 +90,37 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
           )}
         </div>
       </div>
+
+      {reserve && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+          <div className="bg-slate-900/40 rounded p-2">
+            <div className="text-[10px] text-slate-500 uppercase">Futures reserve</div>
+            <div className="text-lg font-mono text-slate-200">
+              ${reserve.margin_balance_usd.toFixed(0)}
+              <span className="text-xs text-slate-500"> / ${reserve.target_usd.toFixed(0)}</span>
+            </div>
+          </div>
+          <div className="bg-slate-900/40 rounded p-2">
+            <div className="text-[10px] text-slate-500 uppercase">Available margin</div>
+            <div className="text-lg font-mono text-slate-200">${reserve.available_usd.toFixed(0)}</div>
+          </div>
+          <div className="bg-slate-900/40 rounded p-2">
+            <div className="text-[10px] text-slate-500 uppercase">Needed buffered</div>
+            <div className="text-lg font-mono text-slate-200">
+              ${reserve.required_buffered_margin_usd.toFixed(0)}
+            </div>
+          </div>
+          <div className="bg-slate-900/40 rounded p-2">
+            <div className="text-[10px] text-slate-500 uppercase">Policy</div>
+            <div className="text-lg font-mono text-slate-200">
+              {reserve.leverage}x
+              <span className="text-xs text-slate-500">
+                {' '}T{(reserve.target_pct * 100).toFixed(0)} E{(reserve.emergency_pct * 100).toFixed(0)}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Aggregate totals */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3">

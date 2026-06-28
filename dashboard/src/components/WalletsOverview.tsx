@@ -210,7 +210,7 @@ export default function WalletsOverview({
                     {sign(hourly)}${fmt(hourly)}
                   </td>
                   <td className="px-3 py-2 text-right font-mono text-slate-300">
-                    {l.trades_count}
+                    {l.trades_count.toLocaleString('en-US')}
                   </td>
                   <td className={`px-3 py-2 text-right font-mono ${l.drawdown_pct > 5 ? 'text-amber-400' : 'text-slate-400'}`}>
                     {l.drawdown_pct.toFixed(1)}%
@@ -282,6 +282,8 @@ function StatusFlags({ lite }: { lite: ConfigLite }) {
   const flags: { label: string; color: string; title: string }[] = [];
   if (lite.anomaly_paused) flags.push({ label: 'PAUSED', color: 'bg-rose-500/20 text-rose-300', title: 'Anomaly protection paused this config' });
   if (lite.manual_stopped) flags.push({ label: 'STOPPED', color: 'bg-amber-500/20 text-amber-300', title: 'Operator manually stopped this config' });
+  if (lite.hedge_reserve_status === 'emergency') flags.push({ label: 'FUT LOW', color: 'bg-red-500/20 text-red-300', title: `Binance Futures reserve below emergency: $${lite.futures_margin_balance_usd.toFixed(0)} / $${lite.futures_target_usd.toFixed(0)}` });
+  if (lite.hedge_reserve_status === 'topup_needed') flags.push({ label: 'FUT TOP', color: 'bg-amber-500/20 text-amber-300', title: `Binance Futures reserve needs top-up: $${lite.futures_margin_balance_usd.toFixed(0)} / $${lite.futures_target_usd.toFixed(0)}` });
   if (lite.hedge_open_count > 0) flags.push({ label: `H${lite.hedge_open_count}`, color: 'bg-purple-500/20 text-purple-300', title: `${lite.hedge_open_count} hedge(s) open, notional $${lite.hedge_total_notional_usd.toFixed(0)}` });
   if (lite.execution_mode !== 'simulation') flags.push({ label: lite.execution_mode.toUpperCase(), color: 'bg-emerald-500/20 text-emerald-300', title: `Execution mode: ${lite.execution_mode}` });
   if (flags.length === 0) {

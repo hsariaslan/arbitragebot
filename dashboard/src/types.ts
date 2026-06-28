@@ -154,6 +154,22 @@ export interface Settings {
   one_leg_failure_rate?: number;
   one_leg_unwind_slippage_mult?: number;
   max_position_multiplier?: number;
+  // Regime and inventory gates
+  inventory_rebalance_enabled?: boolean;
+  inventory_rebalance_interval_hours?: number;
+  inventory_drift_threshold?: number;
+  regime_gating_enabled?: boolean;
+  regime_strong_hours?: number[];
+  regime_neutral_hours?: number[];
+  regime_weak_min_net_multiplier?: number;
+  regime_weak_disable_rebalance?: boolean;
+  regime_weak_rebalance_policy?: 'strict' | 'refill_only' | 'off';
+  regime_weak_refill_max_fee_usd?: number;
+  regime_weak_disable_demote?: boolean;
+  regime_weak_disable_expand?: boolean;
+  demotion_freq_scaling_enabled?: boolean;
+  quiet_period_pause_minutes?: number;
+  activation_profit_horizon_multiplier?: number;
   // Diversification floor (S21 follow-up)
   diversification_floor_enabled?: boolean;
   diversification_floor_multiplier?: number;
@@ -174,8 +190,14 @@ export interface Settings {
   hedge_execution_mode?: 'simulation' | 'testnet' | 'live';
   hedge_dust_threshold_usd?: number;
   hedge_evaluation_interval_seconds?: number;
+  hedge_leverage?: number;
   hedge_margin_buffer_pct?: number;
   hedge_adjust_threshold_pct?: number;
+  futures_capital_target_pct?: number;
+  futures_capital_topup_pct?: number;
+  futures_capital_emergency_pct?: number;
+  futures_capital_overflow_pct?: number;
+  futures_capital_transfer_min_usd?: number;
   // Anomaly protection
   anomaly_protection_enabled?: boolean;
   circuit_breaker_window?: number;
@@ -389,8 +411,35 @@ export interface HedgeState {
   safety_paused: boolean;
   dust_threshold_usd: number;
   evaluation_interval_seconds: number;
+  leverage?: number;
   margin_buffer_pct: number;
   adjust_threshold_pct: number;
+  futures_reserve?: {
+    status: string;
+    execution_mode: string;
+    leverage: number;
+    margin_buffer_pct: number;
+    target_pct: number;
+    topup_pct: number;
+    emergency_pct: number;
+    overflow_pct: number;
+    transfer_min_usd: number;
+    total_capital_usd: number;
+    target_usd: number;
+    topup_usd: number;
+    emergency_usd: number;
+    overflow_usd: number;
+    wallet_balance_usd: number;
+    margin_balance_usd: number;
+    available_usd: number;
+    max_withdraw_usd: number;
+    required_initial_margin_usd: number;
+    required_buffered_margin_usd: number;
+    can_open_new_hedges: boolean;
+    last_check_ts: number;
+    last_transfer_ts: number;
+    last_error?: string;
+  };
   open_count: number;
   open_hedges: OpenHedge[];
   unhedged_targets?: UnhedgedTarget[];
@@ -783,6 +832,10 @@ export interface ConfigLite {
   hedge_cumulative_funding_usd: number;
   hedge_executor_errors: number;
   hedge_safety_paused: boolean;
+  hedge_reserve_status: string;
+  futures_margin_balance_usd: number;
+  futures_available_usd: number;
+  futures_target_usd: number;
   anomaly_paused: boolean;
   manual_stopped: boolean;
 }

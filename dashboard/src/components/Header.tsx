@@ -511,6 +511,7 @@ function PrimaryStatsBar({ lite, onSelect }: { lite: ConfigLite; onSelect: () =>
               `Notional: $${lite.hedge_total_notional_usd.toFixed(0)} | ` +
               `Unrealized: ${sign(lite.hedge_total_unrealized_pnl_usd)}$${lite.hedge_total_unrealized_pnl_usd.toFixed(2)} | ` +
               `Cum funding: ${sign(lite.hedge_cumulative_funding_usd)}$${lite.hedge_cumulative_funding_usd.toFixed(2)}` +
+              ` | Reserve: ${lite.hedge_reserve_status} $${lite.futures_margin_balance_usd.toFixed(0)}/$${lite.futures_target_usd.toFixed(0)}` +
               (lite.hedge_safety_paused ? ' | OPENS PAUSED' : '')
             }
           >
@@ -528,6 +529,12 @@ function PrimaryStatsBar({ lite, onSelect }: { lite: ConfigLite; onSelect: () =>
             </span>
             {lite.hedge_executor_errors > 0 && (
               <span className="text-red-400 font-mono ml-1">⚠{lite.hedge_executor_errors}</span>
+            )}
+            {lite.hedge_reserve_status === 'emergency' && (
+              <span className="text-red-400 font-mono ml-1">FUT LOW</span>
+            )}
+            {lite.hedge_reserve_status === 'topup_needed' && (
+              <span className="text-amber-400 font-mono ml-1">FUT TOP</span>
             )}
           </div>
         </>

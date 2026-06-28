@@ -317,7 +317,7 @@ function ConfigCard({
             <span className={pnlColor} title="Net P&L">
               {lite.net_pnl >= 0 ? '+' : ''}${formatUsd(lite.net_pnl, 2)}
             </span>
-            <span title="Trades">{lite.trades_count}t</span>
+            <span title="Trades">{lite.trades_count.toLocaleString()}t</span>
           </div>
         ) : (
           <span
@@ -647,7 +647,7 @@ function ConfigGroupCard(props: GroupCardProps) {
       warnings.push(
         <div key="t" className="mt-2 px-3 py-2 bg-blue-950/40 border border-blue-700/40 rounded text-blue-200 text-xs">
           <span className="font-bold">ℹ Active Trade History</span> — the outgoing super-primary has{' '}
-          <span className="font-medium">{currentSP.trades_count} trade(s)</span> recorded. Trade history
+          <span className="font-medium">{currentSP.trades_count.toLocaleString()} trade(s)</span> recorded. Trade history
           is preserved on its config; only the super-primary flag transfers.
         </div>
       );

@@ -163,8 +163,14 @@ const SECTIONS: SectionDef[] = [
       { key: 'hedging_enabled', label: 'Hedging', type: 'bool', fallback: true, tooltip: "Why it exists: arbitrage holds spot crypto inventory between trades — without a hedge, that inventory is exposed to price drops. Continuous short-futures positions on Binance USDⓈ-M offset the spot exposure so profit comes only from arb spread, not price direction. What changing it does: ON = continuous delta-neutral hedging; OFF = unhedged spot exposure (riskier, simpler). Only the super-primary holds REAL futures positions; others always shadow-simulate. Default: ON. Config key: hedging_enabled" },
       { key: 'hedge_dust_threshold_usd', label: 'Hedge Dust Threshold ($)', type: 'number', min: 1, step: 1, fallback: 10.0, tooltip: "Why it exists: opening a hedge costs taker fee + funding, so tiny spot positions aren't worth hedging. This is the minimum spot notional that triggers a hedge. What changing it does: higher = ignores more small positions (less hedging activity, more unhedged exposure on small inventory); lower = hedges everything (more API churn for marginal positions). Default: $10. Config key: hedge_dust_threshold_usd" },
       { key: 'hedge_evaluation_interval_seconds', label: 'Hedge Eval Interval (s)', type: 'number', min: 30, fallback: 60, tooltip: "Why it exists: how often the hedge manager performs a periodic sanity check. Trades, transfers, expansions, and demotions also wake the hedge immediately. What changing it does: shorter = tighter fallback reconciliation; longer = fewer periodic checks. Default: 60s. Config key: hedge_evaluation_interval_seconds" },
-      { key: 'hedge_margin_buffer_pct', label: 'Hedge Margin Buffer %', type: 'number', min: 0, max: 1, step: 0.05, fallback: 0.20, tooltip: "Why it exists: margin headroom required before opening a new hedge — available_balance must be ≥ notional × (1 + buffer). Without a buffer, a small adverse price move could liquidate the futures position. What changing it does: higher = safer (more headroom, fewer near-margin scares) but blocks more hedges when margin is tight; lower = uses more margin (more exposure). Default: 20%. Config key: hedge_margin_buffer_pct" },
+      { key: 'hedge_leverage', label: 'Hedge Leverage', type: 'number', min: 1, max: 5, step: 1, fallback: 2, tooltip: "Why it exists: isolated USDⓈ-M leverage controls how much futures collateral is needed for the short hedge. 2x is the default compromise: lower futures reserve than 1x without the liquidation fragility of 3–5x. What changing it does: higher = less required free margin but more liquidation sensitivity; lower = safer but more capital locked in futures. Config key: hedge_leverage" },
+      { key: 'hedge_margin_buffer_pct', label: 'Hedge Margin Buffer %', type: 'number', min: 0, max: 1, step: 0.05, fallback: 0.20, tooltip: "Why it exists: margin headroom required before opening a new hedge — available_balance must be ≥ (notional ÷ leverage) × (1 + buffer). Without a buffer, a small adverse price move could liquidate the futures position. What changing it does: higher = safer but blocks more hedge growth when margin is tight; lower = uses more margin. Default: 20%. Config key: hedge_margin_buffer_pct" },
       { key: 'hedge_adjust_threshold_pct', label: 'Hedge Adjust Threshold %', type: 'number', min: 0.01, max: 1, step: 0.01, fallback: 0.01, tooltip: "Why it exists: as spot inventory drifts, the hedge needs to grow/shrink to track. Adjusting on every microscopic change wastes futures taker fees, but a loose threshold leaves directional exposure. What changing it does: lower = tighter tracking; higher = less futures churn but more unhedged inventory. Default: 1%. Config key: hedge_adjust_threshold_pct" },
+      { key: 'futures_capital_target_pct', label: 'Futures Reserve Target %', type: 'number', min: 0, max: 0.9, step: 0.01, fallback: 0.40, tooltip: "Why it exists: percentage of group capital reserved for Binance USDⓈ-M Futures collateral. Spot allocations use the remaining capital, so hedged P&L is realistic. Default: 40% at 2x. Config key: futures_capital_target_pct" },
+      { key: 'futures_capital_topup_pct', label: 'Futures Top-Up %', type: 'number', min: 0, max: 0.9, step: 0.01, fallback: 0.35, tooltip: "Why it exists: live mode transfers USDT from Binance Spot to USDⓈ-M Futures when futures margin balance falls below this percentage. Default: 35%. Config key: futures_capital_topup_pct" },
+      { key: 'futures_capital_emergency_pct', label: 'Futures Emergency %', type: 'number', min: 0, max: 0.9, step: 0.01, fallback: 0.30, tooltip: "Why it exists: when futures reserve falls below this percentage, new spot exposure is blocked because it may not be hedgeable. Default: 30%. Config key: futures_capital_emergency_pct" },
+      { key: 'futures_capital_overflow_pct', label: 'Futures Overflow %', type: 'number', min: 0, max: 0.95, step: 0.01, fallback: 0.45, tooltip: "Why it exists: live mode can sweep idle futures excess back to Binance Spot when margin balance is above this percentage. Default: 45%. Config key: futures_capital_overflow_pct" },
+      { key: 'futures_capital_transfer_min_usd', label: 'Futures Transfer Min ($)', type: 'number', min: 0, step: 1, fallback: 10.0, tooltip: "Why it exists: avoids dust transfers between Binance Spot and USDⓈ-M Futures. The live API key must have Universal Transfer permission. Default: $10. Config key: futures_capital_transfer_min_usd" },
     ],
   },
 ];
@@ -549,9 +555,40 @@ function ScheduleForm({
             />
             <p className="text-[11px] text-slate-500 mt-1">During weak hours, base min_net_profit_pct × this. 2.0 = require 2× spread to trade. Higher = more selective. Default: 2.0</p>
           </div>
-          <div className="flex flex-col justify-center gap-2">
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Rebalance Policy</label>
+            <select
+              value={settings.regime_weak_rebalance_policy ?? (settings.regime_weak_disable_rebalance ? 'strict' : 'off')}
+              onChange={(e) => {
+                const policy = e.target.value;
+                onFieldChange('regime_weak_rebalance_policy', policy);
+                onFieldChange('regime_weak_disable_rebalance', policy !== 'off');
+              }}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-sm text-white"
+              disabled={!enabled}
+            >
+              <option value="refill_only">Refill only</option>
+              <option value="strict">Strict block</option>
+              <option value="off">Off</option>
+            </select>
+            <p className="text-[11px] text-slate-500 mt-1">Refill only allows local/cheap inventory refills during weak hours but still blocks expensive rebalances. Strict blocks all weak-hour rebalances. Off uses normal gates. Default: refill_only.</p>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">Refill Max External Fee ($)</label>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={0.01}
+              value={settings.regime_weak_refill_max_fee_usd ?? 0.10}
+              onChange={(e) => onFieldChange('regime_weak_refill_max_fee_usd', Number(e.target.value))}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-sm text-white"
+              disabled={!enabled || (settings.regime_weak_rebalance_policy ?? 'refill_only') !== 'refill_only'}
+            />
+            <p className="text-[11px] text-slate-500 mt-1">External transfers above this fee stay blocked in weak hours. Internal buy/sell refills are still allowed. Default: $0.10.</p>
+          </div>
+          <div className="flex flex-col justify-center gap-2 md:col-span-2">
             {[
-              ['regime_weak_disable_rebalance', 'Disable Rebalance', 'Block rebalance attempts during weak hours (saves transfer fees on thin-spread windows that won\'t generate matching trade volume).'],
               ['regime_weak_disable_demote', 'Disable Demote', 'Skip demotions during weak hours — keeps held inventory in place rather than paying teardown fees during low-volume windows.'],
               ['regime_weak_disable_expand', 'Disable Expand', 'Skip auto-expand-on-understaff during weak hours. Don\'t pay setup fees when the window won\'t produce enough trades to amortize them.'],
             ].map(([key, label, hint]) => (

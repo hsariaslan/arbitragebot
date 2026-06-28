@@ -1126,6 +1126,7 @@ class DashboardServer:
         "hedge_evaluation_interval_seconds": "hedging_enabled=false",
         "hedge_dust_threshold_usd": "hedging_enabled=false",
         "hedge_adjust_threshold_pct": "hedging_enabled=false",
+        "futures_capital_transfer_min_usd": "hedging_enabled=false",
         "scoring_window": "(no disable — would divide by zero)",
         "evaluation_interval": "(no disable — would tight-loop)",
         "discovery_duration": "(no disable — would skip discovery)",
@@ -1219,6 +1220,8 @@ class DashboardServer:
         "regime_neutral_hours": (list, None, None),    # list[int 0-23]
         "regime_weak_min_net_multiplier": (float, 1.0, 10.0),
         "regime_weak_disable_rebalance": (bool, None, None),
+        "regime_weak_rebalance_policy": (str, None, None),
+        "regime_weak_refill_max_fee_usd": (float, 0.0, 100.0),
         "regime_weak_disable_demote": (bool, None, None),
         "regime_weak_disable_expand": (bool, None, None),
         # Anti-churn: demotion-frequency cooldown scaling + quiet-period
@@ -1246,8 +1249,14 @@ class DashboardServer:
         "hedge_execution_mode": (str, None, None),
         "hedge_dust_threshold_usd": (float, 1.0, 10000.0),
         "hedge_evaluation_interval_seconds": (float, 30.0, 7200.0),
+        "hedge_leverage": (int, 1, 5),
         "hedge_margin_buffer_pct": (float, 0.0, 1.0),
         "hedge_adjust_threshold_pct": (float, 0.01, 1.0),
+        "futures_capital_target_pct": (float, 0.0, 0.90),
+        "futures_capital_topup_pct": (float, 0.0, 0.90),
+        "futures_capital_emergency_pct": (float, 0.0, 0.90),
+        "futures_capital_overflow_pct": (float, 0.0, 0.95),
+        "futures_capital_transfer_min_usd": (float, 0.0, 10000.0),
         # Anomaly protection
         "anomaly_protection_enabled": (bool, None, None),
         "circuit_breaker_window": (int, 60, 7200),
@@ -1270,6 +1279,7 @@ class DashboardServer:
     _SETTINGS_ENUMS: dict[str, list[str]] = {
         "execution_mode": ["simulation", "demo", "demo_only"],
         "hedge_execution_mode": ["simulation", "testnet", "live"],
+        "regime_weak_rebalance_policy": ["strict", "refill_only", "off"],
     }
 
     @classmethod
@@ -1310,6 +1320,21 @@ class DashboardServer:
                     return False, f"{key} must be >= {min_val}"
                 if max_val is not None and value > max_val:
                     return False, f"{key} must be <= {max_val}"
+        emergency = float(settings.get("futures_capital_emergency_pct", 0.0) or 0.0)
+        topup = float(settings.get("futures_capital_topup_pct", 0.0) or 0.0)
+        target = float(settings.get("futures_capital_target_pct", 0.0) or 0.0)
+        overflow = float(settings.get("futures_capital_overflow_pct", 0.0) or 0.0)
+        if all(k in settings for k in (
+            "futures_capital_emergency_pct",
+            "futures_capital_topup_pct",
+            "futures_capital_target_pct",
+            "futures_capital_overflow_pct",
+        )):
+            if not (emergency <= topup <= target <= overflow):
+                return False, (
+                    "futures reserve percentages must satisfy "
+                    "emergency <= topup <= target <= overflow"
+                )
         return True, ""
 
     _FEE_CONFIG_SCHEMA: dict[str, tuple[type, float | None, float | None]] = {
@@ -3527,6 +3552,10 @@ class DashboardServer:
                 self._monitor._regime_weak_min_net_multiplier = float(settings["regime_weak_min_net_multiplier"])
             if "regime_weak_disable_rebalance" in settings and self._monitor:
                 self._monitor._regime_weak_disable_rebalance = bool(settings["regime_weak_disable_rebalance"])
+            if "regime_weak_rebalance_policy" in settings and self._monitor:
+                self._monitor._regime_weak_rebalance_policy = str(settings["regime_weak_rebalance_policy"])
+            if "regime_weak_refill_max_fee_usd" in settings and self._monitor:
+                self._monitor._regime_weak_refill_max_fee_usd = float(settings["regime_weak_refill_max_fee_usd"])
             if "regime_weak_disable_demote" in settings:
                 self._optimizer._regime_weak_disable_demote = bool(settings["regime_weak_disable_demote"])
             if "regime_weak_disable_expand" in settings:
@@ -3567,10 +3596,24 @@ class DashboardServer:
                 hm_kwargs["dust_threshold_usd"] = float(settings["hedge_dust_threshold_usd"])
             if "hedge_evaluation_interval_seconds" in settings:
                 hm_kwargs["evaluation_interval_seconds"] = float(settings["hedge_evaluation_interval_seconds"])
+            if "hedge_leverage" in settings:
+                hm_kwargs["leverage"] = int(settings["hedge_leverage"])
             if "hedge_margin_buffer_pct" in settings:
                 hm_kwargs["margin_buffer_pct"] = float(settings["hedge_margin_buffer_pct"])
             if "hedge_adjust_threshold_pct" in settings:
                 hm_kwargs["adjust_threshold_pct"] = float(settings["hedge_adjust_threshold_pct"])
+            if "total_capital" in settings:
+                hm_kwargs["total_capital"] = float(settings["total_capital"])
+            if "futures_capital_target_pct" in settings:
+                hm_kwargs["futures_capital_target_pct"] = float(settings["futures_capital_target_pct"])
+            if "futures_capital_topup_pct" in settings:
+                hm_kwargs["futures_capital_topup_pct"] = float(settings["futures_capital_topup_pct"])
+            if "futures_capital_emergency_pct" in settings:
+                hm_kwargs["futures_capital_emergency_pct"] = float(settings["futures_capital_emergency_pct"])
+            if "futures_capital_overflow_pct" in settings:
+                hm_kwargs["futures_capital_overflow_pct"] = float(settings["futures_capital_overflow_pct"])
+            if "futures_capital_transfer_min_usd" in settings:
+                hm_kwargs["futures_capital_transfer_min_usd"] = float(settings["futures_capital_transfer_min_usd"])
             if hm_kwargs:
                 hm.update_settings(**hm_kwargs)
 
@@ -3807,6 +3850,10 @@ class DashboardServer:
                 self._monitor._regime_weak_min_net_multiplier = float(settings["regime_weak_min_net_multiplier"])
             if "regime_weak_disable_rebalance" in settings and self._monitor:
                 self._monitor._regime_weak_disable_rebalance = bool(settings["regime_weak_disable_rebalance"])
+            if "regime_weak_rebalance_policy" in settings and self._monitor:
+                self._monitor._regime_weak_rebalance_policy = str(settings["regime_weak_rebalance_policy"])
+            if "regime_weak_refill_max_fee_usd" in settings and self._monitor:
+                self._monitor._regime_weak_refill_max_fee_usd = float(settings["regime_weak_refill_max_fee_usd"])
             if "regime_weak_disable_demote" in settings:
                 self._optimizer._regime_weak_disable_demote = bool(settings["regime_weak_disable_demote"])
             if "regime_weak_disable_expand" in settings:
@@ -3847,10 +3894,24 @@ class DashboardServer:
                 hm_kwargs["dust_threshold_usd"] = float(settings["hedge_dust_threshold_usd"])
             if "hedge_evaluation_interval_seconds" in settings:
                 hm_kwargs["evaluation_interval_seconds"] = float(settings["hedge_evaluation_interval_seconds"])
+            if "hedge_leverage" in settings:
+                hm_kwargs["leverage"] = int(settings["hedge_leverage"])
             if "hedge_margin_buffer_pct" in settings:
                 hm_kwargs["margin_buffer_pct"] = float(settings["hedge_margin_buffer_pct"])
             if "hedge_adjust_threshold_pct" in settings:
                 hm_kwargs["adjust_threshold_pct"] = float(settings["hedge_adjust_threshold_pct"])
+            if "total_capital" in settings:
+                hm_kwargs["total_capital"] = float(settings["total_capital"])
+            if "futures_capital_target_pct" in settings:
+                hm_kwargs["futures_capital_target_pct"] = float(settings["futures_capital_target_pct"])
+            if "futures_capital_topup_pct" in settings:
+                hm_kwargs["futures_capital_topup_pct"] = float(settings["futures_capital_topup_pct"])
+            if "futures_capital_emergency_pct" in settings:
+                hm_kwargs["futures_capital_emergency_pct"] = float(settings["futures_capital_emergency_pct"])
+            if "futures_capital_overflow_pct" in settings:
+                hm_kwargs["futures_capital_overflow_pct"] = float(settings["futures_capital_overflow_pct"])
+            if "futures_capital_transfer_min_usd" in settings:
+                hm_kwargs["futures_capital_transfer_min_usd"] = float(settings["futures_capital_transfer_min_usd"])
             if hm_kwargs:
                 hm.update_settings(**hm_kwargs)
 
@@ -4326,6 +4387,9 @@ class DashboardServer:
             f"hourly_transfer_cap=${s.get('hourly_external_transfer_cap', 2.0):.2f}",
             f"momentum_filter: enabled={s.get('momentum_filter_enabled', True)}, lookback={s.get('momentum_lookback_hours', 24.0)}h, sample_interval={s.get('momentum_sample_interval_minutes', 60.0)}min, factor=[{s.get('momentum_min_factor', 0.3)}, {s.get('momentum_max_factor', 1.5)}]",
             f"inventory_rebalance: enabled={s.get('inventory_rebalance_enabled', True)}, interval={s.get('inventory_rebalance_interval_hours', 6.0)}h, drift_threshold={s.get('inventory_drift_threshold', 0.3)*100:.0f}%",
+            f"regime_weak_rebalance: policy={s.get('regime_weak_rebalance_policy', 'refill_only')}, "
+            f"refill_max_fee=${s.get('regime_weak_refill_max_fee_usd', 0.10):.2f}, "
+            f"legacy_disable={s.get('regime_weak_disable_rebalance', True)}",
             f"auto_expand_on_understaff={s.get('auto_expand_on_understaff', True)}",
             f"diversification_floor: enabled={s.get('diversification_floor_enabled', True)}, "
             f"multiplier={s.get('diversification_floor_multiplier', 0.7)}x (relaxes activation threshold when understaffed)",
@@ -4341,8 +4405,14 @@ class DashboardServer:
             f"mode={s.get('hedge_execution_mode', 'simulation')}, "
             f"dust=${s.get('hedge_dust_threshold_usd', 20.0):.0f}, "
             f"eval_interval={s.get('hedge_evaluation_interval_seconds', 60.0):.0f}s, "
+            f"leverage={s.get('hedge_leverage', 2)}x, "
             f"margin_buffer={s.get('hedge_margin_buffer_pct', 0.20)*100:.0f}%, "
             f"adjust_threshold={s.get('hedge_adjust_threshold_pct', 0.01)*100:.0f}%",
+            f"futures_reserve: target={s.get('futures_capital_target_pct', 0.40)*100:.0f}%, "
+            f"topup={s.get('futures_capital_topup_pct', 0.35)*100:.0f}%, "
+            f"emergency={s.get('futures_capital_emergency_pct', 0.30)*100:.0f}%, "
+            f"overflow={s.get('futures_capital_overflow_pct', 0.45)*100:.0f}%, "
+            f"transfer_min=${s.get('futures_capital_transfer_min_usd', 10.0):.0f}",
             f"fee_real_mode={s.get('fee_real_mode', False)}",
             f"exchanges: {' '.join(fee_parts)}",
             f"role_boosts: {' '.join(boost_parts) if boost_parts else 'all neutral (1.0x)'}",
@@ -4385,6 +4455,9 @@ class DashboardServer:
                 "inventory_rebalance_enabled",
                 "inventory_rebalance_interval_hours",
                 "inventory_drift_threshold",
+                "regime_weak_rebalance_policy",
+                "regime_weak_refill_max_fee_usd",
+                "regime_weak_disable_rebalance",
                 "bitfinex_over_target_enabled",
                 "bitfinex_over_target_multiplier",
                 "auto_expand_on_understaff",
@@ -4400,8 +4473,14 @@ class DashboardServer:
                 "hedge_execution_mode",
                 "hedge_dust_threshold_usd",
                 "hedge_evaluation_interval_seconds",
+                "hedge_leverage",
                 "hedge_margin_buffer_pct",
                 "hedge_adjust_threshold_pct",
+                "futures_capital_target_pct",
+                "futures_capital_topup_pct",
+                "futures_capital_emergency_pct",
+                "futures_capital_overflow_pct",
+                "futures_capital_transfer_min_usd",
             ]
             for k in keys_to_check:
                 old_v = old_settings.get(k)
@@ -4479,26 +4558,63 @@ class DashboardServer:
         """
         if not (balance and getattr(balance, "initialized", False)):
             return float(fallback), 0.0
+        hedge_state: dict[str, Any] = {}
         hedge_pnl_usd = 0.0
         if hedge_manager is not None:
             try:
-                hedge_pnl_usd = float(
-                    hedge_manager.get_debug_state().get("total_unrealized_pnl_usd", 0.0)
-                )
+                hedge_state = hedge_manager.get_debug_state()
+                hedge_pnl_usd = float(hedge_state.get("total_unrealized_pnl_usd", 0.0))
             except Exception:
+                hedge_state = {}
                 hedge_pnl_usd = 0.0
         try:
             prices_per_exchange = monitor._get_per_exchange_prices() if monitor else None
         except Exception:
             prices_per_exchange = None
         try:
-            portfolio_value = balance.get_portfolio_value(
+            spot_value = balance.get_portfolio_value(
                 prices,
-                hedge_pnl_usd=hedge_pnl_usd,
+                hedge_pnl_usd=0.0,
                 prices_per_exchange=prices_per_exchange,
             )
         except Exception:
-            portfolio_value = float(fallback)
+            spot_value = float(fallback)
+        portfolio_value = float(spot_value) + hedge_pnl_usd
+
+        # Shadow hedges are an accounting preview, not a real exchange wallet.
+        # For simulation configs, the dashboard "portfolio" should represent
+        # the delta-neutral equity target: initial capital plus cumulative
+        # realized net P&L, with simulated hedge funding included. Otherwise
+        # raw spot MTM leaks into wallets and makes hedged configs look like
+        # they gained/lost from price direction.
+        material_unhedged = any(
+            str(t.get("reason", "")) != "dust"
+            and float(t.get("target_notional_usd", 0.0) or 0.0)
+            >= float(hedge_state.get("dust_threshold_usd", 0.0) or 0.0)
+            for t in hedge_state.get("unhedged_targets", []) or []
+            if isinstance(t, dict)
+        )
+        if (
+            hedge_state.get("enabled", False)
+            and str(hedge_state.get("execution_mode", "simulation")) == "simulation"
+            and not material_unhedged
+            and monitor is not None
+        ):
+            try:
+                credited_cashback = (
+                    monitor._fee_manager._total_credited_cashback
+                    if getattr(monitor, "_fee_manager", None) else 0.0
+                )
+                hedge_funding = float(hedge_state.get("cumulative_funding_usd", 0.0))
+                portfolio_value = (
+                    float(getattr(balance, "_initial_investment", fallback) or fallback)
+                    + float(getattr(monitor, "_cumulative_pnl", 0.0))
+                    - float(getattr(balance, "total_transfer_fees", 0.0))
+                    + float(credited_cashback)
+                    + hedge_funding
+                )
+            except Exception:
+                pass
         return float(portfolio_value), hedge_pnl_usd
 
     def _build_state(self) -> dict[str, Any]:
@@ -4590,7 +4706,7 @@ class DashboardServer:
         # setup-time fee divided by a sub-second elapsed window produces a
         # huge phantom $/hr that doesn't match the displayed Net Total.
         WARMUP_SECONDS = 300.0
-        if len(self._monitor._trades) == 0 or elapsed_s < WARMUP_SECONDS:
+        if self._monitor._cumulative_trade_count == 0 or elapsed_s < WARMUP_SECONDS:
             session_hourly_rate = 0.0
         else:
             session_hourly_rate = net_profit / (elapsed_s / 3600)
@@ -4649,7 +4765,7 @@ class DashboardServer:
                         pass
 
         # Simulation stats
-        total_trades = len(self._monitor._trades)
+        total_trades = int(getattr(self._monitor, "_cumulative_trade_count", len(self._monitor._trades)))
         elapsed = now - self._monitor._start_time if self._monitor._start_time else 0
         trades_per_min = total_trades / (elapsed / 60) if elapsed > 60 else 0.0
 
@@ -4699,7 +4815,7 @@ class DashboardServer:
                 "fee_usd": round(tr.fee_usd, 4),
             })
 
-        price_pnl = portfolio_value - initial - trading_pnl + transfer_fees if self._balance.initialized else 0.0
+        price_pnl = portfolio_value - initial - net_profit if self._balance.initialized else 0.0
 
         # Adaptive trade size stats — _trades is a deque, must convert
         # to list before slicing.
@@ -4721,7 +4837,7 @@ class DashboardServer:
             "portfolio": {
                 "total_value": round(portfolio_value, 2),
                 "initial_investment": round(initial, 2),
-                "net_pnl": round(portfolio_value - initial, 2) if self._balance.initialized else 0.0,
+                "net_pnl": round(net_profit, 2) if self._balance.initialized else 0.0,
                 "trading_pnl": round(trading_pnl, 4),
                 "transfer_fees": round(transfer_fees, 4),
                 "price_pnl": round(price_pnl, 2) if self._balance.initialized else 0.0,
@@ -5026,7 +5142,9 @@ class DashboardServer:
             # Trades-per-minute, transfers, skipped — same fields as the
             # global Stats bar (computed from per-config monitor + balance)
             try:
-                total_trades = len(bundle.monitor._trades)
+                total_trades = int(
+                    getattr(bundle.monitor, "_cumulative_trade_count", len(bundle.monitor._trades))
+                )
                 start_t = float(getattr(bundle.monitor, "_start_time", 0.0) or 0.0)
                 if start_t > 0:
                     elapsed_min = max(1e-6, (time.time() - start_t) / 60.0)
@@ -5038,7 +5156,9 @@ class DashboardServer:
                 total_transfers = len(bundle.balance.transfers)
                 skipped_trades = int(getattr(bundle.balance, "skipped_trades", 0))
             except Exception:
-                total_trades = len(bundle.monitor._trades)
+                total_trades = int(
+                    getattr(bundle.monitor, "_cumulative_trade_count", len(bundle.monitor._trades))
+                )
                 trades_per_minute = 0.0
                 total_transfers = len(bundle.balance.transfers)
                 skipped_trades = 0
@@ -5052,6 +5172,11 @@ class DashboardServer:
                 hedge_cumulative_funding_usd = float(hm_state.get("cumulative_funding_usd", 0.0))
                 hedge_executor_errors = int(hm_state.get("total_executor_errors", 0))
                 hedge_safety_paused = bool(hm_state.get("safety_paused", False))
+                reserve_state = hm_state.get("futures_reserve", {}) or {}
+                hedge_reserve_status = str(reserve_state.get("status", "unknown"))
+                futures_margin_balance_usd = float(reserve_state.get("margin_balance_usd", 0.0) or 0.0)
+                futures_available_usd = float(reserve_state.get("available_usd", 0.0) or 0.0)
+                futures_target_usd = float(reserve_state.get("target_usd", 0.0) or 0.0)
             except Exception:
                 hedge_enabled = False
                 hedge_open_count = 0
@@ -5060,6 +5185,10 @@ class DashboardServer:
                 hedge_cumulative_funding_usd = 0.0
                 hedge_executor_errors = 0
                 hedge_safety_paused = False
+                hedge_reserve_status = "unknown"
+                futures_margin_balance_usd = 0.0
+                futures_available_usd = 0.0
+                futures_target_usd = 0.0
             configs_lite.append({
                 "id": bundle.config_id,
                 "group_id": bundle.group_id,
@@ -5090,6 +5219,10 @@ class DashboardServer:
                 "hedge_cumulative_funding_usd": hedge_cumulative_funding_usd,
                 "hedge_executor_errors": hedge_executor_errors,
                 "hedge_safety_paused": hedge_safety_paused,
+                "hedge_reserve_status": hedge_reserve_status,
+                "futures_margin_balance_usd": futures_margin_balance_usd,
+                "futures_available_usd": futures_available_usd,
+                "futures_target_usd": futures_target_usd,
                 "anomaly_paused": bool(getattr(bundle.monitor, "_anomaly_paused", False)),
                 "manual_stopped": bool(getattr(bundle.monitor, "_manual_stopped", False)),
             })
