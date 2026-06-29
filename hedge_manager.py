@@ -71,6 +71,27 @@ def _futures_to_spot(futures_symbol: str) -> str | None:
     return futures_symbol
 
 
+def _to_float(value, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _reserve_numbers(info: dict) -> tuple[float, float, float, float]:
+    wallet = _to_float(info.get("total_wallet_balance"))
+    margin = _to_float(info.get("total_margin_balance"), wallet)
+    available = _to_float(info.get("available_balance"))
+    max_withdraw = _to_float(info.get("max_withdraw_amount"))
+    return wallet, margin, available, max_withdraw
+
+
 @dataclass
 class ShadowHedge:
     """Per-symbol shadow hedge state.
@@ -393,8 +414,8 @@ class HedgeManager:
             if not futures_sym:
                 continue
             try:
-                size = float(pos.get("positionAmt", 0.0) or 0.0)
-            except (TypeError, ValueError):
+                size = _to_float(pos.get("size", pos.get("positionAmt")))
+            except AttributeError:
                 size = 0.0
             if abs(size) > 0:
                 symbols_to_close.add(futures_sym)
@@ -835,10 +856,7 @@ class HedgeManager:
             if self._is_real_mode() and self._executor is not None:
                 info = await self._executor.get_account_info()
                 if info:
-                    wallet = float(info.get("total_wallet_balance", 0.0) or 0.0)
-                    margin = float(info.get("total_margin_balance", 0.0) or wallet)
-                    available = float(info.get("available_balance", 0.0) or 0.0)
-                    max_withdraw = float(info.get("max_withdraw_amount", 0.0) or 0.0)
+                    wallet, margin, available, max_withdraw = _reserve_numbers(info)
             else:
                 available = float(getattr(self._balance, "binance_futures_usdt", 0.0) or 0.0)
                 wallet = margin = max_withdraw = available
@@ -879,10 +897,7 @@ class HedgeManager:
             )
             return self._reserve_status
 
-        wallet = float(info.get("total_wallet_balance", 0.0) or 0.0)
-        margin = float(info.get("total_margin_balance", 0.0) or wallet)
-        available = float(info.get("available_balance", 0.0) or 0.0)
-        max_withdraw = float(info.get("max_withdraw_amount", 0.0) or 0.0)
+        wallet, margin, available, max_withdraw = _reserve_numbers(info)
         equity = margin if margin > 0 else wallet
         status = self._classify_reserve(equity)
 
@@ -908,10 +923,7 @@ class HedgeManager:
                     )
                     info = await self._executor.get_account_info()
                     if info:
-                        wallet = float(info.get("total_wallet_balance", 0.0) or 0.0)
-                        margin = float(info.get("total_margin_balance", 0.0) or wallet)
-                        available = float(info.get("available_balance", 0.0) or 0.0)
-                        max_withdraw = float(info.get("max_withdraw_amount", 0.0) or 0.0)
+                        wallet, margin, available, max_withdraw = _reserve_numbers(info)
                         equity = margin if margin > 0 else wallet
                         status = self._classify_reserve(equity)
                 else:
@@ -938,10 +950,7 @@ class HedgeManager:
                     )
                     info = await self._executor.get_account_info()
                     if info:
-                        wallet = float(info.get("total_wallet_balance", 0.0) or 0.0)
-                        margin = float(info.get("total_margin_balance", 0.0) or wallet)
-                        available = float(info.get("available_balance", 0.0) or 0.0)
-                        max_withdraw = float(info.get("max_withdraw_amount", 0.0) or 0.0)
+                        wallet, margin, available, max_withdraw = _reserve_numbers(info)
                         equity = margin if margin > 0 else wallet
                         status = self._classify_reserve(equity)
                 else:
@@ -1151,7 +1160,7 @@ class HedgeManager:
         for spot_sym, sh in list(self._shadows.items()):
             f_sym, mult = get_futures_symbol(spot_sym)
             real = actual_by_spot.get(spot_sym)
-            real_size = real["size"] if real else 0.0
+            real_size = _to_float(real.get("size")) if real else 0.0
             # Expected real size if shadow is correct: short on real = -shadow_qty/mult
             expected_real = -(sh.qty / mult) if sh.qty > 0 else 0.0
             diff = abs(real_size - expected_real)
@@ -1172,11 +1181,11 @@ class HedgeManager:
             elif sh.entry_price == 0.0 and real:
                 # Same anti-phantom-PnL logic as the orphan branch below:
                 # prefer current markPrice over the exchange's stale entry.
-                current_mark = float(real.get("mark_price", 0.0))
+                current_mark = _to_float(real.get("mark_price"))
                 if current_mark > 0:
                     sh.entry_price = current_mark
                 else:
-                    sh.entry_price = float(real.get("entry_price", 0.0))
+                    sh.entry_price = _to_float(real.get("entry_price"))
                 sh.opened_at = time.time()
                 sh.last_funding_check_ts = time.time()
 
@@ -1185,13 +1194,13 @@ class HedgeManager:
             if spot_sym in self._shadows:
                 continue
             f_sym, mult = get_futures_symbol(spot_sym)
-            real_size = real["size"]
+            real_size = _to_float(real.get("size"))
             new_shadow_qty = -real_size * mult
             if new_shadow_qty == 0.0:
                 continue
             n_orphan += 1
-            historical_entry = float(real.get("entry_price", 0.0))
-            current_mark = float(real.get("mark_price", 0.0))
+            historical_entry = _to_float(real.get("entry_price"))
+            current_mark = _to_float(real.get("mark_price"))
             # Adopt at current markPrice — the historical entry on the
             # exchange's own position record can be days/sessions stale, and
             # on testnet the markPrice oracle drifts independently from real

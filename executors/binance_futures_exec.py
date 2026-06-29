@@ -33,7 +33,7 @@ import hashlib
 import hmac
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 import aiohttp
@@ -54,6 +54,34 @@ logger = logging.getLogger(__name__)
 _TESTNET_BASE_URL = "https://testnet.binancefuture.com"
 _LIVE_BASE_URL = "https://fapi.binance.com"
 _SPOT_LIVE_BASE_URL = "https://api.binance.com"
+
+
+def _is_blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    if _is_blank(value):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    if _is_blank(value):
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _number_with_fallback(primary: Any, fallback: Any, default: float = 0.0) -> float:
+    if _is_blank(primary):
+        return _to_float(fallback, default)
+    return _to_float(primary, default)
 
 
 class BinanceFuturesExecutor(ExecutionEngine):
@@ -208,19 +236,19 @@ class BinanceFuturesExecutor(ExecutionEngine):
             for f in sym_info.get("filters", []):
                 t = f.get("filterType")
                 if t == "LOT_SIZE":
-                    step = float(f.get("stepSize", 0) or 0)
-                    min_qty = float(f.get("minQty", 0) or 0)
+                    step = _to_float(f.get("stepSize"))
+                    min_qty = _to_float(f.get("minQty"))
                 elif t == "PRICE_FILTER":
-                    tick = float(f.get("tickSize", 0) or 0)
+                    tick = _to_float(f.get("tickSize"))
                 elif t in ("MIN_NOTIONAL", "NOTIONAL"):
-                    min_notional = float(f.get("notional", f.get("minNotional", 0)) or 0)
+                    min_notional = _to_float(f.get("notional", f.get("minNotional")))
             self._symbol_filters[sym] = {
                 "step": step,
                 "tick": tick,
                 "min_qty": min_qty,
                 "min_notional": min_notional,
-                "qty_precision": int(sym_info.get("quantityPrecision", 0)),
-                "price_precision": int(sym_info.get("pricePrecision", 0)),
+                "qty_precision": _to_int(sym_info.get("quantityPrecision")),
+                "price_precision": _to_int(sym_info.get("pricePrecision")),
             }
         self._exchange_info_loaded = True
         logger.info(
@@ -269,7 +297,7 @@ class BinanceFuturesExecutor(ExecutionEngine):
             "POST", "/fapi/v1/leverage",
             {"symbol": symbol, "leverage": int(leverage)},
         )
-        if status == 200 and data.get("leverage") == leverage:
+        if status == 200 and _to_int(data.get("leverage")) == leverage:
             self._leverage_set[symbol] = leverage
             logger.info(f"[BinanceFutures] Leverage set: {symbol}={leverage}x ({self._mode})")
             return True
@@ -420,17 +448,20 @@ class BinanceFuturesExecutor(ExecutionEngine):
         if not isinstance(rows, list) or not rows:
             return None
         row = rows[0]
-        size = float(row.get("positionAmt", 0.0))
+        if not isinstance(row, dict):
+            return None
+        size = _to_float(row.get("positionAmt"))
         return {
             "symbol": symbol,
+            "positionAmt": size,
             "size": size,                                  # signed: negative=short, positive=long
-            "entry_price": float(row.get("entryPrice", 0.0)),
-            "mark_price": float(row.get("markPrice", 0.0)),
-            "unrealized_pnl": float(row.get("unRealizedProfit", 0.0)),
-            "leverage": int(row.get("leverage", 1)),
+            "entry_price": _to_float(row.get("entryPrice")),
+            "mark_price": _to_float(row.get("markPrice")),
+            "unrealized_pnl": _to_float(row.get("unRealizedProfit")),
+            "leverage": _to_int(row.get("leverage"), 1),
             "margin_type": str(row.get("marginType", "")).lower(),
-            "isolated_wallet": float(row.get("isolatedWallet", 0.0)),
-            "liquidation_price": float(row.get("liquidationPrice", 0.0)),
+            "isolated_wallet": _to_float(row.get("isolatedWallet")),
+            "liquidation_price": _to_float(row.get("liquidationPrice")),
         }
 
     async def get_all_positions(self) -> list[dict]:
@@ -444,19 +475,19 @@ class BinanceFuturesExecutor(ExecutionEngine):
             return []
         result = []
         for row in rows:
-            try:
-                size = float(row.get("positionAmt", 0.0))
-            except (TypeError, ValueError):
+            if not isinstance(row, dict):
                 continue
+            size = _to_float(row.get("positionAmt"))
             if size == 0.0:
                 continue
             result.append({
                 "symbol": row.get("symbol"),
+                "positionAmt": size,
                 "size": size,
-                "entry_price": float(row.get("entryPrice", 0.0)),
-                "mark_price": float(row.get("markPrice", 0.0)),
-                "unrealized_pnl": float(row.get("unRealizedProfit", 0.0)),
-                "leverage": int(row.get("leverage", 1)),
+                "entry_price": _to_float(row.get("entryPrice")),
+                "mark_price": _to_float(row.get("markPrice")),
+                "unrealized_pnl": _to_float(row.get("unRealizedProfit")),
+                "leverage": _to_int(row.get("leverage"), 1),
                 "margin_type": str(row.get("marginType", "")).lower(),
             })
         return result
@@ -467,12 +498,35 @@ class BinanceFuturesExecutor(ExecutionEngine):
         if status != 200:
             logger.warning(f"[BinanceFutures] get_account_info failed: resp={data}")
             return {}
+        assets = data.get("assets", []) if isinstance(data, dict) else []
+        usdt_asset = next(
+            (
+                row for row in assets
+                if isinstance(row, dict) and row.get("asset") == "USDT"
+            ),
+            {},
+        )
         return {
-            "total_wallet_balance": float(data.get("totalWalletBalance", 0.0)),
-            "total_unrealized_pnl": float(data.get("totalUnrealizedProfit", 0.0)),
-            "total_margin_balance": float(data.get("totalMarginBalance", 0.0)),
-            "available_balance": float(data.get("availableBalance", 0.0)),
-            "max_withdraw_amount": float(data.get("maxWithdrawAmount", 0.0)),
+            "total_wallet_balance": _number_with_fallback(
+                data.get("totalWalletBalance"),
+                usdt_asset.get("walletBalance"),
+            ),
+            "total_unrealized_pnl": _number_with_fallback(
+                data.get("totalUnrealizedProfit"),
+                usdt_asset.get("unrealizedProfit"),
+            ),
+            "total_margin_balance": _number_with_fallback(
+                data.get("totalMarginBalance"),
+                usdt_asset.get("marginBalance"),
+            ),
+            "available_balance": _number_with_fallback(
+                data.get("availableBalance"),
+                usdt_asset.get("availableBalance"),
+            ),
+            "max_withdraw_amount": _number_with_fallback(
+                data.get("maxWithdrawAmount"),
+                usdt_asset.get("maxWithdrawAmount"),
+            ),
         }
 
     async def get_balance(self, asset: str = "USDT") -> float:
@@ -484,8 +538,8 @@ class BinanceFuturesExecutor(ExecutionEngine):
         if not isinstance(rows, list):
             return 0.0
         for row in rows:
-            if row.get("asset") == asset:
-                return float(row.get("availableBalance", 0.0))
+            if isinstance(row, dict) and row.get("asset") == asset:
+                return _to_float(row.get("availableBalance"))
         return 0.0
 
     async def transfer_spot_to_futures(
@@ -567,8 +621,8 @@ class BinanceFuturesExecutor(ExecutionEngine):
     ) -> TradeResult:
         """Parse Binance Futures order response into TradeResult."""
         order_id = str(data.get("orderId", ""))
-        executed_qty = float(data.get("executedQty", "0"))
-        cum_quote = float(data.get("cumQuote", "0"))     # USD value filled
+        executed_qty = _to_float(data.get("executedQty"))
+        cum_quote = _to_float(data.get("cumQuote"))     # USD value filled
         avg_price = cum_quote / executed_qty if executed_qty > 0 else 0.0
         # Binance Futures market orders settle in USDT margin; commission asset
         # is USDT in the response. We don't get fills array here unless we
