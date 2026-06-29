@@ -1172,6 +1172,16 @@ class DashboardServer:
         "event_driven_seller_penalty_pct",  # 0 = no EVD penalty
         "one_leg_failure_rate",  # 0 = no one-leg simulation
         "max_position_multiplier",  # 0 = no per-position cap
+        "order_book_depth_buffer_multiplier",  # 0 = require requested depth only
+        "missing_order_book_penalty_pct",  # 0 = no synthetic penalty when missing books allowed
+        "max_leg_slippage_pct",  # 0 = no per-leg cap
+        "max_total_slippage_pct",  # 0 = no total cap
+        "slippage_safety_multiplier",  # 0 = raw slippage plus latency buffer only
+        "slippage_latency_buffer_pct",  # 0 = no latency buffer
+        "marketable_limit_price_buffer_pct",  # 0 = cap exactly at observed bid/ask
+        "max_book_age_seconds",  # 0 = no age ceiling when guard enabled
+        "event_driven_max_book_age_seconds",  # 0 = no event-driven age ceiling
+        "demo_one_leg_drill_every_n",  # 0 = disabled
         "auto_disable_volume_threshold_usd",  # 0 = never auto-disable
         "trading_float_multiplier",  # 0 = trading float disabled entirely
         "trading_float_replenish_trigger",  # 0 = never auto-replenish
@@ -1202,6 +1212,19 @@ class DashboardServer:
         "hedge_evaluation_interval_seconds": "hedging_enabled=false",
         "hedge_dust_threshold_usd": "hedging_enabled=false",
         "hedge_adjust_threshold_pct": "hedging_enabled=false",
+        "binance_futures_taker_fee_rate": "hedging_enabled=false",
+        "binance_futures_bnb_discount_enabled": "hedging_enabled=false",
+        "binance_futures_bnb_discount_pct": "hedging_enabled=false",
+        "binance_futures_referral_cashback_enabled": "hedging_enabled=false",
+        "binance_futures_referral_cashback_pct": "hedging_enabled=false",
+        "binance_futures_bnb_auto_topup_enabled": "hedging_enabled=false",
+        "binance_futures_bnb_min_usd": "hedging_enabled=false",
+        "binance_futures_bnb_target_pct": "hedging_enabled=false",
+        "binance_futures_bnb_transfer_min_usd": "hedging_enabled=false",
+        "binance_spot_bnb_min_usd": "hedging_enabled=false",
+        "binance_spot_bnb_auto_buy_enabled": "hedging_enabled=false",
+        "binance_spot_bnb_target_pct": "hedging_enabled=false",
+        "binance_spot_bnb_buy_min_usd": "hedging_enabled=false",
         "futures_capital_transfer_min_usd": "hedging_enabled=false",
         "scoring_window": "(no disable — would divide by zero)",
         "evaluation_interval": "(no disable — would tight-loop)",
@@ -1266,6 +1289,24 @@ class DashboardServer:
         "net_pct_sizing_enabled": (bool, None, None),
         "net_pct_multiplier_cap": (float, 1.0, 10.0),
         "spread_persistence_ticks": (int, 0, 5),
+        "strict_slippage_guards_enabled": (bool, None, None),
+        "require_order_book_depth": (bool, None, None),
+        "order_book_depth_buffer_multiplier": (float, 0.0, 10.0),
+        "missing_order_book_penalty_pct": (float, 0.0, 10.0),
+        "max_leg_slippage_pct": (float, 0.0, 10.0),
+        "max_total_slippage_pct": (float, 0.0, 10.0),
+        "slippage_safety_multiplier": (float, 0.0, 10.0),
+        "slippage_latency_buffer_pct": (float, 0.0, 10.0),
+        "book_age_guard_enabled": (bool, None, None),
+        "max_book_age_seconds": (float, 0.0, 120.0),
+        "event_driven_max_book_age_seconds": (float, 0.0, 300.0),
+        "depth_aware_trade_size_shrink_enabled": (bool, None, None),
+        "min_depth_shrink_ratio": (float, 0.0, 1.0),
+        "spot_execution_order_mode": (str, None, None),
+        "marketable_limit_price_buffer_pct": (float, 0.0, 10.0),
+        "demo_one_leg_drill_enabled": (bool, None, None),
+        "demo_one_leg_drill_every_n": (int, 0, 1000000),
+        "demo_one_leg_drill_side": (str, None, None),
         "event_driven_seller_penalty_pct": (float, 0.0, 1.0),
         "one_leg_failure_rate": (float, 0.0, 0.20),
         "one_leg_unwind_slippage_mult": (float, 1.0, 5.0),
@@ -1328,6 +1369,19 @@ class DashboardServer:
         "hedge_leverage": (int, 1, 5),
         "hedge_margin_buffer_pct": (float, 0.0, 1.0),
         "hedge_adjust_threshold_pct": (float, 0.01, 1.0),
+        "binance_futures_taker_fee_rate": (float, 0.0, 0.01),
+        "binance_futures_bnb_discount_enabled": (bool, None, None),
+        "binance_futures_bnb_discount_pct": (float, 0.0, 1.0),
+        "binance_futures_referral_cashback_enabled": (bool, None, None),
+        "binance_futures_referral_cashback_pct": (float, 0.0, 1.0),
+        "binance_futures_bnb_auto_topup_enabled": (bool, None, None),
+        "binance_futures_bnb_min_usd": (float, 0.0, 10000.0),
+        "binance_futures_bnb_target_pct": (float, 0.0, 0.20),
+        "binance_futures_bnb_transfer_min_usd": (float, 0.0, 10000.0),
+        "binance_spot_bnb_min_usd": (float, 0.0, 10000.0),
+        "binance_spot_bnb_auto_buy_enabled": (bool, None, None),
+        "binance_spot_bnb_target_pct": (float, 0.0, 0.20),
+        "binance_spot_bnb_buy_min_usd": (float, 0.0, 10000.0),
         "futures_capital_target_pct": (float, 0.0, 0.90),
         "futures_capital_topup_pct": (float, 0.0, 0.90),
         "futures_capital_emergency_pct": (float, 0.0, 0.90),
@@ -1354,6 +1408,8 @@ class DashboardServer:
 
     _SETTINGS_ENUMS: dict[str, list[str]] = {
         "execution_mode": ["simulation", "demo", "demo_only"],
+        "spot_execution_order_mode": ["market", "marketable_limit_ioc", "marketable_limit_fok"],
+        "demo_one_leg_drill_side": ["buy", "sell", "alternate"],
         "hedge_execution_mode": ["simulation", "testnet", "live"],
         "regime_weak_rebalance_policy": ["strict", "refill_only", "off"],
     }
@@ -2573,13 +2629,19 @@ class DashboardServer:
         except Exception:
             return False
 
-        # Include hedge unrealized PnL — same convention as _build_state's
+        # Include net hedge PnL — same convention as _build_state's
         # portfolio_value, so drawdown/peak/trade-size all share one definition.
         hedge_pnl_usd = 0.0
         hm = getattr(self._monitor, "_hedge_manager", None)
         if hm is not None:
             try:
-                hedge_pnl_usd = float(hm.get_debug_state().get("total_unrealized_pnl_usd", 0.0))
+                hedge_state = hm.get_debug_state()
+                hedge_pnl_usd = float(
+                    hedge_state.get(
+                        "total_pnl_usd",
+                        hedge_state.get("total_unrealized_pnl_usd", 0.0),
+                    )
+                )
             except Exception:
                 hedge_pnl_usd = 0.0
 
@@ -3424,6 +3486,87 @@ class DashboardServer:
                 continue
         return entries
 
+    def _sync_slippage_execution_settings(
+        self,
+        settings: dict,
+        synced: list[str] | None = None,
+    ) -> None:
+        """Apply slippage realism and spot execution settings to live objects."""
+        targets = [
+            obj for obj in (getattr(self, "_monitor", None), getattr(self, "_optimizer", None))
+            if obj is not None
+        ]
+        bool_fields = {
+            "strict_slippage_guards_enabled": "_strict_slippage_guards_enabled",
+            "require_order_book_depth": "_require_order_book_depth",
+            "book_age_guard_enabled": "_book_age_guard_enabled",
+            "depth_aware_trade_size_shrink_enabled": "_depth_aware_trade_size_shrink_enabled",
+        }
+        float_fields = {
+            "order_book_depth_buffer_multiplier": "_order_book_depth_buffer_multiplier",
+            "missing_order_book_penalty_pct": "_missing_order_book_penalty_pct",
+            "max_leg_slippage_pct": "_max_leg_slippage_pct",
+            "max_total_slippage_pct": "_max_total_slippage_pct",
+            "slippage_safety_multiplier": "_slippage_safety_multiplier",
+            "slippage_latency_buffer_pct": "_slippage_latency_buffer_pct",
+            "max_book_age_seconds": "_max_book_age_seconds",
+            "event_driven_max_book_age_seconds": "_event_driven_max_book_age_seconds",
+            "min_depth_shrink_ratio": "_min_depth_shrink_ratio",
+        }
+
+        for key, attr in bool_fields.items():
+            if key not in settings:
+                continue
+            new_val = bool(settings[key])
+            for target in targets:
+                old_val = getattr(target, attr, None)
+                setattr(target, attr, new_val)
+                if synced is not None and old_val != new_val:
+                    synced.append(f"{key}: {old_val} -> {new_val}")
+
+        for key, attr in float_fields.items():
+            if key not in settings:
+                continue
+            new_val = max(0.0, float(settings[key]))
+            for target in targets:
+                old_val = getattr(target, attr, None)
+                setattr(target, attr, new_val)
+                if synced is not None and old_val != new_val:
+                    synced.append(f"{key}: {old_val} -> {new_val}")
+
+        executor = getattr(getattr(self, "_monitor", None), "_executor", None)
+        if executor is not None:
+            if "spot_execution_order_mode" in settings:
+                old_val = getattr(executor, "_execution_order_mode", None)
+                new_val = str(settings["spot_execution_order_mode"])
+                executor._execution_order_mode = new_val
+                if synced is not None and old_val != new_val:
+                    synced.append(f"spot_execution_order_mode: {old_val} -> {new_val}")
+            if "marketable_limit_price_buffer_pct" in settings:
+                old_val = getattr(executor, "_marketable_limit_price_buffer_pct", None)
+                new_val = max(0.0, float(settings["marketable_limit_price_buffer_pct"]))
+                executor._marketable_limit_price_buffer_pct = new_val
+                if synced is not None and old_val != new_val:
+                    synced.append(f"marketable_limit_buffer: {old_val} -> {new_val}")
+            if "demo_one_leg_drill_enabled" in settings:
+                old_val = getattr(executor, "_demo_one_leg_drill_enabled", None)
+                new_val = bool(settings["demo_one_leg_drill_enabled"])
+                executor._demo_one_leg_drill_enabled = new_val
+                if synced is not None and old_val != new_val:
+                    synced.append(f"demo_one_leg_drill_enabled: {old_val} -> {new_val}")
+            if "demo_one_leg_drill_every_n" in settings:
+                old_val = getattr(executor, "_demo_one_leg_drill_every_n", None)
+                new_val = max(0, int(settings["demo_one_leg_drill_every_n"]))
+                executor._demo_one_leg_drill_every_n = new_val
+                if synced is not None and old_val != new_val:
+                    synced.append(f"demo_one_leg_drill_every_n: {old_val} -> {new_val}")
+            if "demo_one_leg_drill_side" in settings:
+                old_val = getattr(executor, "_demo_one_leg_drill_side", None)
+                new_val = str(settings["demo_one_leg_drill_side"])
+                executor._demo_one_leg_drill_side = new_val
+                if synced is not None and old_val != new_val:
+                    synced.append(f"demo_one_leg_drill_side: {old_val} -> {new_val}")
+
     def _apply_settings(self, settings: dict, *, log_global_dump: bool = True) -> None:
         """Apply new settings: restart discovery with updated parameters.
 
@@ -3593,6 +3736,7 @@ class DashboardServer:
             self._monitor._one_leg_unwind_slippage_mult = float(settings["one_leg_unwind_slippage_mult"])
         if "max_position_multiplier" in settings:
             self._monitor._max_position_multiplier = float(settings["max_position_multiplier"])
+        self._sync_slippage_execution_settings(settings)
 
         # Price momentum filter (Feature 3) + Periodic inventory rebalance (Feature 4)
         if self._optimizer:
@@ -3696,6 +3840,32 @@ class DashboardServer:
                 hm_kwargs["margin_buffer_pct"] = float(settings["hedge_margin_buffer_pct"])
             if "hedge_adjust_threshold_pct" in settings:
                 hm_kwargs["adjust_threshold_pct"] = float(settings["hedge_adjust_threshold_pct"])
+            if "binance_futures_taker_fee_rate" in settings:
+                hm_kwargs["futures_taker_fee_rate"] = float(settings["binance_futures_taker_fee_rate"])
+            if "binance_futures_bnb_discount_enabled" in settings:
+                hm_kwargs["futures_bnb_discount_enabled"] = bool(settings["binance_futures_bnb_discount_enabled"])
+            if "binance_futures_bnb_discount_pct" in settings:
+                hm_kwargs["futures_bnb_discount_pct"] = float(settings["binance_futures_bnb_discount_pct"])
+            if "binance_futures_referral_cashback_enabled" in settings:
+                hm_kwargs["futures_referral_cashback_enabled"] = bool(settings["binance_futures_referral_cashback_enabled"])
+            if "binance_futures_referral_cashback_pct" in settings:
+                hm_kwargs["futures_referral_cashback_pct"] = float(settings["binance_futures_referral_cashback_pct"])
+            if "binance_futures_bnb_auto_topup_enabled" in settings:
+                hm_kwargs["futures_bnb_auto_topup_enabled"] = bool(settings["binance_futures_bnb_auto_topup_enabled"])
+            if "binance_futures_bnb_min_usd" in settings:
+                hm_kwargs["futures_bnb_min_usd"] = float(settings["binance_futures_bnb_min_usd"])
+            if "binance_futures_bnb_target_pct" in settings:
+                hm_kwargs["futures_bnb_target_pct"] = float(settings["binance_futures_bnb_target_pct"])
+            if "binance_futures_bnb_transfer_min_usd" in settings:
+                hm_kwargs["futures_bnb_transfer_min_usd"] = float(settings["binance_futures_bnb_transfer_min_usd"])
+            if "binance_spot_bnb_min_usd" in settings:
+                hm_kwargs["spot_bnb_min_usd"] = float(settings["binance_spot_bnb_min_usd"])
+            if "binance_spot_bnb_auto_buy_enabled" in settings:
+                hm_kwargs["spot_bnb_auto_buy_enabled"] = bool(settings["binance_spot_bnb_auto_buy_enabled"])
+            if "binance_spot_bnb_target_pct" in settings:
+                hm_kwargs["spot_bnb_target_pct"] = float(settings["binance_spot_bnb_target_pct"])
+            if "binance_spot_bnb_buy_min_usd" in settings:
+                hm_kwargs["spot_bnb_buy_min_usd"] = float(settings["binance_spot_bnb_buy_min_usd"])
             if "total_capital" in settings:
                 hm_kwargs["total_capital"] = float(settings["total_capital"])
             if "futures_capital_target_pct" in settings:
@@ -3877,6 +4047,7 @@ class DashboardServer:
                 self._optimizer._event_driven_seller_penalty = float(settings["event_driven_seller_penalty_pct"])
         if "max_position_multiplier" in settings:
             self._monitor._max_position_multiplier = float(settings["max_position_multiplier"])
+        self._sync_slippage_execution_settings(settings, synced)
 
         # Optimizer settings (no reset — just sync values)
         if self._optimizer:
@@ -3994,6 +4165,32 @@ class DashboardServer:
                 hm_kwargs["margin_buffer_pct"] = float(settings["hedge_margin_buffer_pct"])
             if "hedge_adjust_threshold_pct" in settings:
                 hm_kwargs["adjust_threshold_pct"] = float(settings["hedge_adjust_threshold_pct"])
+            if "binance_futures_taker_fee_rate" in settings:
+                hm_kwargs["futures_taker_fee_rate"] = float(settings["binance_futures_taker_fee_rate"])
+            if "binance_futures_bnb_discount_enabled" in settings:
+                hm_kwargs["futures_bnb_discount_enabled"] = bool(settings["binance_futures_bnb_discount_enabled"])
+            if "binance_futures_bnb_discount_pct" in settings:
+                hm_kwargs["futures_bnb_discount_pct"] = float(settings["binance_futures_bnb_discount_pct"])
+            if "binance_futures_referral_cashback_enabled" in settings:
+                hm_kwargs["futures_referral_cashback_enabled"] = bool(settings["binance_futures_referral_cashback_enabled"])
+            if "binance_futures_referral_cashback_pct" in settings:
+                hm_kwargs["futures_referral_cashback_pct"] = float(settings["binance_futures_referral_cashback_pct"])
+            if "binance_futures_bnb_auto_topup_enabled" in settings:
+                hm_kwargs["futures_bnb_auto_topup_enabled"] = bool(settings["binance_futures_bnb_auto_topup_enabled"])
+            if "binance_futures_bnb_min_usd" in settings:
+                hm_kwargs["futures_bnb_min_usd"] = float(settings["binance_futures_bnb_min_usd"])
+            if "binance_futures_bnb_target_pct" in settings:
+                hm_kwargs["futures_bnb_target_pct"] = float(settings["binance_futures_bnb_target_pct"])
+            if "binance_futures_bnb_transfer_min_usd" in settings:
+                hm_kwargs["futures_bnb_transfer_min_usd"] = float(settings["binance_futures_bnb_transfer_min_usd"])
+            if "binance_spot_bnb_min_usd" in settings:
+                hm_kwargs["spot_bnb_min_usd"] = float(settings["binance_spot_bnb_min_usd"])
+            if "binance_spot_bnb_auto_buy_enabled" in settings:
+                hm_kwargs["spot_bnb_auto_buy_enabled"] = bool(settings["binance_spot_bnb_auto_buy_enabled"])
+            if "binance_spot_bnb_target_pct" in settings:
+                hm_kwargs["spot_bnb_target_pct"] = float(settings["binance_spot_bnb_target_pct"])
+            if "binance_spot_bnb_buy_min_usd" in settings:
+                hm_kwargs["spot_bnb_buy_min_usd"] = float(settings["binance_spot_bnb_buy_min_usd"])
             if "total_capital" in settings:
                 hm_kwargs["total_capital"] = float(settings["total_capital"])
             if "futures_capital_target_pct" in settings:
@@ -4484,6 +4681,23 @@ class DashboardServer:
             f"net_pnl_gate: warmup={s.get('net_pnl_gate_warmup_trades', 10)} trades, grace={s.get('net_pnl_gate_grace_seconds', 1800)}s",
             f"net_pct_sizing={s.get('net_pct_sizing_enabled', True)}, cap={s.get('net_pct_multiplier_cap', 2.5)}",
             f"spread_persistence={s.get('spread_persistence_ticks', 1)} ticks, evd_penalty={s.get('event_driven_seller_penalty_pct', 0.05)}, one_leg_rate={s.get('one_leg_failure_rate', 0.02)}, max_pos_mult={s.get('max_position_multiplier', 5.0)}, fee_threshold_mult={s.get('fee_threshold_multiplier', 0.5)}",
+            f"slippage_guard: enabled={s.get('strict_slippage_guards_enabled', True)}, "
+            f"require_depth={s.get('require_order_book_depth', True)}, "
+            f"depth_buffer={s.get('order_book_depth_buffer_multiplier', 1.25)}x, "
+            f"max_leg={s.get('max_leg_slippage_pct', 0.05):.4f}%, "
+            f"max_total={s.get('max_total_slippage_pct', 0.08):.4f}%, "
+            f"safety_mult={s.get('slippage_safety_multiplier', 1.5)}x, "
+            f"latency_buffer={s.get('slippage_latency_buffer_pct', 0.01):.4f}%, "
+            f"missing_book_penalty={s.get('missing_order_book_penalty_pct', 0.25):.4f}%",
+            f"book_age_guard: enabled={s.get('book_age_guard_enabled', True)}, "
+            f"max={s.get('max_book_age_seconds', 2.0):.2f}s, "
+            f"event_driven_max={s.get('event_driven_max_book_age_seconds', 15.0):.2f}s, "
+            f"depth_shrink={'on' if s.get('depth_aware_trade_size_shrink_enabled', True) else 'off'}, "
+            f"min_shrink_ratio={s.get('min_depth_shrink_ratio', 0.5):.2f}",
+            f"spot_execution_order: mode={s.get('spot_execution_order_mode', 'marketable_limit_fok')}, "
+            f"limit_buffer={s.get('marketable_limit_price_buffer_pct', 0.02):.4f}%, "
+            f"one_leg_drill={'on' if s.get('demo_one_leg_drill_enabled', False) else 'off'} "
+            f"every={s.get('demo_one_leg_drill_every_n', 0)} side={s.get('demo_one_leg_drill_side', 'alternate')}",
             f"demotion: period={s.get('demotion_period', 900)}s, cooldown_mult={s.get('demotion_cooldown_multiplier', 5.0)}, realloc_horizon={s.get('reallocation_cost_horizon', 2)}h",
             f"thresholds: trading={s.get('trading_score_threshold', 0.01)}, strong={s.get('strong_score_threshold', 0.1)}, very_strong={s.get('very_strong_score_threshold', 0.3)}",
             f"stability: factor={s.get('score_stability_factor', 0.5)}, min_seconds={s.get('score_stability_seconds', 120)}s",
@@ -4515,7 +4729,21 @@ class DashboardServer:
             f"eval_interval={s.get('hedge_evaluation_interval_seconds', 60.0):.0f}s, "
             f"leverage={s.get('hedge_leverage', 2)}x, "
             f"margin_buffer={s.get('hedge_margin_buffer_pct', 0.20)*100:.0f}%, "
-            f"adjust_threshold={s.get('hedge_adjust_threshold_pct', 0.01)*100:.0f}%",
+            f"adjust_threshold={s.get('hedge_adjust_threshold_pct', 0.01)*100:.0f}%, "
+            f"futures_taker_fee={s.get('binance_futures_taker_fee_rate', 0.0005)*100:.4f}%, "
+            f"bnb_discount={s.get('binance_futures_bnb_discount_pct', 0.10)*100:.0f}% "
+            f"({'on' if s.get('binance_futures_bnb_discount_enabled', True) else 'off'}), "
+            f"referral_cashback={s.get('binance_futures_referral_cashback_pct', 0.10)*100:.0f}% "
+            f"({'on' if s.get('binance_futures_referral_cashback_enabled', False) else 'off'}), "
+            f"futures_bnb_topup={'on' if s.get('binance_futures_bnb_auto_topup_enabled', True) else 'off'}, "
+            f"bnb_min=${s.get('binance_futures_bnb_min_usd', 5.0):.0f}, "
+            f"bnb_target={s.get('binance_futures_bnb_target_pct', 0.05)*100:.0f}%, "
+            f"bnb_transfer_min=${s.get('binance_futures_bnb_transfer_min_usd', 5.0):.0f}, "
+            f"spot_bnb_floor=${s.get('binance_spot_bnb_min_usd', 5.0):.0f}, "
+            f"spot_bnb_buy={'on' if s.get('binance_spot_bnb_auto_buy_enabled', True) else 'off'}, "
+            f"spot_bnb_target={s.get('binance_spot_bnb_target_pct', 0.01)*100:.0f}%, "
+            f"spot_bnb_buy_min=${s.get('binance_spot_bnb_buy_min_usd', 10.0):.0f}, "
+            f"spot_bnb_order=market",
             f"futures_reserve: target={s.get('futures_capital_target_pct', 0.40)*100:.0f}%, "
             f"topup={s.get('futures_capital_topup_pct', 0.35)*100:.0f}%, "
             f"emergency={s.get('futures_capital_emergency_pct', 0.30)*100:.0f}%, "
@@ -4540,6 +4768,17 @@ class DashboardServer:
                 "scoring_window", "evaluation_interval", "rebalance_roi_horizon",
                 "rebalance_roi_divisor", "net_pnl_gate_warmup_trades",
                 "net_pnl_gate_grace_seconds", "spread_persistence_ticks",
+                "strict_slippage_guards_enabled", "require_order_book_depth",
+                "order_book_depth_buffer_multiplier",
+                "missing_order_book_penalty_pct", "max_leg_slippage_pct",
+                "max_total_slippage_pct", "slippage_safety_multiplier",
+                "slippage_latency_buffer_pct", "book_age_guard_enabled",
+                "max_book_age_seconds", "event_driven_max_book_age_seconds",
+                "depth_aware_trade_size_shrink_enabled",
+                "min_depth_shrink_ratio", "spot_execution_order_mode",
+                "marketable_limit_price_buffer_pct",
+                "demo_one_leg_drill_enabled", "demo_one_leg_drill_every_n",
+                "demo_one_leg_drill_side",
                 "event_driven_seller_penalty_pct", "one_leg_failure_rate",
                 "max_position_multiplier", "anomaly_protection_enabled",
                 "circuit_breaker_window", "circuit_breaker_threshold",
@@ -4584,6 +4823,19 @@ class DashboardServer:
                 "hedge_leverage",
                 "hedge_margin_buffer_pct",
                 "hedge_adjust_threshold_pct",
+                "binance_futures_taker_fee_rate",
+                "binance_futures_bnb_discount_enabled",
+                "binance_futures_bnb_discount_pct",
+                "binance_futures_referral_cashback_enabled",
+                "binance_futures_referral_cashback_pct",
+                "binance_futures_bnb_auto_topup_enabled",
+                "binance_futures_bnb_min_usd",
+                "binance_futures_bnb_target_pct",
+                "binance_futures_bnb_transfer_min_usd",
+                "binance_spot_bnb_min_usd",
+                "binance_spot_bnb_auto_buy_enabled",
+                "binance_spot_bnb_target_pct",
+                "binance_spot_bnb_buy_min_usd",
                 "futures_capital_target_pct",
                 "futures_capital_topup_pct",
                 "futures_capital_emergency_pct",
@@ -4671,7 +4923,12 @@ class DashboardServer:
         if hedge_manager is not None:
             try:
                 hedge_state = hedge_manager.get_debug_state()
-                hedge_pnl_usd = float(hedge_state.get("total_unrealized_pnl_usd", 0.0))
+                hedge_pnl_usd = float(
+                    hedge_state.get(
+                        "total_pnl_usd",
+                        hedge_state.get("total_unrealized_pnl_usd", 0.0),
+                    )
+                )
             except Exception:
                 hedge_state = {}
                 hedge_pnl_usd = 0.0
@@ -4714,6 +4971,7 @@ class DashboardServer:
                     if getattr(monitor, "_fee_manager", None) else 0.0
                 )
                 hedge_funding = float(hedge_state.get("cumulative_funding_usd", 0.0))
+                hedge_fees = float(hedge_state.get("cumulative_execution_fees_usd", 0.0))
                 capital_basis = _capital_basis_for_display(balance, monitor, fallback)
                 portfolio_value = (
                     capital_basis
@@ -4721,6 +4979,7 @@ class DashboardServer:
                     - float(getattr(balance, "total_transfer_fees", 0.0))
                     + float(credited_cashback)
                     + hedge_funding
+                    - hedge_fees
                 )
             except Exception:
                 pass
@@ -4963,6 +5222,15 @@ class DashboardServer:
                 "total_transfers": len(self._balance.transfers),
                 "trades_per_minute": round(trades_per_min, 2),
                 "low_profit_skips": self._monitor._low_profit_skips,
+                "slippage_guard_skips": self._monitor._slippage_guard_skips,
+                "book_age_guard_skips": self._monitor._book_age_guard_skips,
+                "depth_shrink_count": self._monitor._depth_shrink_count,
+                "depth_shrink_usd": round(self._monitor._depth_shrink_usd, 2),
+                "slippage_guard_reasons": dict(self._monitor._slippage_guard_reason_counts),
+                "book_age_guard_reasons": dict(self._monitor._book_age_guard_reason_counts),
+                "slippage_guard_samples": dict(self._monitor._slippage_guard_reason_samples),
+                "book_age_guard_samples": dict(self._monitor._book_age_guard_reason_samples),
+                "depth_shrink_samples": dict(self._monitor._depth_shrink_samples),
                 "avg_trade_size": round(avg_trade_size, 2),
                 "min_trade_size": round(min_trade_size, 2),
                 "max_trade_size": round(max_trade_size, 2),
@@ -5290,7 +5558,13 @@ class DashboardServer:
                 hedge_open_count = int(hm_state.get("open_count", 0))
                 hedge_total_notional_usd = float(hm_state.get("total_notional_usd", 0.0))
                 hedge_total_unrealized_pnl_usd = float(hm_state.get("total_unrealized_pnl_usd", 0.0))
+                hedge_total_pnl_usd = float(
+                    hm_state.get("total_pnl_usd", hedge_total_unrealized_pnl_usd)
+                )
                 hedge_cumulative_funding_usd = float(hm_state.get("cumulative_funding_usd", 0.0))
+                hedge_cumulative_execution_fees_usd = float(
+                    hm_state.get("cumulative_execution_fees_usd", 0.0)
+                )
                 hedge_executor_errors = int(hm_state.get("total_executor_errors", 0))
                 hedge_safety_paused = bool(hm_state.get("safety_paused", False))
                 reserve_state = hm_state.get("futures_reserve", {}) or {}
@@ -5303,7 +5577,9 @@ class DashboardServer:
                 hedge_open_count = 0
                 hedge_total_notional_usd = 0.0
                 hedge_total_unrealized_pnl_usd = 0.0
+                hedge_total_pnl_usd = 0.0
                 hedge_cumulative_funding_usd = 0.0
+                hedge_cumulative_execution_fees_usd = 0.0
                 hedge_executor_errors = 0
                 hedge_safety_paused = False
                 hedge_reserve_status = "unknown"
@@ -5337,7 +5613,9 @@ class DashboardServer:
                 "hedge_open_count": hedge_open_count,
                 "hedge_total_notional_usd": hedge_total_notional_usd,
                 "hedge_total_unrealized_pnl_usd": hedge_total_unrealized_pnl_usd,
+                "hedge_total_pnl_usd": hedge_total_pnl_usd,
                 "hedge_cumulative_funding_usd": hedge_cumulative_funding_usd,
+                "hedge_cumulative_execution_fees_usd": hedge_cumulative_execution_fees_usd,
                 "hedge_executor_errors": hedge_executor_errors,
                 "hedge_safety_paused": hedge_safety_paused,
                 "hedge_reserve_status": hedge_reserve_status,

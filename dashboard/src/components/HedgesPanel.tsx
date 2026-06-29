@@ -33,8 +33,10 @@ function reserveBadge(status: string): { label: string; cls: string } {
     case 'healthy': return { label: 'RESERVE OK', cls: 'bg-emerald-700/30 text-emerald-300 border-emerald-600' };
     case 'topup_needed': return { label: 'TOP-UP NEEDED', cls: 'bg-amber-700/40 text-amber-300 border-amber-600' };
     case 'emergency': return { label: 'RESERVE LOW', cls: 'bg-red-700/40 text-red-300 border-red-600' };
+    case 'low': return { label: 'RESERVE LOW', cls: 'bg-red-700/40 text-red-300 border-red-600' };
     case 'unavailable': return { label: 'RESERVE UNKNOWN', cls: 'bg-red-700/40 text-red-300 border-red-600' };
     case 'disabled': return { label: 'RESERVE OFF', cls: 'bg-slate-700/40 text-slate-400 border-slate-600' };
+    case 'not_live': return { label: 'RESERVE OFF', cls: 'bg-slate-700/40 text-slate-400 border-slate-600' };
     default: return { label: 'RESERVE PENDING', cls: 'bg-blue-700/40 text-blue-300 border-blue-600' };
   }
 }
@@ -46,12 +48,22 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
   const badge = modeBadge(hedges.execution_mode);
   const totalCum = hedges.cumulative_funding_usd;
   const totalUnreal = hedges.total_unrealized_pnl_usd;
+  const totalFees = hedges.cumulative_execution_fees_usd ?? 0;
+  const totalNet = hedges.total_pnl_usd ?? (totalUnreal + totalCum - totalFees);
   const totalGap = hedges.total_hedge_gap_usd ?? 0;
   const gapClass = Math.abs(totalGap) <= 5 ? 'text-slate-200' : 'text-amber-400';
   const unhedgedTargets = hedges.unhedged_targets ?? [];
   const materialUnhedged = unhedgedTargets.filter(t => t.reason !== 'dust');
   const reserve = hedges.futures_reserve;
   const reserveUi = reserveBadge(reserve?.status ?? 'unknown');
+  const bnbReserve = reserve?.bnb_fee_reserve;
+  const showBnbReserve = !!(
+    bnbReserve
+    && bnbReserve.enabled
+    && (bnbReserve.discount_enabled || bnbReserve.spot_auto_buy_enabled)
+    && bnbReserve.status !== 'disabled'
+    && bnbReserve.status !== 'not_live'
+  );
 
   return (
     <div className="bg-slate-800/50 rounded-lg p-3 sm:p-5">
@@ -65,6 +77,11 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
         {reserve && (
           <span className={`px-2 py-0.5 text-[10px] font-semibold rounded border ${reserveUi.cls}`}>
             {reserveUi.label}
+          </span>
+        )}
+        {showBnbReserve && (
+          <span className={`px-2 py-0.5 text-[10px] font-semibold rounded border ${reserveBadge(bnbReserve.status).cls}`}>
+            BNB {bnbReserve.status.toUpperCase()}
           </span>
         )}
         {hedges.safety_paused && (
@@ -92,7 +109,7 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
       </div>
 
       {reserve && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+        <div className={`grid grid-cols-2 ${showBnbReserve ? 'sm:grid-cols-5' : 'sm:grid-cols-4'} gap-2 mb-3`}>
           <div className="bg-slate-900/40 rounded p-2">
             <div className="text-[10px] text-slate-500 uppercase">Futures reserve</div>
             <div className="text-lg font-mono text-slate-200">
@@ -119,11 +136,25 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
               </span>
             </div>
           </div>
+          {showBnbReserve && (
+            <div className="bg-slate-900/40 rounded p-2">
+              <div className="text-[10px] text-slate-500 uppercase">BNB fee reserve</div>
+              <div className="text-lg font-mono text-slate-200">
+                ${((bnbReserve?.futures_value_usd ?? 0)).toFixed(0)}
+                <span className="text-xs text-slate-500"> / ${((bnbReserve?.target_usd ?? 0)).toFixed(0)}</span>
+              </div>
+              <div className="text-[10px] text-slate-500">
+                Spot ${((bnbReserve?.spot_value_usd ?? 0)).toFixed(0)}
+                <span> / ${((bnbReserve?.spot_target_usd ?? bnbReserve?.spot_min_usd ?? 0)).toFixed(0)}</span>
+                {bnbReserve?.mode && <span> {bnbReserve.mode}</span>}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* Aggregate totals */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3">
+      <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 mb-3">
         <div className="bg-slate-900/40 rounded p-2">
           <div className="text-[10px] text-slate-500 uppercase">Open hedges</div>
           <div className="text-lg font-mono text-slate-200">{hedges.open_count}</div>
@@ -143,9 +174,13 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
           </div>
         </div>
         <div className="bg-slate-900/40 rounded p-2">
-          <div className="text-[10px] text-slate-500 uppercase">Cumulative funding</div>
-          <div className={`text-lg font-mono ${totalCum >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {fmtUsd(totalCum, 2)}
+          <div className="text-[10px] text-slate-500 uppercase">Futures fees</div>
+          <div className="text-lg font-mono text-rose-300">{fmtUsd(-totalFees, 2)}</div>
+        </div>
+        <div className="bg-slate-900/40 rounded p-2">
+          <div className="text-[10px] text-slate-500 uppercase">Net hedge P&L</div>
+          <div className={`text-lg font-mono ${totalNet >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {fmtUsd(totalNet, 2)}
           </div>
         </div>
       </div>
@@ -174,6 +209,8 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
                 <th className="text-right py-1.5 px-2">Gap</th>
                 <th className="text-right py-1.5 px-2">Unrealized</th>
                 <th className="text-right py-1.5 px-2">Funding</th>
+                <th className="text-right py-1.5 px-2">Fees</th>
+                <th className="text-right py-1.5 px-2">Net</th>
                 <th className="text-right py-1.5 px-2">Rate (ann)</th>
                 <th className="text-right py-1.5 px-2">Held</th>
               </tr>
@@ -182,6 +219,9 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
               {hedges.open_hedges.map(h => {
                 const pnlClass = h.unrealized_pnl_usd >= 0 ? 'text-emerald-400' : 'text-red-400';
                 const fundingClass = h.accumulated_funding_usd >= 0 ? 'text-emerald-400' : 'text-red-400';
+                const fees = h.accumulated_execution_fees_usd ?? 0;
+                const net = h.total_pnl_usd ?? (h.unrealized_pnl_usd + h.accumulated_funding_usd - fees);
+                const netClass = net >= 0 ? 'text-emerald-400' : 'text-red-400';
                 const ann = h.annualized_short_pct ?? 0;
                 const annClass = ann >= 0 ? 'text-emerald-400' : ann < -10 ? 'text-red-400' : 'text-amber-400';
                 const gap = h.notional_gap_usd ?? 0;
@@ -198,6 +238,8 @@ export default function HedgesPanel({ hedges }: HedgesPanelProps) {
                     <td className={`text-right py-1.5 px-2 font-mono ${rowGapClass}`}>{fmtUsd(gap, 2)}</td>
                     <td className={`text-right py-1.5 px-2 font-mono ${pnlClass}`}>{fmtUsd(h.unrealized_pnl_usd, 4)}</td>
                     <td className={`text-right py-1.5 px-2 font-mono ${fundingClass}`}>{fmtUsd(h.accumulated_funding_usd, 4)}</td>
+                    <td className="text-right py-1.5 px-2 font-mono text-rose-300">{fmtUsd(-fees, 4)}</td>
+                    <td className={`text-right py-1.5 px-2 font-mono ${netClass}`}>{fmtUsd(net, 4)}</td>
                     <td className={`text-right py-1.5 px-2 font-mono ${annClass}`}>
                       {ann >= 0 ? '+' : ''}{ann.toFixed(2)}%
                     </td>

@@ -5,6 +5,15 @@ const tier1 = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'DOGEUSDT'
 const tier2 = ['AVAXUSDT', 'LINKUSDT', 'POLUSDT', 'DOTUSDT', 'NEARUSDT', 'SUIUSDT', 'APTUSDT', 'TRXUSDT'];
 const tier3 = ['ARBUSDT', 'OPUSDT', 'FILUSDT', 'ATOMUSDT', 'INJUSDT'];
 const getTier = (sym: string) => tier1.includes(sym) ? 'T1' : tier2.includes(sym) ? 'T2' : tier3.includes(sym) ? 'T3' : 'T4';
+const topReasonString = (
+  counts?: Record<string, number>,
+  samples?: Record<string, string>,
+  limit = 3,
+) => Object.entries(counts || {})
+  .sort((a, b) => b[1] - a[1])
+  .slice(0, limit)
+  .map(([reason, count]) => `${reason}=${count}${samples?.[reason] ? ` (${samples[reason]})` : ''}`)
+  .join('; ');
 
 export function exportXlsx(
   optimizer: OptimizerState,
@@ -60,6 +69,13 @@ export function exportXlsx(
     ['Total Trades', simulation?.total_trades ?? ''],
     ['Skipped Trades', simulation?.skipped_trades ?? ''],
     ['Low Profit Skips', simulation?.low_profit_skips ?? ''],
+    ['Slippage Guard Skips', simulation?.slippage_guard_skips ?? ''],
+    ['Slippage Guard Top Reasons', topReasonString(simulation?.slippage_guard_reasons, simulation?.slippage_guard_samples)],
+    ['Book Age Guard Skips', simulation?.book_age_guard_skips ?? ''],
+    ['Book Age Top Reasons', topReasonString(simulation?.book_age_guard_reasons, simulation?.book_age_guard_samples)],
+    ['Depth Shrink Count', simulation?.depth_shrink_count ?? ''],
+    ['Depth Shrink USD', simulation?.depth_shrink_usd ?? ''],
+    ['Depth Shrink Samples', Object.values(simulation?.depth_shrink_samples || {}).slice(0, 3).join('; ')],
     ['Total Transfers', simulation?.total_transfers ?? ''],
     ['Trades/min', simulation?.trades_per_minute ?? ''],
     [],

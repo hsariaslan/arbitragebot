@@ -510,7 +510,9 @@ function PrimaryStatsBar({ lite, onSelect }: { lite: ConfigLite; onSelect: () =>
               `Hedge mode: ${lite.hedge_mode} | Open: ${lite.hedge_open_count} | ` +
               `Notional: $${lite.hedge_total_notional_usd.toFixed(0)} | ` +
               `Unrealized: ${sign(lite.hedge_total_unrealized_pnl_usd)}$${lite.hedge_total_unrealized_pnl_usd.toFixed(2)} | ` +
+              `Net hedge: ${sign(lite.hedge_total_pnl_usd ?? lite.hedge_total_unrealized_pnl_usd)}$${(lite.hedge_total_pnl_usd ?? lite.hedge_total_unrealized_pnl_usd).toFixed(2)} | ` +
               `Cum funding: ${sign(lite.hedge_cumulative_funding_usd)}$${lite.hedge_cumulative_funding_usd.toFixed(2)}` +
+              ` | Futures fees: $${(lite.hedge_cumulative_execution_fees_usd ?? 0).toFixed(2)}` +
               ` | Reserve: ${lite.hedge_reserve_status} $${lite.futures_margin_balance_usd.toFixed(0)}/$${lite.futures_target_usd.toFixed(0)}` +
               (lite.hedge_safety_paused ? ' | OPENS PAUSED' : '')
             }
@@ -524,8 +526,8 @@ function PrimaryStatsBar({ lite, onSelect }: { lite: ConfigLite; onSelect: () =>
               {lite.hedge_open_count}
             </span>
             <span className="text-slate-600">|</span>
-            <span className={`font-mono font-medium ${pnlColor(lite.hedge_cumulative_funding_usd)}`}>
-              {sign(lite.hedge_cumulative_funding_usd)}${lite.hedge_cumulative_funding_usd.toFixed(2)}
+            <span className={`font-mono font-medium ${pnlColor(lite.hedge_total_pnl_usd ?? lite.hedge_total_unrealized_pnl_usd)}`}>
+              {sign(lite.hedge_total_pnl_usd ?? lite.hedge_total_unrealized_pnl_usd)}${(lite.hedge_total_pnl_usd ?? lite.hedge_total_unrealized_pnl_usd).toFixed(2)}
             </span>
             {lite.hedge_executor_errors > 0 && (
               <span className="text-red-400 font-mono ml-1">⚠{lite.hedge_executor_errors}</span>
@@ -828,7 +830,9 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
                   `Hedge mode: ${hedges.execution_mode} | Open: ${hedges.open_count} | ` +
                   `Notional: $${hedges.total_notional_usd.toFixed(0)} | ` +
                   `Unrealized: ${hedges.total_unrealized_pnl_usd >= 0 ? '+' : ''}$${hedges.total_unrealized_pnl_usd.toFixed(2)} | ` +
+                  `Net hedge: ${(hedges.total_pnl_usd ?? hedges.total_unrealized_pnl_usd) >= 0 ? '+' : ''}$${(hedges.total_pnl_usd ?? hedges.total_unrealized_pnl_usd).toFixed(2)} | ` +
                   `Cum funding: ${hedges.cumulative_funding_usd >= 0 ? '+' : ''}$${hedges.cumulative_funding_usd.toFixed(2)}` +
+                  ` | Futures fees: $${(hedges.cumulative_execution_fees_usd ?? 0).toFixed(2)}` +
                   (hedges.safety_paused ? ' | OPENS PAUSED' : '')
                 }
               >
@@ -841,7 +845,7 @@ export default function Header({ connected, uptimeSeconds, uptimeInfo, connected
                   {hedges.open_count}
                 </span>
                 <span className="text-slate-600">|</span>
-                <PnlText value={hedges.cumulative_funding_usd} />
+                <PnlText value={hedges.total_pnl_usd ?? hedges.total_unrealized_pnl_usd} />
                 {hedges.total_executor_errors > 0 && (
                   <span className="text-red-400 font-mono ml-1">⚠{hedges.total_executor_errors}</span>
                 )}
