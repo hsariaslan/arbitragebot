@@ -1220,3 +1220,165 @@ Validation:
 - `python3 -m py_compile optimizer.py dashboard_server.py orchestrator.py balance.py`
 - `./.venv/bin/python -m py_compile optimizer.py dashboard_server.py orchestrator.py balance.py`
 - `git diff --check`
+
+### Session #30 — 2026-06-29 (v0.33.1-beta, Binance Futures testnet hedge parser fix)
+
+#### Context
+
+This session documents the investigation around `logs/bot-logs-2026-06-29-02-45-32.log`.
+
+The operator confirmed the previous reserve-aware portfolio fix was finally working: `$5k` configs were no longer initialized around `$7k`, and trade sizing was based on spot capital after reserving Binance Futures collateral.
+
+Examples from the log:
+
+- `version=v0.33.1-beta`
+- `Group 1 / Neutral (Baseline)`: `trade_amount=$24.0 (4.0% of $600 spot, $400 futures, $1000 total)`
+- `Group 5 / Neutral (Baseline)`: `trade_amount=$120.0 (4.0% of $3000 spot, $2000 futures, $5000 total)`
+- All hedged configs logged the intended futures reserve policy: `target=40%, topup=35%, emergency=30%, overflow=45%, transfer_min=$10`
+
+So the old wrong-portfolio basis issue was not the active failure in this run.
+
+#### Log Summary
+
+| Metric | Value |
+|---|---:|
+| Log file | `logs/bot-logs-2026-06-29-02-45-32.log` |
+| Runtime window | 2026-06-28 19:02:43 -> 2026-06-29 02:44:34 |
+| Version | `v0.33.1-beta` |
+| Total warnings | 1,872 |
+| Total errors | 4,504 |
+| Config with real/testnet hedge mode | `Group 1: $1k — Architecture & Exchange Ablations / Neutral (Baseline)` |
+| Testnet hedge mode line | `hedging: enabled=True, mode=testnet, dust=$10, eval_interval=60s, leverage=2x, margin_buffer=20%, adjust_threshold=1%` |
+| `hedge_evaluate` parser errors | 458 |
+| `hedge_reserve_refresh_before_trade` parser errors | 4,032 |
+| `futures_reserve_unknown` trade blocks | 38 |
+| `futures_reserve_unavailable` trade blocks | 30 |
+
+#### Main Failure
+
+The repeated failure was:
+
+`ValueError("could not convert string to float: ''")`
+
+It appeared in two async monitor tasks:
+
+- `hedge_evaluate`
+- `hedge_reserve_refresh_before_trade`
+
+The first error arrived immediately after the testnet config started:
+
+- Settings line: `mode=testnet`
+- First error: `Async hedge_evaluate failed: ValueError("could not convert string to float: ''")`
+- First reserve block: `SPOT_TRADE_BLOCKED ... futures_reserve_unknown`
+
+The same error was still present at the end of the log:
+
+`2026-06-29 02:44:34 ... Async hedge_reserve_refresh_before_trade failed: ValueError("could not convert string to float: ''")`
+
+#### Root Cause
+
+The failure was not hedge sizing, not the futures-reserve percentage, and not the portfolio display fix.
+
+Root cause: `executors/binance_futures_exec.py` directly parsed Binance Futures API fields with `float(...)` / `int(...)`. Binance Futures testnet can return empty strings for numeric response fields, especially in account/position payloads when no value is available. Known risky fields included:
+
+- Account: `totalWalletBalance`, `totalUnrealizedProfit`, `totalMarginBalance`, `availableBalance`, `maxWithdrawAmount`
+- Position: `entryPrice`, `markPrice`, `unRealizedProfit`, `isolatedWallet`, `liquidationPrice`, `leverage`
+- Balance: `availableBalance`
+- Order response: `executedQty`, `cumQuote`
+
+Any blank string in those fields crashed the async hedge task before the hedge manager could classify reserve health. That left the config in `futures_reserve_unknown` / `futures_reserve_unavailable`, which then blocked spot trades that required a hedge.
+
+#### Fix Implemented In Working Tree
+
+Files changed:
+
+- `executors/binance_futures_exec.py`
+- `hedge_manager.py`
+
+Executor changes:
+
+- Added `_to_float`, `_to_int`, and `_number_with_fallback` helpers.
+- Replaced direct Binance response parsing with safe coercion.
+- `get_account_info()` now falls back to the USDT asset row when top-level futures account fields are blank.
+- `get_position()` and `get_all_positions()` now safely parse blank position fields, including blank `liquidationPrice`.
+- Position dictionaries now include both `size` and `positionAmt` for compatibility.
+- `get_balance()` and order response parsing now tolerate blank numeric fields.
+- Exchange filter parsing now tolerates blank/invalid precision and filter values.
+
+Hedge manager changes:
+
+- Added local `_to_float` and `_reserve_numbers` helpers so reserve status parsing remains robust even if a mock/future executor returns strings.
+- `refresh_reserve_status()` now consumes reserve numbers through the helper instead of direct `float(...)`.
+- Reconciliation now safely reads real position `size`, `entry_price`, and `mark_price`.
+- `close_all_real_positions()` now reads executor `size` as well as legacy `positionAmt`; this fixes an adjacent cleanup bug where orphan futures positions could be missed because the executor returns `size`.
+
+#### Validation
+
+Commands run:
+
+- `python3 -m py_compile executors/binance_futures_exec.py hedge_manager.py`
+- `.venv/bin/python -m py_compile executors/binance_futures_exec.py hedge_manager.py`
+- `git diff --check`
+- Mocked Binance Futures account response with empty strings for all top-level account fields and valid USDT asset fallback.
+- Mocked Binance Futures position response with blank `entryPrice`, `unRealizedProfit`, `leverage`, `isolatedWallet`, and `liquidationPrice`.
+- Direct parser assertions for `""`, whitespace, `None`, normal floats, and normal ints.
+
+The mocked test confirmed:
+
+- Blank account fields no longer raise.
+- USDT asset fallback works.
+- Blank position fields no longer raise.
+- Blank leverage defaults to `1`.
+- Blank liquidation price defaults to `0.0`.
+
+Not run:
+
+- `scripts/test_futures_executor.py`
+
+Reason: that script places a real Binance Futures testnet market order and then closes it. It should only be run deliberately after confirming testnet credentials and intended test order size.
+
+#### Binance Futures Testnet Credentials
+
+For `hedge_execution_mode=testnet`, yes, Binance Futures testnet credentials are required:
+
+- `BINANCE_FUTURES_TESTNET_API_KEY`
+- `BINANCE_FUTURES_TESTNET_API_SECRET`
+
+Without those, the testnet futures executor cannot read futures account balance, position risk, set leverage/margin type, or place/close testnet hedge orders. Simulation hedge mode does not need these credentials because it never calls Binance Futures.
+
+Local `.env` status checked during this session without printing secret values:
+
+| Key | Status |
+|---|---|
+| `BINANCE_FUTURES_TESTNET_API_KEY` | set |
+| `BINANCE_FUTURES_TESTNET_API_SECRET` | set |
+| `BINANCE_FUTURES_API_KEY` | empty |
+| `BINANCE_FUTURES_API_SECRET` | empty |
+
+Interpretation:
+
+- Local testnet futures mode has credentials available.
+- Local live futures mode is not configured.
+- If the VPS does not have the two `BINANCE_FUTURES_TESTNET_*` keys, testnet hedge mode will not work correctly there.
+- If using live futures later, separate Binance mainnet futures/API permissions are required; testnet keys do not work on mainnet.
+
+#### Operational Conclusion
+
+The portfolio basis/futures-reserve bug from v0.33.0 was fixed in this run. The active issue was a Binance Futures testnet API parser robustness bug.
+
+After this fix, the next run should no longer produce:
+
+- `Async hedge_evaluate failed: ValueError("could not convert string to float: ''")`
+- `Async hedge_reserve_refresh_before_trade failed: ValueError("could not convert string to float: ''")`
+
+If the VPS still has no Binance Futures testnet credentials, the expected next failure mode should be a structured `credentials not configured` / reserve unavailable state, not a parser crash. Add the testnet futures credentials to the VPS `.env` before expecting real testnet hedge orders.
+
+#### Working Tree State
+
+No commit was made in this session, following `CODEX.md`.
+
+Uncommitted changes after Session #30:
+
+- `executors/binance_futures_exec.py`
+- `hedge_manager.py`
+- `documentations/SESSIONS_2.md`
