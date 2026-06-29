@@ -10,6 +10,17 @@ Do not add current-version or release-history notes to `CLAUDE.md`. Keep runtime
 
 ## Version History
 
+### v0.34.0-beta — Live-Realism Execution & Fee Hardening
+
+- Added strict order-book slippage/depth gates so scoring and execution reject missing, stale, thin, or overly expensive books before routes can trade.
+- Added book-age tracking from depth updates and depth-aware trade-size shrinking for opportunities that are still viable at a smaller executable size.
+- Switched demo/testnet spot execution defaults to capped marketable-limit FOK orders for Binance, OKX, and Bybit, while keeping emergency one-leg recovery on market orders.
+- Added controlled one-leg drill support for demo/testnet recovery testing and improved post-fill reconciliation for partial fills, quantity mismatches, fees, and recovery P&L.
+- Added Binance BNB fee-reserve automation/protection, including spot reserve floors, futures fee reserve diagnostics, token-fee fallback to normal taker fees, and reserve-aware rebalance paths.
+- Hardened hedge reserve gating so real/testnet spot trades block on stale, unavailable, emergency, or top-up-needed futures reserve status.
+- Exposed new realism, execution, reserve, and diagnostics settings through the dashboard, backend settings schema, XLSX export, and regenerated `settings.json` / `arbitragebot-configs.json` for all 46 configs.
+- Documented Session #31 with the live-slippage risk analysis, implementation details, follow-up robustness fixes, validation, and remaining live-trading caveats.
+
 ### v0.33.2-beta — Binance Futures Testnet Parser Hardening
 
 - Hardened Binance USD-M Futures testnet account, balance, position, exchange-filter, and order parsing against blank numeric fields returned by the API.

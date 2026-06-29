@@ -1382,3 +1382,130 @@ Uncommitted changes after Session #30:
 - `executors/binance_futures_exec.py`
 - `hedge_manager.py`
 - `documentations/SESSIONS_2.md`
+
+### Session #31 — 2026-06-29 (v0.34.0-beta, live-realism slippage/execution hardening)
+
+#### Purpose
+
+This session addressed the live-trading concern that simulation could overstate profitability by treating visible top-of-book prices as fully executable. The main risk was that a route could look profitable in simulation but lose money live because of stale order-book depth, insufficient depth, partial fills, or unbounded market-order slippage.
+
+#### Implemented Changes
+
+Strict slippage/depth policy:
+
+- Added `SlippagePolicyResult` and `evaluate_slippage_policy()` in `slippage.py`.
+- Missing books, insufficient visible depth, excessive per-leg slippage, and excessive total slippage now fail a structured policy gate.
+- The slippage walker now sums all visible book depth even after the requested fill size is satisfied. This allows depth buffers such as `1.25x` to work correctly.
+- Scoring and execution both use the same strict policy, so discovery no longer promotes symbols whose edge only exists because book depth is missing/thin.
+
+Book-age guard:
+
+- Added `book_received_at` to `PriceState`.
+- Book-depth fetcher messages now stamp book freshness separately from ticker freshness.
+- The shared tick cache carries `book_received_at` so all configs can evaluate book age without re-reading fetcher state.
+- New defaults:
+  - `book_age_guard_enabled=true`
+  - `max_book_age_seconds=2.0`
+  - `event_driven_max_book_age_seconds=15.0`
+- Monitor and optimizer reject stale/missing book-depth routes before scoring/executing.
+
+Depth-aware size shrink:
+
+- Added `depth_aware_trade_size_shrink_enabled=true`.
+- When adaptive sizing picks a size too large for visible depth, monitor can shrink the trade to the largest depth-safe size instead of skipping the opportunity outright.
+- `min_depth_shrink_ratio=0.5` prevents shrinking normal trades into dust.
+- Shrink events are logged as throttled `[Trade] DEPTH_SHRINK ...` entries and summarized in session/dashboard counters.
+
+Marketable-limit execution:
+
+- Normal demo/testnet spot legs now default to `spot_execution_order_mode=marketable_limit_fok`.
+- Binance, OKX, and Bybit demo executors support capped marketable limit IOC/FOK orders.
+- Buy caps are rounded up to exchange tick size; sell floors are rounded down. This avoids false buy rejects caused by rounding a buy cap below the observed ask.
+- Emergency one-leg recovery still uses market orders because getting flat is more important than price-capping an emergency unwind.
+
+Controlled one-leg drill:
+
+- Added disabled-by-default demo/testnet drill settings:
+  - `demo_one_leg_drill_enabled=false`
+  - `demo_one_leg_drill_every_n=0`
+  - `demo_one_leg_drill_side=alternate`
+- When deliberately enabled, DemoExecutor forces exactly one leg to fail at the configured cadence, allowing the existing one-leg recovery path to be tested before live trading.
+- Drill events log as `[ExecutorDrill] ...`.
+
+Post-fill reconciliation/logging:
+
+- Demo comparison now warns when actual buy/sell filled quantities differ materially, catching hidden inventory drift from partial fills or rounding.
+- Existing demo logs already record slippage, latency, fee mismatch, rejection, partial fill, one-legged status, and profit drift.
+- New guard logs are throttled by reason class, not by every symbol/route, to avoid startup floods across 46 configs.
+
+Dashboard/config wiring:
+
+- Added settings schema validation, hot-apply, startup sync, settings snapshot logging, TypeScript types, config editor fields, dashboard payload counters, and XLSX export fields for the new guards.
+- Updated `settings.json` and gitignored `arbitragebot-configs.json` across all 46 configs.
+- Operator action required: import the updated `arbitragebot-configs.json` to the VPS before expecting the VPS to use the new settings.
+
+#### New Runtime Diagnostics
+
+Per-route logs are throttled; aggregate counters are exact.
+
+- `[Trade] SLIPPAGE_GUARD_SKIP reason=... sample=... count=...`
+- `[Trade] BOOK_AGE_SKIP reason=... sample=... count=...`
+- `[Trade] DEPTH_SHRINK ...`
+- `[Session] realism_diag: slippage_top=[...] book_age_top=[...] depth_shrink_top=[...] settings=...`
+- `[ExecutorDrill] Forcing ... leg failure ...`
+- `[DemoCompare] ... fill quantity mismatch ...`
+- `[Session] ... slip_guard=... book_age=... depth_shrink=...`
+- `[Hedge] BNB_RESERVE_STATUS ...`
+- `[Balance] BNB_RESERVE_SELL_BLOCK ...`
+- `[DemoTrade] PROTECTED_SELL_CAP ...`
+
+BNB-specific diagnostics added after the first pass:
+
+- Binance `BNBUSDT` sell capacity now protects the configured Spot BNB fee floor.
+- The hedge manager logs Spot/Futures BNB reserve health on status changes and then at most every five minutes.
+- The monitor persists representative slippage/book-age/depth-shrink samples and emits a five-minute `realism_diag` aggregate line.
+- Dashboard payload and XLSX export now include top slippage/book-age/depth diagnostics.
+
+#### Follow-up Robustness Fixes
+
+After reviewing the full uncommitted live-realism work set, several edge cases were tightened before handing the branch back:
+
+- Real/testnet spot trades now block on stale hedge-reserve status and schedule a throttled refresh instead of trusting an old futures reserve snapshot.
+- `topup_needed` in real/testnet futures reserve status now blocks new spot exposure. The bot should not keep opening spot inventory when Binance Futures needs more collateral.
+- Demo one-leg recovery now updates demo inventory after the emergency unwind and includes recovery cashflow in `actual_profit_usd`.
+- Demo/testnet fee accounting now uses USD-valued token fees, including Binance BNB fee deductions, so reported actual P&L is not optimistic when fees are paid outside USDT.
+- Binance token-fee discount now falls back to the non-token taker fee model when the BNB reserve is insufficient to pay the fee.
+- BNB reserve protection was extended beyond normal arbitrage sells to automatic USDT refill, crypto refill, inventory-drift rebalance, and idle consolidation paths.
+- The hedge reserve refresh scheduling is throttled to avoid spawning duplicate refresh tasks when many profitable routes are evaluated in the same tick.
+
+#### Remaining Caveats
+
+- Full live spot execution is still not implemented for all nine exchanges. The project currently has demo/testnet spot executors for Binance, OKX, and Bybit only.
+- FOK reduces partial-fill risk but increases rejects. IOC can be selected if the operator wants fewer rejects at the cost of possible partial fills.
+- Book age is now measured from depth messages, but exchange-side latency and matching-engine queue movement can still make the book worse after order submission.
+- Two-leg arbitrage is not atomic. One-leg failure remains a real live risk even with FOK.
+- Event-driven exchange book age uses a looser default because quiet books can be valid; this is safer than treating ticker freshness as book freshness, but still needs calibration from demo/live observations.
+
+#### Validation
+
+Commands run:
+
+- `python3 -m py_compile config.py settings.py slippage.py monitor.py optimizer.py executor.py tick_cache.py dashboard_server.py orchestrator.py run.py balance.py hedge_manager.py fetchers/base.py fetchers/binance.py fetchers/okx.py fetchers/bybit.py fetchers/bitget.py fetchers/kucoin.py fetchers/gateio.py fetchers/pionex.py fetchers/mexc.py fetchers/bitfinex.py executors/binance_exec.py executors/binance_futures_exec.py executors/okx_exec.py executors/bybit_exec.py`
+- `npm run build`
+- `git diff --check`
+- BNB reserve smoke test: Binance `BNBUSDT` sells are blocked when they would consume the configured Spot BNB reserve.
+- Token-fee fallback smoke test: Binance BNB-fee model falls back to non-token fees when available BNB cannot cover the token fee.
+- Executor cashflow smoke test: non-USDT token fees are converted into USD-valued cashflow for actual P&L.
+- Structured JSON validation confirmed all 46 configs in `settings.json` and `arbitragebot-configs.json` contain the new strict slippage, FOK execution, book-age, depth-shrink, and disabled one-leg drill settings.
+
+Result:
+
+- Python compilation passed.
+- Dashboard production build passed.
+- `git diff --check` passed; it only reported Git's existing CRLF warning for `slippage.py`.
+- Targeted BNB reserve, fee fallback, and executor cashflow smoke tests passed.
+- Config export validation passed.
+
+#### Working Tree State
+
+Released as `v0.34.0-beta` after the operator explicitly requested commits and tagging.
