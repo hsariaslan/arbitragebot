@@ -10,6 +10,14 @@ Do not add current-version or release-history notes to `CLAUDE.md`. Keep runtime
 
 ## Version History
 
+### v0.33.2-beta — Binance Futures Testnet Parser Hardening
+
+- Hardened Binance USD-M Futures testnet account, balance, position, exchange-filter, and order parsing against blank numeric fields returned by the API.
+- Futures account info now falls back to the USDT asset row when top-level futures account balance fields are blank.
+- Hedge reserve status parsing now tolerates string/blank numeric values so async reserve refresh and hedge evaluation tasks do not crash.
+- Real-position cleanup now reads executor `size` as well as legacy `positionAmt`, preventing missed orphan futures positions during close-all cleanup.
+- Documented Session #30 with the testnet hedge failure, root cause, validation, and Binance Futures testnet credential requirements.
+
 ### v0.33.1-beta — Reserve-Aware Portfolio Accounting
 
 - Fixed post-discovery optimizer allocation so Binance Futures reserve is not double-counted as spot capital.
