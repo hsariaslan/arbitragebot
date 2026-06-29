@@ -267,6 +267,7 @@ class MEXCFetcher(BaseFetcher):
 
                 now = time.time()
                 updated_at = send_time_ms / 1000.0 if send_time_ms else 0.0
+                existing = self._parent._state[symbol]
 
                 price_data = PriceState(
                     bid=bid,
@@ -277,6 +278,9 @@ class MEXCFetcher(BaseFetcher):
                     volume="",
                     updated_at=updated_at,
                     received_at=now,
+                    book_received_at=existing.book_received_at,
+                    bids=existing.bids,
+                    asks=existing.asks,
                 )
                 self._last_data_received = now
                 self._state[symbol] = price_data
@@ -468,6 +472,7 @@ class _MEXCSubFetcher:
 
                 now = time.time()
                 updated_at = send_time_ms / 1000.0 if send_time_ms else 0.0
+                existing = self._state[symbol]
 
                 price_data = PriceState(
                     bid=bid,
@@ -478,6 +483,9 @@ class _MEXCSubFetcher:
                     volume="",
                     updated_at=updated_at,
                     received_at=now,
+                    book_received_at=existing.book_received_at,
+                    bids=existing.bids,
+                    asks=existing.asks,
                 )
                 self._parent._last_data_received = now
                 self._last_data_time = now
@@ -630,6 +638,7 @@ class _MEXCDepthSubFetcher:
                     volume=existing.volume,
                     updated_at=existing.updated_at,
                     received_at=now,
+                    book_received_at=now,
                     bids=bids or None,
                     asks=asks or None,
                 )

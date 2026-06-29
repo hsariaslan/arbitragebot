@@ -111,6 +111,9 @@ class ShadowHedge:
     open_count: int = 0                           # How many times we've opened (Phase C: lifetime stats)
     close_count: int = 0
     adjust_count: int = 0
+    accumulated_execution_fees_usd: float = 0.0
+    accumulated_fee_bnb_discount_usd: float = 0.0
+    accumulated_fee_referral_cashback_usd: float = 0.0
 
 
 class HedgeManager:
@@ -133,6 +136,19 @@ class HedgeManager:
         margin_buffer_pct: float = 0.20,
         adjust_threshold_pct: float = 0.01,       # only adjust if drift > 1% of current size
         leverage: int = 2,                        # set on each symbol before first open
+        futures_taker_fee_rate: float = 0.0005,
+        futures_bnb_discount_enabled: bool = True,
+        futures_bnb_discount_pct: float = 0.10,
+        futures_referral_cashback_enabled: bool = False,
+        futures_referral_cashback_pct: float = 0.10,
+        futures_bnb_auto_topup_enabled: bool = True,
+        futures_bnb_min_usd: float = 5.0,
+        futures_bnb_target_pct: float = 0.05,
+        futures_bnb_transfer_min_usd: float = 5.0,
+        spot_bnb_min_usd: float = 5.0,
+        spot_bnb_auto_buy_enabled: bool = True,
+        spot_bnb_target_pct: float = 0.01,
+        spot_bnb_buy_min_usd: float = 10.0,
         total_capital: float = 0.0,
         futures_capital_target_pct: float = 0.40,
         futures_capital_topup_pct: float = 0.35,
@@ -151,6 +167,22 @@ class HedgeManager:
         self._margin_buffer_pct = float(margin_buffer_pct)
         self._adjust_threshold_pct = float(adjust_threshold_pct)
         self._leverage = max(1, int(leverage))
+        self._futures_taker_fee_rate = max(0.0, float(futures_taker_fee_rate))
+        self._futures_bnb_discount_enabled = bool(futures_bnb_discount_enabled)
+        self._futures_bnb_discount_pct = max(0.0, min(1.0, float(futures_bnb_discount_pct)))
+        self._futures_referral_cashback_enabled = bool(futures_referral_cashback_enabled)
+        self._futures_referral_cashback_pct = max(
+            0.0,
+            min(1.0, float(futures_referral_cashback_pct)),
+        )
+        self._futures_bnb_auto_topup_enabled = bool(futures_bnb_auto_topup_enabled)
+        self._futures_bnb_min_usd = max(0.0, float(futures_bnb_min_usd))
+        self._futures_bnb_target_pct = max(0.0, float(futures_bnb_target_pct))
+        self._futures_bnb_transfer_min_usd = max(0.0, float(futures_bnb_transfer_min_usd))
+        self._spot_bnb_min_usd = max(0.0, float(spot_bnb_min_usd))
+        self._spot_bnb_auto_buy_enabled = bool(spot_bnb_auto_buy_enabled)
+        self._spot_bnb_target_pct = max(0.0, float(spot_bnb_target_pct))
+        self._spot_bnb_buy_min_usd = max(0.0, float(spot_bnb_buy_min_usd))
         self._total_capital = max(0.0, float(total_capital))
         self._futures_capital_target_pct = max(0.0, float(futures_capital_target_pct))
         self._futures_capital_topup_pct = max(0.0, float(futures_capital_topup_pct))
@@ -160,7 +192,17 @@ class HedgeManager:
         self._last_reserve_check_ts: float = 0.0
         self._last_reserve_transfer_ts: float = 0.0
         self._last_reserve_error: str = ""
+        self._last_bnb_reserve_check_ts: float = 0.0
+        self._last_bnb_reserve_transfer_ts: float = 0.0
+        self._last_spot_bnb_buy_ts: float = 0.0
+        self._last_bnb_reserve_error: str = ""
+        self._last_spot_bnb_buy_error: str = ""
+        self._last_bnb_price_usd: float = 0.0
+        self._bnb_fee_reserve_status: dict = self._make_bnb_fee_reserve_status("unknown")
         self._reserve_status: dict = self._make_reserve_status("unknown")
+        self._last_bnb_reserve_status_log_ts: float = 0.0
+        self._last_bnb_reserve_status_signature: str = ""
+        self._sync_balance_bnb_reserve_floor()
 
         # Per-symbol shadow state
         self._shadows: dict[str, ShadowHedge] = {}
@@ -177,6 +219,9 @@ class HedgeManager:
 
         # Cumulative would-be statistics (lifetime, persisted)
         self._cumulative_funding_usd: float = 0.0
+        self._cumulative_execution_fees_usd: float = 0.0
+        self._cumulative_fee_bnb_discount_usd: float = 0.0
+        self._cumulative_fee_referral_cashback_usd: float = 0.0
         self._total_opens: int = 0
         self._total_closes: int = 0
         self._total_adjusts: int = 0
@@ -190,6 +235,11 @@ class HedgeManager:
             f"eval_interval={self._evaluation_interval:.0f}s "
             f"margin_buffer={self._margin_buffer_pct*100:.0f}% "
             f"leverage={self._leverage}x "
+            f"futures_taker_fee={self._effective_futures_fee_rate()*100:.4f}% "
+            f"futures_bnb_target={self._futures_bnb_target_pct*100:.0f}% "
+            f"spot_bnb_floor=${self._spot_bnb_min_usd:.0f} "
+            f"spot_bnb_buy={'on' if self._spot_bnb_auto_buy_enabled else 'off'} "
+            f"spot_bnb_target={self._spot_bnb_target_pct*100:.0f}% "
             f"futures_reserve_target={self._futures_capital_target_pct*100:.0f}% "
             f"topup={self._futures_capital_topup_pct*100:.0f}% "
             f"emergency={self._futures_capital_emergency_pct*100:.0f}%"
@@ -207,6 +257,169 @@ class HedgeManager:
     def _is_real_mode(self) -> bool:
         return self._execution_mode in ("testnet", "live") and self._executor is not None
 
+    def _futures_fee_components(
+        self,
+        notional_usd: float,
+        *,
+        bnb_discount_available: bool | None = None,
+    ) -> dict[str, float]:
+        """Estimate Binance USD-M futures taker fee components for one order."""
+        notional = max(0.0, float(notional_usd))
+        base_fee = notional * self._futures_taker_fee_rate
+        apply_bnb_discount = self._futures_bnb_discount_enabled and (
+            True if bnb_discount_available is None else bool(bnb_discount_available)
+        )
+        bnb_discount = (
+            base_fee * self._futures_bnb_discount_pct
+            if apply_bnb_discount
+            else 0.0
+        )
+        fee_after_bnb = max(0.0, base_fee - bnb_discount)
+        referral_cashback = (
+            fee_after_bnb * self._futures_referral_cashback_pct
+            if self._futures_referral_cashback_enabled
+            else 0.0
+        )
+        net_fee = max(0.0, fee_after_bnb - referral_cashback)
+        effective_rate = net_fee / notional if notional > 0 else 0.0
+        return {
+            "notional_usd": notional,
+            "base_fee_usd": base_fee,
+            "bnb_discount_usd": bnb_discount,
+            "bnb_fee_payment_usd": fee_after_bnb if apply_bnb_discount else 0.0,
+            "bnb_discount_applied": apply_bnb_discount,
+            "referral_cashback_usd": referral_cashback,
+            "net_fee_usd": net_fee,
+            "effective_rate": effective_rate,
+        }
+
+    def _effective_futures_fee_rate(self) -> float:
+        return self._futures_fee_components(1.0)["effective_rate"]
+
+    def _record_execution_fee(
+        self,
+        shadow: ShadowHedge,
+        notional_usd: float,
+        *,
+        actual_fee: float = 0.0,
+        fee_currency: str = "",
+    ) -> dict[str, float]:
+        fee = self._actual_futures_fee_components(
+            notional_usd,
+            actual_fee,
+            fee_currency,
+        )
+        if fee is None:
+            fee = self._futures_fee_components(notional_usd, bnb_discount_available=True)
+            bnb_fee_usd = fee.get("bnb_fee_payment_usd", 0.0)
+            if bnb_fee_usd > 0 and not self._can_pay_futures_bnb_fee(bnb_fee_usd):
+                logger.warning(
+                    f"[Hedge] Futures BNB fee discount skipped for {shadow.spot_symbol}: "
+                    f"reserve below estimated fee ${bnb_fee_usd:.4f}"
+                )
+                fee = self._futures_fee_components(
+                    notional_usd,
+                    bnb_discount_available=False,
+                )
+        elif fee.get("fee_source") == "actual":
+            logger.debug(
+                f"[Hedge] Actual futures fee {shadow.spot_symbol}: "
+                f"${fee['net_fee_usd']:.4f} {fee.get('fee_currency', '')}"
+            )
+        shadow.accumulated_execution_fees_usd += fee["net_fee_usd"]
+        shadow.accumulated_fee_bnb_discount_usd += fee["bnb_discount_usd"]
+        shadow.accumulated_fee_referral_cashback_usd += fee["referral_cashback_usd"]
+        self._cumulative_execution_fees_usd += fee["net_fee_usd"]
+        self._cumulative_fee_bnb_discount_usd += fee["bnb_discount_usd"]
+        self._cumulative_fee_referral_cashback_usd += fee["referral_cashback_usd"]
+        bnb_fee_usd = fee.get("bnb_fee_payment_usd", 0.0)
+        if self._execution_mode != "live" and bnb_fee_usd > 0:
+            price = _to_float(self._funding_monitor.get_mark_price("BNBUSDT"))
+            if price <= 0:
+                price = self._last_bnb_price_usd or self._lookup_price("BNBUSDT")
+            deducted = self._balance.deduct_futures_bnb_fee(
+                bnb_fee_usd,
+                price,
+                context=f"hedge {shadow.spot_symbol}",
+            )
+            if deducted > 0:
+                self._last_bnb_price_usd = price
+        return fee
+
+    def _actual_futures_fee_components(
+        self,
+        notional_usd: float,
+        actual_fee: float,
+        fee_currency: str,
+    ) -> dict[str, float] | None:
+        """Convert an exchange-reported futures commission into USD accounting."""
+        raw_fee = max(0.0, float(actual_fee or 0.0))
+        currency = str(fee_currency or "").upper()
+        if raw_fee <= 0 or not currency or currency == "MIXED":
+            return None
+
+        if currency in ("USDT", "BUSD", "USDC", "USD"):
+            fee_usd = raw_fee
+        elif currency == "BNB":
+            price = _to_float(self._funding_monitor.get_mark_price("BNBUSDT"))
+            if price <= 0:
+                price = self._last_bnb_price_usd or self._lookup_price("BNBUSDT")
+            if price <= 0:
+                return None
+            self._last_bnb_price_usd = price
+            fee_usd = raw_fee * price
+        else:
+            return None
+
+        notional = max(0.0, float(notional_usd))
+        base_fee = notional * self._futures_taker_fee_rate
+        bnb_discount = (
+            max(0.0, base_fee - fee_usd)
+            if currency == "BNB" and self._futures_bnb_discount_enabled
+            else 0.0
+        )
+        referral_cashback = (
+            fee_usd * self._futures_referral_cashback_pct
+            if self._futures_referral_cashback_enabled
+            else 0.0
+        )
+        net_fee = max(0.0, fee_usd - referral_cashback)
+        return {
+            "notional_usd": notional,
+            "base_fee_usd": base_fee,
+            "bnb_discount_usd": bnb_discount,
+            "bnb_fee_payment_usd": fee_usd if currency == "BNB" else 0.0,
+            "bnb_discount_applied": currency == "BNB",
+            "referral_cashback_usd": referral_cashback,
+            "net_fee_usd": net_fee,
+            "effective_rate": net_fee / notional if notional > 0 else 0.0,
+            "fee_source": "actual",
+            "fee_currency": currency,
+            "raw_fee": raw_fee,
+        }
+
+    def _can_pay_futures_bnb_fee(self, fee_usd: float) -> bool:
+        """Return whether the modeled Futures BNB wallet can fund this fee."""
+        if not self._futures_bnb_discount_enabled:
+            return False
+        fee_value = max(0.0, float(fee_usd))
+        if fee_value <= 0:
+            return True
+
+        price = _to_float(self._funding_monitor.get_mark_price("BNBUSDT"))
+        if price <= 0:
+            price = self._last_bnb_price_usd or self._lookup_price("BNBUSDT")
+        if price <= 0:
+            return False
+
+        if self._execution_mode != "live":
+            qty = float(getattr(self._balance, "binance_futures_bnb", 0.0) or 0.0)
+            available_usd = qty * price
+        else:
+            status = self._bnb_fee_reserve_status if isinstance(self._bnb_fee_reserve_status, dict) else {}
+            available_usd = float(status.get("futures_value_usd", 0.0) or 0.0)
+        return available_usd + 1e-9 >= fee_value
+
     def _reserve_amounts(self) -> dict[str, float]:
         capital = float(self._total_capital or 0.0)
         return {
@@ -215,6 +428,61 @@ class HedgeManager:
             "topup_usd": capital * self._futures_capital_topup_pct,
             "emergency_usd": capital * self._futures_capital_emergency_pct,
             "overflow_usd": capital * self._futures_capital_overflow_pct,
+        }
+
+    def _bnb_fee_reserve_amounts(self) -> dict[str, float]:
+        capital = float(self._total_capital or 0.0)
+        return {
+            "target_usd": capital * self._futures_bnb_target_pct,
+            "min_usd": self._futures_bnb_min_usd,
+            "transfer_min_usd": self._futures_bnb_transfer_min_usd,
+            "spot_min_usd": self._spot_bnb_min_usd,
+            "spot_target_usd": max(
+                self._spot_bnb_min_usd,
+                capital * self._spot_bnb_target_pct,
+            ),
+            "spot_buy_min_usd": self._spot_bnb_buy_min_usd,
+        }
+
+    def _make_bnb_fee_reserve_status(
+        self,
+        status: str,
+        *,
+        price_usd: float = 0.0,
+        futures_qty: float = 0.0,
+        spot_qty: float = 0.0,
+        last_error: str = "",
+    ) -> dict:
+        amounts = self._bnb_fee_reserve_amounts()
+        futures_value = max(0.0, futures_qty * price_usd)
+        spot_value = max(0.0, spot_qty * price_usd)
+        spot_status = "healthy" if spot_value >= amounts["spot_min_usd"] else "low"
+        reserve_mode = "live" if self._execution_mode == "live" else "simulated"
+        return {
+            "status": status,
+            "mode": reserve_mode,
+            "enabled": self._futures_bnb_auto_topup_enabled or self._spot_bnb_auto_buy_enabled,
+            "discount_enabled": self._futures_bnb_discount_enabled,
+            "target_pct": self._futures_bnb_target_pct,
+            "target_usd": amounts["target_usd"],
+            "min_usd": amounts["min_usd"],
+            "transfer_min_usd": amounts["transfer_min_usd"],
+            "spot_min_usd": amounts["spot_min_usd"],
+            "spot_status": spot_status,
+            "spot_auto_buy_enabled": self._spot_bnb_auto_buy_enabled,
+            "spot_target_pct": self._spot_bnb_target_pct,
+            "spot_target_usd": amounts["spot_target_usd"],
+            "spot_buy_min_usd": amounts["spot_buy_min_usd"],
+            "price_usd": price_usd,
+            "futures_qty": futures_qty,
+            "futures_value_usd": futures_value,
+            "spot_qty": spot_qty,
+            "spot_value_usd": spot_value,
+            "last_check_ts": self._last_bnb_reserve_check_ts,
+            "last_transfer_ts": self._last_bnb_reserve_transfer_ts,
+            "last_spot_buy_ts": self._last_spot_bnb_buy_ts,
+            "last_error": last_error or self._last_bnb_reserve_error,
+            "last_spot_buy_error": self._last_spot_bnb_buy_error,
         }
 
     def _make_reserve_status(
@@ -232,7 +500,7 @@ class HedgeManager:
         required_initial = notional / max(1, self._leverage)
         required_buffered = required_initial * (1.0 + self._margin_buffer_pct)
         can_open = status not in ("emergency", "unavailable", "unknown")
-        return {
+        status_payload = {
             "status": status,
             "execution_mode": self._execution_mode,
             "leverage": self._leverage,
@@ -254,6 +522,9 @@ class HedgeManager:
             "last_error": last_error or self._last_reserve_error,
             **amounts,
         }
+        if hasattr(self, "_bnb_fee_reserve_status"):
+            status_payload["bnb_fee_reserve"] = dict(self._bnb_fee_reserve_status)
+        return status_payload
 
     def _classify_reserve(self, available_usd: float) -> str:
         amounts = self._reserve_amounts()
@@ -458,6 +729,19 @@ class HedgeManager:
         margin_buffer_pct: float | None = None,
         adjust_threshold_pct: float | None = None,
         leverage: int | None = None,
+        futures_taker_fee_rate: float | None = None,
+        futures_bnb_discount_enabled: bool | None = None,
+        futures_bnb_discount_pct: float | None = None,
+        futures_referral_cashback_enabled: bool | None = None,
+        futures_referral_cashback_pct: float | None = None,
+        futures_bnb_auto_topup_enabled: bool | None = None,
+        futures_bnb_min_usd: float | None = None,
+        futures_bnb_target_pct: float | None = None,
+        futures_bnb_transfer_min_usd: float | None = None,
+        spot_bnb_min_usd: float | None = None,
+        spot_bnb_auto_buy_enabled: bool | None = None,
+        spot_bnb_target_pct: float | None = None,
+        spot_bnb_buy_min_usd: float | None = None,
         total_capital: float | None = None,
         futures_capital_target_pct: float | None = None,
         futures_capital_topup_pct: float | None = None,
@@ -479,6 +763,36 @@ class HedgeManager:
             self._adjust_threshold_pct = float(adjust_threshold_pct)
         if leverage is not None:
             self._leverage = max(1, int(leverage))
+        if futures_taker_fee_rate is not None:
+            self._futures_taker_fee_rate = max(0.0, float(futures_taker_fee_rate))
+        if futures_bnb_discount_enabled is not None:
+            self._futures_bnb_discount_enabled = bool(futures_bnb_discount_enabled)
+        if futures_bnb_discount_pct is not None:
+            self._futures_bnb_discount_pct = max(
+                0.0, min(1.0, float(futures_bnb_discount_pct))
+            )
+        if futures_referral_cashback_enabled is not None:
+            self._futures_referral_cashback_enabled = bool(futures_referral_cashback_enabled)
+        if futures_referral_cashback_pct is not None:
+            self._futures_referral_cashback_pct = max(
+                0.0, min(1.0, float(futures_referral_cashback_pct))
+            )
+        if futures_bnb_auto_topup_enabled is not None:
+            self._futures_bnb_auto_topup_enabled = bool(futures_bnb_auto_topup_enabled)
+        if futures_bnb_min_usd is not None:
+            self._futures_bnb_min_usd = max(0.0, float(futures_bnb_min_usd))
+        if futures_bnb_target_pct is not None:
+            self._futures_bnb_target_pct = max(0.0, float(futures_bnb_target_pct))
+        if futures_bnb_transfer_min_usd is not None:
+            self._futures_bnb_transfer_min_usd = max(0.0, float(futures_bnb_transfer_min_usd))
+        if spot_bnb_min_usd is not None:
+            self._spot_bnb_min_usd = max(0.0, float(spot_bnb_min_usd))
+        if spot_bnb_auto_buy_enabled is not None:
+            self._spot_bnb_auto_buy_enabled = bool(spot_bnb_auto_buy_enabled)
+        if spot_bnb_target_pct is not None:
+            self._spot_bnb_target_pct = max(0.0, float(spot_bnb_target_pct))
+        if spot_bnb_buy_min_usd is not None:
+            self._spot_bnb_buy_min_usd = max(0.0, float(spot_bnb_buy_min_usd))
         if total_capital is not None:
             self._total_capital = max(0.0, float(total_capital))
         if futures_capital_target_pct is not None:
@@ -492,6 +806,7 @@ class HedgeManager:
         if futures_capital_transfer_min_usd is not None:
             self._futures_capital_transfer_min_usd = max(0.0, float(futures_capital_transfer_min_usd))
         self._reserve_status = self._make_reserve_status(self._reserve_status.get("status", "unknown"))
+        self._sync_balance_bnb_reserve_floor()
 
     def mark_inventory_changed(self, reason: str = "") -> None:
         """Wake the next evaluate() call after spot inventory changes.
@@ -504,6 +819,38 @@ class HedgeManager:
         self._last_evaluation_ts = 0.0
         if reason and logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"[Hedge] inventory changed: {reason} — next eval unthrottled")
+
+    def _sync_balance_bnb_reserve_floor(self) -> None:
+        setter = getattr(self._balance, "set_binance_spot_bnb_reserved_usd", None)
+        if callable(setter):
+            setter(self._spot_bnb_min_usd)
+
+    def _maybe_log_bnb_fee_reserve_status(self, now: float, status_payload: dict) -> None:
+        """Log BNB reserve health on changes and then periodically."""
+        signature = "|".join(
+            str(status_payload.get(k, ""))
+            for k in ("status", "spot_status", "last_error", "last_spot_buy_error")
+        )
+        if (
+            signature == self._last_bnb_reserve_status_signature
+            and now - self._last_bnb_reserve_status_log_ts < 300.0
+        ):
+            return
+        self._last_bnb_reserve_status_signature = signature
+        self._last_bnb_reserve_status_log_ts = now
+        logger.info(
+            f"[Hedge] BNB_RESERVE_STATUS status={status_payload.get('status', 'unknown')} "
+            f"mode={status_payload.get('mode', 'unknown')} "
+            f"spot=${status_payload.get('spot_value_usd', 0.0):.2f}/"
+            f"${status_payload.get('spot_target_usd', 0.0):.2f} "
+            f"floor=${status_payload.get('spot_min_usd', 0.0):.2f} "
+            f"futures=${status_payload.get('futures_value_usd', 0.0):.2f}/"
+            f"${status_payload.get('target_usd', 0.0):.2f} "
+            f"fut_min=${status_payload.get('min_usd', 0.0):.2f} "
+            f"price=${status_payload.get('price_usd', 0.0):.4f} "
+            f"err={status_payload.get('last_error', '') or '-'} "
+            f"spot_buy_err={status_payload.get('last_spot_buy_error', '') or '-'}"
+        )
 
     # ── Sizing primitives ─────────────────────────────────────────────
 
@@ -609,10 +956,12 @@ class HedgeManager:
             sh.last_funding_check_ts = now
             sh.open_count += 1
             self._total_opens += 1
+            fee = self._record_execution_fee(sh, notional)
             logger.info(
                 f"[Hedge] WOULD_OPEN {spot_symbol} → {f_sym} "
                 f"(mult={mult}) qty={target_qty:.6f} notional=${notional:.2f} "
-                f"price=${price:.4f} funding={ann_str}"
+                f"price=${price:.4f} funding={ann_str} "
+                f"fee=${fee['net_fee_usd']:.4f}@{fee['effective_rate']*100:.4f}%"
             )
             return True
 
@@ -653,10 +1002,18 @@ class HedgeManager:
         sh.last_funding_check_ts = now
         sh.open_count += 1
         self._total_opens += 1
+        fill_notional = result.filled_qty * result.actual_avg_price
+        fee = self._record_execution_fee(
+            sh,
+            fill_notional if fill_notional > 0 else notional,
+            actual_fee=result.actual_fee,
+            fee_currency=result.fee_currency,
+        )
         logger.info(
             f"[Hedge] OPEN {spot_symbol} → {f_sym} qty={futures_qty:.6f} "
             f"(spot_qty={target_qty:.6f}) fill_px=${fill_px:.4f} notional=${notional:.2f} "
-            f"funding={ann_str} latency={result.latency_ms:.0f}ms"
+            f"funding={ann_str} fee=${fee['net_fee_usd']:.4f}@{fee['effective_rate']*100:.4f}% "
+            f"latency={result.latency_ms:.0f}ms"
         )
         return True
 
@@ -705,11 +1062,12 @@ class HedgeManager:
             sh.last_adjusted_at = now
             sh.adjust_count += 1
             self._total_adjusts += 1
+            fee = self._record_execution_fee(sh, abs(delta) * price)
             sign = "+" if delta > 0 else "-"
             logger.info(
                 f"[Hedge] WOULD_ADJUST {spot_symbol} {sign}{abs(delta):.6f} "
                 f"(was {old_qty:.6f} → now {new_qty:.6f}) notional=${notional:.2f} "
-                f"entry=${sh.entry_price:.4f}"
+                f"entry=${sh.entry_price:.4f} fee=${fee['net_fee_usd']:.4f}"
             )
             return True
 
@@ -748,7 +1106,7 @@ class HedgeManager:
         sh.qty = new_qty
         if abs(new_qty) > abs(old_qty):
             fill_px = (
-                result.actual_avg_price
+                result.actual_avg_price / mult
                 if result.actual_avg_price > 0
                 else price
             )
@@ -760,11 +1118,18 @@ class HedgeManager:
         sh.last_adjusted_at = now
         sh.adjust_count += 1
         self._total_adjusts += 1
+        fill_notional = result.filled_qty * result.actual_avg_price
+        fee = self._record_execution_fee(
+            sh,
+            fill_notional if fill_notional > 0 else abs(delta) * price,
+            actual_fee=result.actual_fee,
+            fee_currency=result.fee_currency,
+        )
         sign = "+" if delta > 0 else "-"
         logger.info(
             f"[Hedge] ADJUST {spot_symbol} {sign}{abs(delta):.6f} "
             f"(was {old_qty:.6f} → now {new_qty:.6f}) notional=${notional:.2f} "
-            f"latency={result.latency_ms:.0f}ms{entry_log}"
+            f"fee=${fee['net_fee_usd']:.4f} latency={result.latency_ms:.0f}ms{entry_log}"
         )
         return True
 
@@ -783,6 +1148,7 @@ class HedgeManager:
         held_h = held_seconds / 3600
 
         if not self._is_real_mode():
+            fee = self._record_execution_fee(sh, old_qty * price)
             sh.qty = 0.0
             sh.entry_price = 0.0
             sh.opened_at = 0.0
@@ -790,7 +1156,8 @@ class HedgeManager:
             self._total_closes += 1
             logger.info(
                 f"[Hedge] WOULD_CLOSE {spot_symbol} qty={old_qty:.6f} held={held_h:.1f}h "
-                f"reason={reason} cumulative_funding=${sh.accumulated_funding_usd:+.4f}"
+                f"reason={reason} cumulative_funding=${sh.accumulated_funding_usd:+.4f} "
+                f"fee=${fee['net_fee_usd']:.4f}"
             )
             return True
 
@@ -821,11 +1188,18 @@ class HedgeManager:
         sh.opened_at = 0.0
         sh.close_count += 1
         self._total_closes += 1
+        fill_notional = result.filled_qty * result.actual_avg_price
+        fee = self._record_execution_fee(
+            sh,
+            fill_notional if fill_notional > 0 else old_qty * price,
+            actual_fee=result.actual_fee,
+            fee_currency=result.fee_currency,
+        )
         logger.info(
             f"[Hedge] CLOSE {spot_symbol} → {f_sym} closed_qty={result.filled_qty:.6f} "
             f"held={held_h:.1f}h reason={reason} "
             f"cumulative_funding=${sh.accumulated_funding_usd:+.4f} "
-            f"latency={result.latency_ms:.0f}ms"
+            f"fee=${fee['net_fee_usd']:.4f} latency={result.latency_ms:.0f}ms"
         )
         return True
 
@@ -841,6 +1215,263 @@ class HedgeManager:
             return False
         return True
 
+    async def _refresh_bnb_fee_reserve(self, now: float, allow_transfer: bool) -> dict:
+        """Maintain BNB reserves for Binance Spot and USD-M Futures fees.
+
+        Live mode buys Spot BNB with a market order, then transfers excess
+        Spot BNB to USD-M Futures when the Futures fee reserve is low.
+        Non-live modes run the same policy against BalanceTracker's synthetic
+        BNB wallets so the capital impact is visible before going live.
+        """
+        futures_policy_enabled = (
+            self._futures_bnb_discount_enabled
+            and self._futures_bnb_auto_topup_enabled
+            and self._futures_bnb_target_pct > 0
+        )
+        spot_buy_enabled = (
+            self._spot_bnb_auto_buy_enabled
+            and (self._spot_bnb_min_usd > 0 or self._spot_bnb_target_pct > 0)
+        )
+        if not futures_policy_enabled and not spot_buy_enabled:
+            self._last_bnb_reserve_check_ts = now
+            self._bnb_fee_reserve_status = self._make_bnb_fee_reserve_status("disabled")
+            self._maybe_log_bnb_fee_reserve_status(now, self._bnb_fee_reserve_status)
+            return self._bnb_fee_reserve_status
+
+        if now - self._last_bnb_reserve_check_ts < 60.0:
+            return self._bnb_fee_reserve_status
+
+        self._last_bnb_reserve_check_ts = now
+        amounts = self._bnb_fee_reserve_amounts()
+        simulated = self._execution_mode != "live"
+        price = 0.0
+        if not simulated and self._executor is not None:
+            price = await self._executor.get_spot_ticker_price("BNBUSDT")
+            if price <= 0:
+                price = await self._executor.get_ticker_price("BNBUSDT")
+        else:
+            price = _to_float(self._funding_monitor.get_mark_price("BNBUSDT"))
+            if price <= 0:
+                price = self._lookup_price("BNBUSDT")
+        if price <= 0:
+            self._last_bnb_reserve_error = "bnb_price_unavailable"
+            self._bnb_fee_reserve_status = self._make_bnb_fee_reserve_status(
+                "unavailable",
+                last_error=self._last_bnb_reserve_error,
+            )
+            self._maybe_log_bnb_fee_reserve_status(now, self._bnb_fee_reserve_status)
+            return self._bnb_fee_reserve_status
+        self._last_bnb_price_usd = price
+
+        if simulated:
+            futures_qty = float(getattr(self._balance, "binance_futures_bnb", 0.0) or 0.0)
+            spot_qty = float(getattr(self._balance, "binance_spot_bnb", 0.0) or 0.0)
+        elif self._executor is not None:
+            futures_qty = await self._executor.get_balance("BNB")
+            spot_qty = await self._executor.get_spot_balance("BNB")
+        else:
+            self._last_bnb_reserve_error = "futures_executor_missing"
+            self._bnb_fee_reserve_status = self._make_bnb_fee_reserve_status(
+                "unavailable",
+                price_usd=price,
+                last_error=self._last_bnb_reserve_error,
+            )
+            self._maybe_log_bnb_fee_reserve_status(now, self._bnb_fee_reserve_status)
+            return self._bnb_fee_reserve_status
+
+        futures_value = futures_qty * price
+        spot_value = spot_qty * price
+        futures_low = futures_policy_enabled and futures_value < amounts["min_usd"]
+        spot_low = spot_buy_enabled and spot_value < amounts["spot_min_usd"]
+        status = "low" if futures_low or spot_low else "healthy"
+        self._last_bnb_reserve_error = ""
+        self._last_spot_bnb_buy_error = ""
+
+        futures_topup_needed_usd = (
+            max(0.0, amounts["target_usd"] - futures_value)
+            if futures_low
+            else 0.0
+        )
+        required_spot_usd = amounts["spot_target_usd"]
+        if futures_topup_needed_usd > 0:
+            required_spot_usd = max(
+                required_spot_usd,
+                amounts["spot_min_usd"] + futures_topup_needed_usd,
+            )
+
+        buy_gap_ok = (now - self._last_spot_bnb_buy_ts) >= 60.0
+        should_buy_spot = (
+            allow_transfer
+            and spot_buy_enabled
+            and buy_gap_ok
+            and (spot_low or (futures_topup_needed_usd > 0 and spot_value < required_spot_usd))
+            and required_spot_usd > spot_value
+        )
+        if should_buy_spot:
+            max_buy_attempts = 3
+            buy_attempt = 0
+
+            if simulated:
+                while spot_value < required_spot_usd and buy_attempt < max_buy_attempts:
+                    buy_attempt += 1
+                    buy_usd = max(0.0, required_spot_usd - spot_value) * 1.001
+                    if 0 < buy_usd < amounts["spot_buy_min_usd"]:
+                        buy_usd = amounts["spot_buy_min_usd"]
+                    result = self._balance.buy_spot_bnb_with_usdt(buy_usd, price)
+                    if result.get("success"):
+                        bought_qty = float(result.get("net_qty", 0.0) or 0.0)
+                        spent = float(result.get("spent_usd", 0.0) or 0.0)
+                        spot_qty += bought_qty
+                        spot_value = spot_qty * price
+                        self._last_spot_bnb_buy_ts = now
+                        logger.info(
+                            f"[Hedge] SIM_SPOT_BNB_BUY attempt={buy_attempt} "
+                            f"amount=${spent:.2f} qty={bought_qty:.8f} BNB "
+                            f"price=${price:.4f} "
+                            f"spot=${spot_value:.2f} target=${required_spot_usd:.2f}"
+                        )
+                        if spot_value >= required_spot_usd:
+                            break
+                    else:
+                        self._last_spot_bnb_buy_error = str(result.get("error") or result)
+                        logger.warning(
+                            f"[Hedge] SIM_SPOT_BNB_BUY_FAILED attempt={buy_attempt} "
+                            f"amount=${buy_usd:.2f}: {self._last_spot_bnb_buy_error}"
+                        )
+                        break
+            elif self._executor is not None:
+                while spot_value < required_spot_usd and buy_attempt < max_buy_attempts:
+                    buy_attempt += 1
+                    latest_price = await self._executor.get_spot_ticker_price("BNBUSDT")
+                    if latest_price <= 0:
+                        latest_price = await self._executor.get_ticker_price("BNBUSDT")
+                    if latest_price > 0:
+                        price = latest_price
+                        spot_value = spot_qty * price
+                    remaining_usd = max(0.0, required_spot_usd - spot_value)
+                    if remaining_usd <= 0:
+                        break
+
+                    buy_usd = remaining_usd * 1.001
+                    if 0 < buy_usd < amounts["spot_buy_min_usd"]:
+                        buy_usd = amounts["spot_buy_min_usd"]
+                    available_usdt = await self._executor.get_spot_balance("USDT")
+                    buy_usd = min(buy_usd, max(0.0, available_usdt))
+                    if buy_usd < amounts["spot_buy_min_usd"]:
+                        self._last_spot_bnb_buy_error = (
+                            f"binance_spot_usdt=${available_usdt:.2f} "
+                            f"below_buy_min=${amounts['spot_buy_min_usd']:.2f}"
+                        )
+                        logger.warning(
+                            f"[Hedge] SPOT_BNB_BUY_SKIPPED attempt={buy_attempt}: "
+                            f"{self._last_spot_bnb_buy_error}"
+                        )
+                        break
+
+                    cid = f"bnbbuy{int(now * 1000) % 1_000_000_000}{buy_attempt}"
+                    result = await self._executor.place_spot_market_buy_bnb(
+                        buy_usd,
+                        client_order_id=cid,
+                    )
+                    if result.get("success"):
+                        bought_qty = float(result.get("net_qty", 0.0) or 0.0)
+                        spent = float(result.get("spent_usdt", 0.0) or 0.0)
+                        spot_qty += bought_qty
+                        spot_value = spot_qty * price
+                        self._last_spot_bnb_buy_ts = now
+                        logger.info(
+                            f"[Hedge] SPOT_BNB_BUY attempt={buy_attempt} "
+                            f"amount=${spent:.2f} qty={bought_qty:.8f} BNB "
+                            f"market_avg=${result.get('avg_price', 0.0):.4f} "
+                            f"spot=${spot_value:.2f} target=${required_spot_usd:.2f}"
+                        )
+                        if spot_value >= required_spot_usd:
+                            break
+                    else:
+                        error = str(result.get("error") or result)
+                        self._last_spot_bnb_buy_error = error
+                        logger.warning(
+                            f"[Hedge] SPOT_BNB_BUY_FAILED attempt={buy_attempt} "
+                            f"amount=${buy_usd:.2f}: {error}"
+                        )
+                        break
+
+                if spot_value < required_spot_usd and not self._last_spot_bnb_buy_error:
+                    self._last_spot_bnb_buy_error = (
+                        f"spot_bnb_buy_incomplete spot=${spot_value:.2f} "
+                        f"target=${required_spot_usd:.2f} attempts={buy_attempt}"
+                    )
+                    logger.warning(f"[Hedge] SPOT_BNB_BUY_INCOMPLETE: {self._last_spot_bnb_buy_error}")
+
+            futures_value = futures_qty * price
+            futures_low = futures_policy_enabled and futures_value < amounts["min_usd"]
+            spot_low = spot_buy_enabled and spot_value < amounts["spot_min_usd"]
+            status = "low" if futures_low or spot_low else "healthy"
+
+        transfer_gap_ok = (now - self._last_bnb_reserve_transfer_ts) >= 30.0
+        if (
+            allow_transfer
+            and futures_policy_enabled
+            and futures_low
+            and transfer_gap_ok
+            and amounts["target_usd"] > futures_value
+        ):
+            desired_usd = amounts["target_usd"] - futures_value
+            transferable_usd = max(0.0, spot_value - amounts["spot_min_usd"])
+            transfer_usd = min(desired_usd, transferable_usd)
+            if transfer_usd >= amounts["transfer_min_usd"]:
+                transfer_qty = transfer_usd / price
+                if simulated:
+                    result = self._balance.transfer_spot_bnb_to_futures(transfer_qty)
+                else:
+                    result = await self._executor.transfer_spot_to_futures(
+                        transfer_qty,
+                        asset="BNB",
+                    )
+                if result.get("success"):
+                    self._last_bnb_reserve_transfer_ts = now
+                    moved_qty = float(result.get("amount", transfer_qty) or transfer_qty)
+                    moved_usd = moved_qty * price
+                    logger.info(
+                        f"[Hedge] {'SIM_' if simulated else ''}FUTURES_BNB_TOPUP "
+                        f"amount={moved_qty:.8f} BNB "
+                        f"value=${moved_usd:.2f} target=${amounts['target_usd']:.2f} "
+                        f"futures=${futures_value:.2f} spot_floor=${amounts['spot_min_usd']:.2f}"
+                    )
+                    futures_qty += moved_qty
+                    spot_qty = max(0.0, spot_qty - moved_qty)
+                    futures_value = futures_qty * price
+                    spot_value = spot_qty * price
+                    futures_low = futures_policy_enabled and futures_value < amounts["min_usd"]
+                    spot_low = spot_buy_enabled and spot_value < amounts["spot_min_usd"]
+                    status = "low" if futures_low or spot_low else "healthy"
+                else:
+                    self._last_bnb_reserve_error = str(result.get("error") or result)
+                    logger.warning(
+                        f"[Hedge] FUTURES_BNB_TOPUP_FAILED value=${transfer_usd:.2f}: "
+                        f"{self._last_bnb_reserve_error}"
+                    )
+            else:
+                self._last_bnb_reserve_error = (
+                    f"spot_bnb_transferable=${transferable_usd:.2f} "
+                    f"below_min=${amounts['transfer_min_usd']:.2f}"
+                )
+                logger.warning(
+                    f"[Hedge] FUTURES_BNB_TOPUP_SKIPPED futures=${futures_value:.2f} "
+                    f"target=${amounts['target_usd']:.2f} spot=${spot_value:.2f} "
+                    f"spot_floor=${amounts['spot_min_usd']:.2f}"
+                )
+
+        self._bnb_fee_reserve_status = self._make_bnb_fee_reserve_status(
+            status,
+            price_usd=price,
+            futures_qty=futures_qty,
+            spot_qty=spot_qty,
+            last_error=self._last_bnb_reserve_error,
+        )
+        self._maybe_log_bnb_fee_reserve_status(now, self._bnb_fee_reserve_status)
+        return self._bnb_fee_reserve_status
+
     async def refresh_reserve_status(self, allow_transfer: bool = True) -> dict:
         """Refresh Binance Futures reserve health and optionally rebalance it.
 
@@ -849,6 +1480,17 @@ class HedgeManager:
         separately before each grow/open order.
         """
         now = time.time()
+        previous_status = dict(self._reserve_status)
+        previous_check_ts = float(previous_status.get("last_check_ts", 0.0) or 0.0)
+        previous_label = str(previous_status.get("status", "unknown"))
+        if (
+            self._is_real_mode()
+            and previous_check_ts > 0
+            and now - previous_check_ts < 5.0
+            and not (allow_transfer and previous_label in ("emergency", "topup_needed"))
+        ):
+            return self._reserve_status
+
         self._last_reserve_check_ts = now
 
         if self._futures_capital_target_pct <= 0 or self._total_capital <= 0:
@@ -870,6 +1512,7 @@ class HedgeManager:
             return self._reserve_status
 
         if not self._is_real_mode():
+            await self._refresh_bnb_fee_reserve(now, allow_transfer=allow_transfer)
             reserve = float(getattr(self._balance, "binance_futures_usdt", 0.0) or 0.0)
             status = self._classify_reserve(reserve)
             self._reserve_status = self._make_reserve_status(
@@ -891,6 +1534,17 @@ class HedgeManager:
         info = await self._executor.get_account_info()
         if not info:
             self._last_reserve_error = "futures_account_info_unavailable"
+            if (
+                previous_check_ts > 0
+                and previous_label not in ("unknown", "unavailable")
+                and now - previous_check_ts <= 300.0
+            ):
+                cached = dict(previous_status)
+                cached["last_error"] = (
+                    "futures_account_info_unavailable_using_cached_reserve"
+                )
+                self._reserve_status = cached
+                return self._reserve_status
             self._reserve_status = self._make_reserve_status(
                 "unavailable",
                 last_error=self._last_reserve_error,
@@ -960,6 +1614,7 @@ class HedgeManager:
                         f"{self._last_reserve_error}"
                     )
 
+        await self._refresh_bnb_fee_reserve(now, allow_transfer=allow_transfer)
         self._reserve_status = self._make_reserve_status(
             status,
             wallet_balance_usd=wallet,
@@ -978,6 +1633,7 @@ class HedgeManager:
         if self._execution_mode in ("testnet", "live") and status in (
             "unknown",
             "unavailable",
+            "topup_needed",
             "emergency",
         ):
             return (False, f"futures_reserve_{status}")
@@ -1288,10 +1944,24 @@ class HedgeManager:
                     "open_count": sh.open_count,
                     "close_count": sh.close_count,
                     "adjust_count": sh.adjust_count,
+                    "accumulated_execution_fees_usd": sh.accumulated_execution_fees_usd,
+                    "accumulated_fee_bnb_discount_usd": sh.accumulated_fee_bnb_discount_usd,
+                    "accumulated_fee_referral_cashback_usd": sh.accumulated_fee_referral_cashback_usd,
                 }
                 for sym, sh in self._shadows.items()
             },
             "_cumulative_funding_usd": self._cumulative_funding_usd,
+            "_cumulative_execution_fees_usd": self._cumulative_execution_fees_usd,
+            "_cumulative_fee_bnb_discount_usd": self._cumulative_fee_bnb_discount_usd,
+            "_cumulative_fee_referral_cashback_usd": self._cumulative_fee_referral_cashback_usd,
+            "_last_bnb_reserve_check_ts": self._last_bnb_reserve_check_ts,
+            "_last_bnb_reserve_transfer_ts": self._last_bnb_reserve_transfer_ts,
+            "_last_spot_bnb_buy_ts": self._last_spot_bnb_buy_ts,
+            "_last_bnb_reserve_error": self._last_bnb_reserve_error,
+            "_last_spot_bnb_buy_error": self._last_spot_bnb_buy_error,
+            "_bnb_fee_reserve_status": dict(self._bnb_fee_reserve_status),
+            "_last_bnb_reserve_status_log_ts": self._last_bnb_reserve_status_log_ts,
+            "_last_bnb_reserve_status_signature": self._last_bnb_reserve_status_signature,
             "_total_opens": self._total_opens,
             "_total_closes": self._total_closes,
             "_total_adjusts": self._total_adjusts,
@@ -1301,6 +1971,29 @@ class HedgeManager:
 
     def from_state_dict(self, data: dict) -> None:
         self._cumulative_funding_usd = float(data.get("_cumulative_funding_usd", 0.0))
+        self._cumulative_execution_fees_usd = float(
+            data.get("_cumulative_execution_fees_usd", 0.0)
+        )
+        self._cumulative_fee_bnb_discount_usd = float(
+            data.get("_cumulative_fee_bnb_discount_usd", 0.0)
+        )
+        self._cumulative_fee_referral_cashback_usd = float(
+            data.get("_cumulative_fee_referral_cashback_usd", 0.0)
+        )
+        self._last_bnb_reserve_check_ts = float(data.get("_last_bnb_reserve_check_ts", 0.0))
+        self._last_bnb_reserve_transfer_ts = float(data.get("_last_bnb_reserve_transfer_ts", 0.0))
+        self._last_spot_bnb_buy_ts = float(data.get("_last_spot_bnb_buy_ts", 0.0))
+        self._last_bnb_reserve_error = str(data.get("_last_bnb_reserve_error", ""))
+        self._last_spot_bnb_buy_error = str(data.get("_last_spot_bnb_buy_error", ""))
+        if isinstance(data.get("_bnb_fee_reserve_status"), dict):
+            self._bnb_fee_reserve_status = dict(data["_bnb_fee_reserve_status"])
+        self._last_bnb_reserve_status_log_ts = float(
+            data.get("_last_bnb_reserve_status_log_ts", 0.0)
+        )
+        self._last_bnb_reserve_status_signature = str(
+            data.get("_last_bnb_reserve_status_signature", "")
+        )
+        self._sync_balance_bnb_reserve_floor()
         self._total_opens = int(data.get("_total_opens", 0))
         self._total_closes = int(data.get("_total_closes", 0))
         self._total_adjusts = int(data.get("_total_adjusts", 0))
@@ -1320,6 +2013,15 @@ class HedgeManager:
                 open_count=int(sd.get("open_count", 0)),
                 close_count=int(sd.get("close_count", 0)),
                 adjust_count=int(sd.get("adjust_count", 0)),
+                accumulated_execution_fees_usd=float(
+                    sd.get("accumulated_execution_fees_usd", 0.0)
+                ),
+                accumulated_fee_bnb_discount_usd=float(
+                    sd.get("accumulated_fee_bnb_discount_usd", 0.0)
+                ),
+                accumulated_fee_referral_cashback_usd=float(
+                    sd.get("accumulated_fee_referral_cashback_usd", 0.0)
+                ),
             )
 
     # ── Debug snapshot for dashboard ─────────────────────────────────
@@ -1389,9 +2091,17 @@ class HedgeManager:
                 "quantity_gap_pct": gap_pct,
                 "notional_gap_usd": gap_notional,
                 "unrealized_pnl_usd": unrealized_pnl,
+                "total_pnl_usd": (
+                    unrealized_pnl
+                    + s.accumulated_funding_usd
+                    - s.accumulated_execution_fees_usd
+                ),
                 "opened_at": s.opened_at,
                 "held_seconds": (now - s.opened_at) if s.opened_at > 0 else 0.0,
                 "accumulated_funding_usd": s.accumulated_funding_usd,
+                "accumulated_execution_fees_usd": s.accumulated_execution_fees_usd,
+                "accumulated_fee_bnb_discount_usd": s.accumulated_fee_bnb_discount_usd,
+                "accumulated_fee_referral_cashback_usd": s.accumulated_fee_referral_cashback_usd,
                 "funding_rate": funding_rate,
                 "annualized_short_pct": ann_short,
                 "open_count": s.open_count,
@@ -1444,6 +2154,12 @@ class HedgeManager:
             )
             self._logged_futures_mark = True
 
+        total_pnl = (
+            total_unrealized_pnl
+            + self._cumulative_funding_usd
+            - self._cumulative_execution_fees_usd
+        )
+
         return {
             "enabled": self._enabled,
             "execution_mode": self._execution_mode,
@@ -1463,7 +2179,17 @@ class HedgeManager:
             "total_target_notional_usd": total_target_notional,
             "total_hedge_gap_usd": total_gap_notional,
             "total_unrealized_pnl_usd": total_unrealized_pnl,
+            "total_pnl_usd": total_pnl,
             "cumulative_funding_usd": self._cumulative_funding_usd,
+            "cumulative_execution_fees_usd": self._cumulative_execution_fees_usd,
+            "cumulative_fee_bnb_discount_usd": self._cumulative_fee_bnb_discount_usd,
+            "cumulative_fee_referral_cashback_usd": self._cumulative_fee_referral_cashback_usd,
+            "futures_fee_rate": self._futures_taker_fee_rate,
+            "futures_effective_fee_rate": self._effective_futures_fee_rate(),
+            "futures_bnb_discount_enabled": self._futures_bnb_discount_enabled,
+            "futures_bnb_discount_pct": self._futures_bnb_discount_pct,
+            "futures_referral_cashback_enabled": self._futures_referral_cashback_enabled,
+            "futures_referral_cashback_pct": self._futures_referral_cashback_pct,
             "total_opens": self._total_opens,
             "total_closes": self._total_closes,
             "total_adjusts": self._total_adjusts,
@@ -1489,6 +2215,7 @@ class HedgeManager:
                 "close_count": s.close_count,
                 "adjust_count": s.adjust_count,
                 "accumulated_funding_usd": s.accumulated_funding_usd,
+                "accumulated_execution_fees_usd": s.accumulated_execution_fees_usd,
                 "current_qty": s.qty,
                 "current_entry_price": s.entry_price,
                 "opened_at": s.opened_at,

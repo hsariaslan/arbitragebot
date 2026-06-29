@@ -1022,6 +1022,7 @@ class ConfigFactory:
             bitfinex_reserve_pct=float(s.get("bitfinex_reserve_pct", 0.15)),
             bitfinex_reserve_hard_floor=float(s.get("bitfinex_reserve_hard_floor", 0.05)),
             futures_reserve_usdt=futures_reserve_usdt,
+            binance_spot_bnb_reserved_usd=float(s.get("binance_spot_bnb_min_usd", 5.0)),
         )
 
         # ── ArbitrageMonitor ───────────────────────────────────────────
@@ -1041,6 +1042,27 @@ class ConfigFactory:
             fee_manager=fee_manager,
             net_pct_sizing_enabled=bool(s.get("net_pct_sizing_enabled", True)),
             net_pct_multiplier_cap=float(s.get("net_pct_multiplier_cap", 2.5)),
+            strict_slippage_guards_enabled=bool(s.get("strict_slippage_guards_enabled", True)),
+            require_order_book_depth=bool(s.get("require_order_book_depth", True)),
+            order_book_depth_buffer_multiplier=float(
+                s.get("order_book_depth_buffer_multiplier", 1.25)
+            ),
+            missing_order_book_penalty_pct=float(
+                s.get("missing_order_book_penalty_pct", 0.25)
+            ),
+            max_leg_slippage_pct=float(s.get("max_leg_slippage_pct", 0.05)),
+            max_total_slippage_pct=float(s.get("max_total_slippage_pct", 0.08)),
+            slippage_safety_multiplier=float(s.get("slippage_safety_multiplier", 1.5)),
+            slippage_latency_buffer_pct=float(s.get("slippage_latency_buffer_pct", 0.01)),
+            book_age_guard_enabled=bool(s.get("book_age_guard_enabled", True)),
+            max_book_age_seconds=float(s.get("max_book_age_seconds", 2.0)),
+            event_driven_max_book_age_seconds=float(
+                s.get("event_driven_max_book_age_seconds", 15.0)
+            ),
+            depth_aware_trade_size_shrink_enabled=bool(
+                s.get("depth_aware_trade_size_shrink_enabled", True)
+            ),
+            min_depth_shrink_ratio=float(s.get("min_depth_shrink_ratio", 0.5)),
         )
 
         # ── SymbolOptimizer ────────────────────────────────────────────
@@ -1071,6 +1093,23 @@ class ConfigFactory:
             demotion_cooldown_multiplier=float(s.get("demotion_cooldown_multiplier", 5.0)),
             reallocation_cost_horizon=float(s.get("reallocation_cost_horizon", 2.0)),
             min_warmup_ticks=MIN_WARMUP_TICKS,
+            strict_slippage_guards_enabled=bool(s.get("strict_slippage_guards_enabled", True)),
+            require_order_book_depth=bool(s.get("require_order_book_depth", True)),
+            order_book_depth_buffer_multiplier=float(
+                s.get("order_book_depth_buffer_multiplier", 1.25)
+            ),
+            missing_order_book_penalty_pct=float(
+                s.get("missing_order_book_penalty_pct", 0.25)
+            ),
+            max_leg_slippage_pct=float(s.get("max_leg_slippage_pct", 0.05)),
+            max_total_slippage_pct=float(s.get("max_total_slippage_pct", 0.08)),
+            slippage_safety_multiplier=float(s.get("slippage_safety_multiplier", 1.5)),
+            slippage_latency_buffer_pct=float(s.get("slippage_latency_buffer_pct", 0.01)),
+            book_age_guard_enabled=bool(s.get("book_age_guard_enabled", True)),
+            max_book_age_seconds=float(s.get("max_book_age_seconds", 2.0)),
+            event_driven_max_book_age_seconds=float(
+                s.get("event_driven_max_book_age_seconds", 15.0)
+            ),
         )
         if "trading_score_threshold" in s:
             optimizer._trading_threshold = float(s["trading_score_threshold"])
@@ -1112,6 +1151,29 @@ class ConfigFactory:
             margin_buffer_pct=float(s.get("hedge_margin_buffer_pct", 0.20)),
             adjust_threshold_pct=float(s.get("hedge_adjust_threshold_pct", 0.01)),
             leverage=int(s.get("hedge_leverage", 2)),
+            futures_taker_fee_rate=float(s.get("binance_futures_taker_fee_rate", 0.0005)),
+            futures_bnb_discount_enabled=bool(s.get("binance_futures_bnb_discount_enabled", True)),
+            futures_bnb_discount_pct=float(s.get("binance_futures_bnb_discount_pct", 0.10)),
+            futures_referral_cashback_enabled=bool(
+                s.get("binance_futures_referral_cashback_enabled", False)
+            ),
+            futures_referral_cashback_pct=float(
+                s.get("binance_futures_referral_cashback_pct", 0.10)
+            ),
+            futures_bnb_auto_topup_enabled=bool(
+                s.get("binance_futures_bnb_auto_topup_enabled", True)
+            ),
+            futures_bnb_min_usd=float(s.get("binance_futures_bnb_min_usd", 5.0)),
+            futures_bnb_target_pct=float(s.get("binance_futures_bnb_target_pct", 0.05)),
+            futures_bnb_transfer_min_usd=float(
+                s.get("binance_futures_bnb_transfer_min_usd", 5.0)
+            ),
+            spot_bnb_min_usd=float(s.get("binance_spot_bnb_min_usd", 5.0)),
+            spot_bnb_auto_buy_enabled=bool(
+                s.get("binance_spot_bnb_auto_buy_enabled", True)
+            ),
+            spot_bnb_target_pct=float(s.get("binance_spot_bnb_target_pct", 0.01)),
+            spot_bnb_buy_min_usd=float(s.get("binance_spot_bnb_buy_min_usd", 10.0)),
             total_capital=total_capital,
             futures_capital_target_pct=float(s.get("futures_capital_target_pct", 0.40)),
             futures_capital_topup_pct=float(s.get("futures_capital_topup_pct", 0.35)),
@@ -1183,6 +1245,9 @@ class ConfigFactory:
                                 s.get("bitfinex_reserve_hard_floor", 0.05)
                             ),
                             futures_reserve_usdt=futures_reserve_usdt,
+                            binance_spot_bnb_reserved_usd=float(
+                                s.get("binance_spot_bnb_min_usd", 5.0)
+                            ),
                         )
                         # Re-wire monitor/optimizer to the fresh balance
                         monitor._balance = balance

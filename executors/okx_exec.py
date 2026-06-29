@@ -159,6 +159,116 @@ class OKXExecutor(ExecutionEngine):
                 f"exception: {e}", client_order_id,
             )
 
+    async def place_marketable_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        client_order_id: str,
+        limit_price: float,
+        time_in_force: str = "IOC",
+        expected_price: float = 0.0,
+    ) -> TradeResult:
+        """Place a limit IOC/FOK order that crosses the book with a price cap."""
+        if not await self._rate_limiter.acquire():
+            return self._failed_result(
+                symbol,
+                side,
+                qty,
+                expected_price,
+                "rate_limited",
+                client_order_id,
+            )
+
+        session = await self._ensure_session()
+        t0 = time.time()
+
+        inst_id = self.format_symbol(symbol)
+        price_dec = self.round_limit_price(symbol, side, limit_price)
+        tif = "fok" if time_in_force.upper() == "FOK" else "ioc"
+        body_dict = {
+            "instId": inst_id,
+            "tdMode": "cash",
+            "side": side.lower(),
+            "ordType": tif,
+            "sz": f"{qty:.8f}".rstrip("0").rstrip("."),
+            "px": format(price_dec, "f").rstrip("0").rstrip("."),
+            "clOrdId": client_order_id[:32],
+        }
+        body = json.dumps(body_dict)
+
+        path = "/api/v5/trade/order"
+        headers = self._sign_headers("POST", path, body)
+        url = f"{_BASE_URL}{path}"
+
+        try:
+            async with session.post(url, headers=headers, data=body) as resp:
+                data = await resp.json()
+
+            if data.get("code") != "0":
+                error = data.get("msg", "")
+                sdata = data.get("data", [{}])
+                if sdata:
+                    error = sdata[0].get("sMsg", error) or error
+                count = self._rejected_symbols.get(symbol, 0) + 1
+                self._rejected_symbols[symbol] = count
+                if count == 1:
+                    logger.warning(
+                        f"[OKXExec] Limit {tif.upper()} rejected: "
+                        f"{symbol} {side} qty={qty} px={body_dict['px']} — {error}"
+                    )
+                elif count == 2:
+                    logger.info(
+                        f"[OKXExec] {symbol} limit rejection repeated — "
+                        f"suppressing further logs"
+                    )
+                return self._failed_result(
+                    symbol,
+                    side,
+                    qty,
+                    expected_price,
+                    error,
+                    client_order_id,
+                )
+
+            order_data = data.get("data", [{}])[0]
+            ord_id = order_data.get("ordId", "")
+            if not ord_id:
+                return self._failed_result(
+                    symbol,
+                    side,
+                    qty,
+                    expected_price,
+                    "no ordId in response",
+                    client_order_id,
+                )
+
+            await asyncio.sleep(0.2)
+            fill_result = await self._query_order(
+                inst_id,
+                ord_id,
+                symbol,
+                side,
+                qty,
+                expected_price,
+                client_order_id,
+            )
+            fill_result.latency_ms = (time.time() - t0) * 1000.0
+            if fill_result.success and fill_result.fill_ratio < 0.999:
+                fill_result.error = f"partial_fill:{fill_result.fill_ratio:.4f}"
+            return fill_result
+
+        except Exception as e:
+            logger.error(f"[OKXExec] Limit order exception: {symbol} {side} — {e}")
+            return self._failed_result(
+                symbol,
+                side,
+                qty,
+                expected_price,
+                f"exception: {e}",
+                client_order_id,
+            )
+
     async def _query_order(
         self, inst_id: str, ord_id: str, symbol: str, side: str,
         qty: float, expected_price: float, client_order_id: str,
@@ -202,7 +312,13 @@ class OKXExecutor(ExecutionEngine):
 
                 # Determine fee rate
                 notional = fill_sz * avg_px if avg_px > 0 else 0
-                fee_rate = fee / notional if notional > 0 and fee_ccy == "USDT" else 0
+                actual_fee_usd = 0.0
+                base_asset = symbol[:-4] if symbol.endswith("USDT") else symbol
+                if fee_ccy in ("USDT", "USDC", "USD"):
+                    actual_fee_usd = fee
+                elif fee_ccy == base_asset and avg_px > 0:
+                    actual_fee_usd = fee * avg_px
+                fee_rate = actual_fee_usd / notional if notional > 0 and actual_fee_usd > 0 else 0
 
                 return TradeResult(
                     success=True,
@@ -216,6 +332,7 @@ class OKXExecutor(ExecutionEngine):
                     requested_price=expected_price,
                     actual_avg_price=avg_px,
                     actual_fee=fee,
+                    actual_fee_usd=actual_fee_usd,
                     fee_rate=fee_rate,
                     fee_currency=fee_ccy,
                     is_maker=False,

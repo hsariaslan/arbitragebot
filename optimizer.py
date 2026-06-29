@@ -41,7 +41,11 @@ from config import (
     MOMENTUM_SAMPLE_INTERVAL_MINUTES,
     SYMBOLS,
 )
-from slippage import compute_buy_slippage, compute_sell_slippage
+from slippage import (
+    compute_buy_slippage,
+    compute_sell_slippage,
+    evaluate_slippage_policy,
+)
 
 if TYPE_CHECKING:
     from balance import BalanceTracker, Transfer
@@ -264,6 +268,17 @@ class SymbolOptimizer:
         reallocation_cost_horizon: float = 2.0,
         score_stability_seconds: int = 120,
         score_stability_factor: float = 0.5,
+        strict_slippage_guards_enabled: bool = True,
+        require_order_book_depth: bool = True,
+        order_book_depth_buffer_multiplier: float = 1.25,
+        missing_order_book_penalty_pct: float = 0.25,
+        max_leg_slippage_pct: float = 0.05,
+        max_total_slippage_pct: float = 0.08,
+        slippage_safety_multiplier: float = 1.5,
+        slippage_latency_buffer_pct: float = 0.01,
+        book_age_guard_enabled: bool = True,
+        max_book_age_seconds: float = 2.0,
+        event_driven_max_book_age_seconds: float = 15.0,
     ) -> None:
         self._fetchers = fetchers
         self._monitor = monitor
@@ -338,6 +353,30 @@ class SymbolOptimizer:
             f.exchange_name for f in fetchers if getattr(f, "IS_EVENT_DRIVEN", False)
         }
         self._event_driven_seller_penalty: float = 0.05  # synced from settings via dashboard
+
+        # Realistic execution gates used by scoring. Missing order books are
+        # not safe zero-slippage observations when strict mode is enabled.
+        self._strict_slippage_guards_enabled = bool(strict_slippage_guards_enabled)
+        self._require_order_book_depth = bool(require_order_book_depth)
+        self._order_book_depth_buffer_multiplier = max(
+            0.0,
+            float(order_book_depth_buffer_multiplier),
+        )
+        self._missing_order_book_penalty_pct = max(
+            0.0,
+            float(missing_order_book_penalty_pct),
+        )
+        self._max_leg_slippage_pct = max(0.0, float(max_leg_slippage_pct))
+        self._max_total_slippage_pct = max(0.0, float(max_total_slippage_pct))
+        self._slippage_safety_multiplier = max(0.0, float(slippage_safety_multiplier))
+        self._slippage_latency_buffer_pct = max(0.0, float(slippage_latency_buffer_pct))
+        self._book_age_guard_enabled = bool(book_age_guard_enabled)
+        self._max_book_age_seconds = max(0.0, float(max_book_age_seconds))
+        self._event_driven_max_book_age_seconds = max(
+            self._max_book_age_seconds,
+            float(event_driven_max_book_age_seconds),
+        )
+        self._book_age_score_skips: int = 0
 
         # Net profit awareness: block rotations when in deficit
         self._rotation_budget_ok: bool = True
@@ -520,6 +559,43 @@ class SymbolOptimizer:
     def set_funding_monitor(self, monitor: "FundingMonitor") -> None:
         """Wire the live funding-rate monitor (Phase A scoring multiplier)."""
         self._funding_monitor = monitor
+
+    def _evaluate_slippage_policy(
+        self,
+        buy_slip,
+        sell_slip,
+        buy_book_present: bool,
+        sell_book_present: bool,
+        trade_size: float,
+    ):
+        return evaluate_slippage_policy(
+            buy_slip,
+            sell_slip,
+            buy_book_present,
+            sell_book_present,
+            trade_size,
+            strict_enabled=self._strict_slippage_guards_enabled,
+            require_book_depth=self._require_order_book_depth,
+            depth_buffer_multiplier=self._order_book_depth_buffer_multiplier,
+            max_leg_slippage_pct=self._max_leg_slippage_pct,
+            max_total_slippage_pct=self._max_total_slippage_pct,
+            safety_multiplier=self._slippage_safety_multiplier,
+            latency_buffer_pct=self._slippage_latency_buffer_pct,
+            missing_book_penalty_pct=self._missing_order_book_penalty_pct,
+        )
+
+    def _book_age_limit(self, exchange: str) -> float:
+        if exchange in self._event_driven_exchanges:
+            return self._event_driven_max_book_age_seconds
+        return self._max_book_age_seconds
+
+    def _book_age_ok(self, exchange: str, book_age: float) -> bool:
+        if not self._book_age_guard_enabled:
+            return True
+        if book_age < 0:
+            return False
+        limit = self._book_age_limit(exchange)
+        return limit <= 0 or book_age <= limit
 
     def update_profit_state(self, net_profit: float, session_hourly_rate: float, grace_active: bool = False) -> None:
         """Called by dashboard to update net profit awareness for rotation gating."""
@@ -806,10 +882,22 @@ class SymbolOptimizer:
                 exchange_prices = filter_for_config(
                     sweep_prices, symbol, self._active_exchanges
                 )
+                exchange_prices = [
+                    (
+                        ex,
+                        bid_f,
+                        ask_f,
+                        bids_f,
+                        asks_f,
+                        recvd,
+                        now - book_recvd if book_recvd and book_recvd > 0 else -1.0,
+                    )
+                    for ex, bid_f, ask_f, bids_f, asks_f, recvd, book_recvd in exchange_prices
+                ]
                 # Bitfinex last-bid cache is per-config but the value is
                 # identical across configs — replicate the legacy write
                 # so demotion routing still works.
-                for ex, bid_f, _, _, _ in exchange_prices:
+                for ex, bid_f, _, _, _, _, _ in exchange_prices:
                     if ex == "Bitfinex":
                         self._bitfinex_last_bid[symbol] = bid_f
                         break
@@ -830,7 +918,18 @@ class SymbolOptimizer:
                         ask_f = float(ps.ask)
                         if bid_f <= 0 or ask_f <= 0:
                             continue
-                        exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, ps.bids, ps.asks))
+                        book_age = now - ps.book_received_at if ps.book_received_at > 0 else -1.0
+                        exchange_prices.append(
+                            (
+                                fetcher.exchange_name,
+                                bid_f,
+                                ask_f,
+                                ps.bids,
+                                ps.asks,
+                                ps.received_at,
+                                book_age,
+                            )
+                        )
                         if fetcher.exchange_name == "Bitfinex":
                             self._bitfinex_last_bid[symbol] = bid_f
                     except (ValueError, TypeError):
@@ -848,11 +947,11 @@ class SymbolOptimizer:
             sellers: set[str] = set()
             if self._fee_manager:
                 buyers = {
-                    ex for (ex, _, _, _, _) in exchange_prices
+                    ex for (ex, _, _, _, _, _, _) in exchange_prices
                     if self._fee_manager.can_buy(ex, symbol)
                 }
                 sellers = {
-                    ex for (ex, _, _, _, _) in exchange_prices
+                    ex for (ex, _, _, _, _, _, _) in exchange_prices
                     if self._fee_manager.can_sell(ex, symbol)
                 }
                 if not buyers or not sellers:
@@ -873,7 +972,7 @@ class SymbolOptimizer:
             fee_cache: dict[str, float] = {}
 
             # Track mid-price for momentum filter (Feature 3)
-            mid_prices = [(b + a) / 2.0 for _, b, a, _, _ in exchange_prices]
+            mid_prices = [(b + a) / 2.0 for _, b, a, _, _, _, _ in exchange_prices]
             current_mid = sum(mid_prices) / len(mid_prices)
             self._record_price_sample(symbol, current_mid, now)
 
@@ -884,17 +983,23 @@ class SymbolOptimizer:
             best_spread = 0.0
             best_fee = 0.0
 
-            for i, (ex_buy, _, ask_i, _bids_i, asks_i) in enumerate(exchange_prices):
+            for i, (ex_buy, _, ask_i, _bids_i, asks_i, _recv_i, buy_book_age) in enumerate(exchange_prices):
                 # Outer-leg block check: cheap set lookup using the
                 # buyers set already computed above. Was a fee_manager
                 # call per (i,j) pair — now once per i.
                 if self._fee_manager and ex_buy not in buyers:
                     continue
-                for j, (ex_sell, bid_j, _, bids_j, _asks_j) in enumerate(exchange_prices):
+                for j, (ex_sell, bid_j, _, bids_j, _asks_j, _recv_j, sell_book_age) in enumerate(exchange_prices):
                     if i == j:
                         continue
                     # Inner-leg block check: same — set lookup vs call.
                     if self._fee_manager and ex_sell not in sellers:
+                        continue
+                    if (
+                        not self._book_age_ok(ex_buy, buy_book_age)
+                        or not self._book_age_ok(ex_sell, sell_book_age)
+                    ):
+                        self._book_age_score_skips += 1
                         continue
                     spread_pct = (bid_j - ask_i) / ask_i * 100
                     if self._fee_manager:
@@ -914,7 +1019,16 @@ class SymbolOptimizer:
                     # Deduct estimated slippage from depth data
                     buy_slip = compute_buy_slippage(asks_i, self._trade_amount)
                     sell_slip = compute_sell_slippage(bids_j, self._trade_amount)
-                    slippage_pct = buy_slip.slippage_pct + sell_slip.slippage_pct
+                    slip_policy = self._evaluate_slippage_policy(
+                        buy_slip,
+                        sell_slip,
+                        bool(asks_i),
+                        bool(bids_j),
+                        self._trade_amount,
+                    )
+                    if not slip_policy.ok:
+                        continue
+                    slippage_pct = slip_policy.adjusted_total_pct
 
                     net_pct = spread_pct - fee_pct - slippage_pct
 

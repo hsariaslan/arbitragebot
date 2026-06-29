@@ -412,6 +412,7 @@ class _BitfinexSubFetcher:
                     continue
 
                 now = time.time()
+                existing = self._parent._state[symbol]
                 price_state = PriceState(
                     bid=str(payload[_BID]),
                     ask=str(payload[_ASK]),
@@ -421,6 +422,9 @@ class _BitfinexSubFetcher:
                     volume=str(payload[_VOLUME]),
                     updated_at=now,
                     received_at=now,
+                    book_received_at=existing.book_received_at,
+                    bids=existing.bids,
+                    asks=existing.asks,
                 )
                 self._parent._state[symbol] = price_state
                 self._parent._last_data_received = now
@@ -672,6 +676,7 @@ class _BitfinexBookSubFetcher:
             volume=existing.volume,
             updated_at=existing.updated_at,
             received_at=now,
+            book_received_at=now,
             bids=depth_bids,
             asks=depth_asks,
         )

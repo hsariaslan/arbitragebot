@@ -53,6 +53,7 @@ class PriceState:
     volume: str = ""
     updated_at: float = 0.0
     received_at: float = 0.0  # Local time when data was received (for staleness detection)
+    book_received_at: float = 0.0  # Local time when order-book depth was received
     # Multi-level order book (up to 5 levels)
     # bids: [(price_str, qty_str), ...] descending by price
     # asks: [(price_str, qty_str), ...] ascending by price
@@ -240,6 +241,11 @@ class BaseFetcher(abc.ABC):
                     symbol, price_data = result
                     if symbol in self._state:
                         now = time.time()
+                        existing = self._state[symbol]
+                        if price_data.book_received_at < 0:
+                            price_data.book_received_at = now
+                        elif price_data.book_received_at <= 0:
+                            price_data.book_received_at = existing.book_received_at
                         price_data.received_at = now
                         self._last_data_received = now
                         self._state[symbol] = price_data

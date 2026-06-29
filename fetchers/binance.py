@@ -88,6 +88,7 @@ class BinanceFetcher(BaseFetcher):
                 last_price=existing.last_price,
                 volume=existing.volume,
                 updated_at=existing.updated_at,
+                book_received_at=-1.0,
                 bids=depth_bids,
                 asks=depth_asks,
             )

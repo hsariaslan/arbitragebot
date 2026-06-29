@@ -38,6 +38,18 @@ class SlippageResult:
     sufficient_depth: bool  # False = couldn't fill the entire order
 
 
+@dataclass(slots=True)
+class SlippagePolicyResult:
+    """Decision result for strict live-realism slippage gating."""
+
+    ok: bool
+    adjusted_total_pct: float
+    adjusted_buy_pct: float
+    adjusted_sell_pct: float
+    raw_total_pct: float
+    reason: str = ""
+
+
 # Module-level per-sweep cache. None when caching is disabled (e.g.
 # single-config legacy path). The orchestrator manages lifetime via
 # begin_sweep() / end_sweep().
@@ -144,6 +156,140 @@ def compute_sell_slippage(
     return _walk_book(bids, trade_size_usd, is_buy=False)
 
 
+def evaluate_slippage_policy(
+    buy_slip: SlippageResult,
+    sell_slip: SlippageResult,
+    buy_book_present: bool,
+    sell_book_present: bool,
+    trade_size_usd: float,
+    *,
+    strict_enabled: bool,
+    require_book_depth: bool,
+    depth_buffer_multiplier: float,
+    max_leg_slippage_pct: float,
+    max_total_slippage_pct: float,
+    safety_multiplier: float,
+    latency_buffer_pct: float,
+    missing_book_penalty_pct: float,
+) -> SlippagePolicyResult:
+    """Apply conservative execution-realism checks to two slippage legs.
+
+    The raw slippage walker is intentionally permissive for compatibility:
+    missing depth returns zero slippage. Trading paths should call this
+    policy layer when deciding whether an opportunity is realistic enough to
+    score or execute.
+    """
+    raw_buy = max(0.0, float(buy_slip.slippage_pct))
+    raw_sell = max(0.0, float(sell_slip.slippage_pct))
+    raw_total = raw_buy + raw_sell
+    if not strict_enabled:
+        return SlippagePolicyResult(
+            ok=True,
+            adjusted_total_pct=raw_total,
+            adjusted_buy_pct=raw_buy,
+            adjusted_sell_pct=raw_sell,
+            raw_total_pct=raw_total,
+        )
+
+    if require_book_depth and (not buy_book_present or not sell_book_present):
+        missing = []
+        if not buy_book_present:
+            missing.append("buy_book")
+        if not sell_book_present:
+            missing.append("sell_book")
+        return SlippagePolicyResult(
+            ok=False,
+            adjusted_total_pct=raw_total,
+            adjusted_buy_pct=raw_buy,
+            adjusted_sell_pct=raw_sell,
+            raw_total_pct=raw_total,
+            reason="missing_" + "_".join(missing),
+        )
+
+    if not buy_book_present:
+        raw_buy += max(0.0, float(missing_book_penalty_pct))
+    if not sell_book_present:
+        raw_sell += max(0.0, float(missing_book_penalty_pct))
+
+    required_depth = max(0.0, float(trade_size_usd)) * max(
+        1.0,
+        float(depth_buffer_multiplier),
+    )
+    if required_depth > 0:
+        if not buy_slip.sufficient_depth or buy_slip.total_depth_usd < required_depth:
+            return SlippagePolicyResult(
+                ok=False,
+                adjusted_total_pct=raw_buy + raw_sell,
+                adjusted_buy_pct=raw_buy,
+                adjusted_sell_pct=raw_sell,
+                raw_total_pct=raw_total,
+                reason=(
+                    f"buy_depth_insufficient depth=${buy_slip.total_depth_usd:.2f} "
+                    f"required=${required_depth:.2f}"
+                ),
+            )
+        if not sell_slip.sufficient_depth or sell_slip.total_depth_usd < required_depth:
+            return SlippagePolicyResult(
+                ok=False,
+                adjusted_total_pct=raw_buy + raw_sell,
+                adjusted_buy_pct=raw_buy,
+                adjusted_sell_pct=raw_sell,
+                raw_total_pct=raw_total,
+                reason=(
+                    f"sell_depth_insufficient depth=${sell_slip.total_depth_usd:.2f} "
+                    f"required=${required_depth:.2f}"
+                ),
+            )
+
+    multiplier = max(0.0, float(safety_multiplier))
+    buffer = max(0.0, float(latency_buffer_pct))
+    adjusted_buy = raw_buy * multiplier + buffer / 2.0
+    adjusted_sell = raw_sell * multiplier + buffer / 2.0
+    adjusted_total = adjusted_buy + adjusted_sell
+
+    if max_leg_slippage_pct > 0:
+        leg_cap = float(max_leg_slippage_pct)
+        if adjusted_buy > leg_cap:
+            return SlippagePolicyResult(
+                ok=False,
+                adjusted_total_pct=adjusted_total,
+                adjusted_buy_pct=adjusted_buy,
+                adjusted_sell_pct=adjusted_sell,
+                raw_total_pct=raw_total,
+                reason=f"buy_slippage {adjusted_buy:.4f}% > max {leg_cap:.4f}%",
+            )
+        if adjusted_sell > leg_cap:
+            return SlippagePolicyResult(
+                ok=False,
+                adjusted_total_pct=adjusted_total,
+                adjusted_buy_pct=adjusted_buy,
+                adjusted_sell_pct=adjusted_sell,
+                raw_total_pct=raw_total,
+                reason=f"sell_slippage {adjusted_sell:.4f}% > max {leg_cap:.4f}%",
+            )
+
+    if max_total_slippage_pct > 0 and adjusted_total > max_total_slippage_pct:
+        return SlippagePolicyResult(
+            ok=False,
+            adjusted_total_pct=adjusted_total,
+            adjusted_buy_pct=adjusted_buy,
+            adjusted_sell_pct=adjusted_sell,
+            raw_total_pct=raw_total,
+            reason=(
+                f"total_slippage {adjusted_total:.4f}% > "
+                f"max {float(max_total_slippage_pct):.4f}%"
+            ),
+        )
+
+    return SlippagePolicyResult(
+        ok=True,
+        adjusted_total_pct=adjusted_total,
+        adjusted_buy_pct=adjusted_buy,
+        adjusted_sell_pct=adjusted_sell,
+        raw_total_pct=raw_total,
+    )
+
+
 def _walk_book(
     levels: list,
     trade_size_usd: float,
@@ -192,20 +338,20 @@ def _walk_book(
 
         level_usd = price * qty
         total_depth_usd += level_usd
-        levels_consumed = i + 1
 
-        if level_usd >= remaining_usd:
-            # Partial fill of this level completes the order
-            fill_qty = remaining_usd / price
-            total_cost += remaining_usd
-            total_qty += fill_qty
-            remaining_usd = 0.0
-            break
-        else:
-            # Consume entire level
-            total_cost += level_usd
-            total_qty += qty
-            remaining_usd -= level_usd
+        if remaining_usd > 0:
+            levels_consumed = i + 1
+            if level_usd >= remaining_usd:
+                # Partial fill of this level completes the requested order.
+                fill_qty = remaining_usd / price
+                total_cost += remaining_usd
+                total_qty += fill_qty
+                remaining_usd = 0.0
+            else:
+                # Consume entire level for the requested fill.
+                total_cost += level_usd
+                total_qty += qty
+                remaining_usd -= level_usd
 
     sufficient = remaining_usd <= 0
     if total_qty <= 0 or best_price <= 0:

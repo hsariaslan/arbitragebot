@@ -16,12 +16,13 @@ Rebalancing priority:
 
 import logging
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 
 from config import (
     ACTIVE_EXCHANGES,
     ACTIVE_SYMBOLS,
+    EXCHANGE_TAKER_FEES,
     INITIAL_BALANCE_PER_SYMBOL,
     REBALANCE_AMOUNT,
 )
@@ -98,6 +99,7 @@ class BalanceTracker:
         trading_float_replenish_trigger: float = 3.0,
         trading_float_overflow_multiplier: float = 1.5,
         futures_reserve_usdt: float = 0.0,
+        binance_spot_bnb_reserved_usd: float = 0.0,
     ) -> None:
         self._fee_manager = fee_manager
         self._transfer_fee_mgr = transfer_fee_manager
@@ -112,6 +114,12 @@ class BalanceTracker:
         self._estimated_profit_per_trade: float = 0.02
         self._allocations = allocations
         self.binance_futures_usdt: float = max(0.0, float(futures_reserve_usdt))
+        self.binance_spot_bnb: float = 0.0
+        self.binance_futures_bnb: float = 0.0
+        self._binance_spot_bnb_reserved_usd: float = max(
+            0.0, float(binance_spot_bnb_reserved_usd)
+        )
+        self._bnb_reserve_block_log_count: dict[str, int] = defaultdict(int)
 
         # Initialize balances from allocations
         if allocations:
@@ -375,6 +383,247 @@ class BalanceTracker:
         """Set the simulated/accounting Binance USD-M Futures reserve balance."""
         self.binance_futures_usdt = max(0.0, float(amount))
 
+    def set_binance_spot_bnb_reserved_usd(self, amount: float) -> None:
+        """Protect this much Binance Spot BNB value from normal BNBUSDT sells."""
+        self._binance_spot_bnb_reserved_usd = max(0.0, float(amount))
+
+    @property
+    def binance_spot_bnb_reserved_usd(self) -> float:
+        return max(0.0, float(getattr(self, "_binance_spot_bnb_reserved_usd", 0.0)))
+
+    @staticmethod
+    def _is_binance_bnbusdt(exchange: str, symbol: str) -> bool:
+        return exchange == "Binance" and symbol == "BNBUSDT"
+
+    def crypto_trade_availability(
+        self,
+        exchange: str,
+        symbol: str,
+        price: float,
+    ) -> dict[str, float]:
+        """Return crypto quantity/value available to normal trading.
+
+        Binance Spot BNB is also the fee-discount/top-up asset. When the bot
+        trades BNBUSDT on Binance, keep the configured BNB floor unavailable
+        to sell legs so an arbitrage fill cannot drain the fee reserve.
+        """
+        held_qty = max(0.0, float(self.crypto.get(exchange, {}).get(symbol, 0.0) or 0.0))
+        px = max(0.0, float(price or 0.0))
+        reserve_usd = 0.0
+        reserve_qty = 0.0
+        if self._is_binance_bnbusdt(exchange, symbol):
+            reserve_usd = self.binance_spot_bnb_reserved_usd
+            if px > 0 and reserve_usd > 0:
+                reserve_qty = reserve_usd / px
+        available_qty = max(0.0, held_qty - reserve_qty)
+        return {
+            "held_qty": held_qty,
+            "held_usd": held_qty * px,
+            "reserve_qty": reserve_qty,
+            "reserve_usd": reserve_qty * px,
+            "available_qty": available_qty,
+            "available_usd": available_qty * px,
+        }
+
+    def _log_bnb_reserve_sell_block(
+        self,
+        exchange: str,
+        symbol: str,
+        trade_amount: float,
+        availability: dict[str, float],
+    ) -> None:
+        key = f"{exchange}:{symbol}"
+        self._bnb_reserve_block_log_count[key] += 1
+        count = self._bnb_reserve_block_log_count[key]
+        if count == 1 or count % 100 == 0:
+            logger.info(
+                f"[Balance] BNB_RESERVE_SELL_BLOCK {exchange} {symbol}: "
+                f"held=${availability.get('held_usd', 0.0):.2f} "
+                f"reserve_floor=${availability.get('reserve_usd', 0.0):.2f} "
+                f"available=${availability.get('available_usd', 0.0):.2f} "
+                f"need=${trade_amount:.2f} count={count}"
+            )
+
+    def buy_spot_bnb_with_usdt(
+        self,
+        amount_usd: float,
+        price_usd: float,
+        fee_rate: float | None = None,
+    ) -> dict:
+        """Simulate buying BNB in the Binance Spot wallet with Binance USDT."""
+        price = float(price_usd)
+        requested = max(0.0, float(amount_usd))
+        available = max(0.0, float(self.usdt.get("Binance", 0.0)))
+        if requested <= 0:
+            return {"success": False, "error": "amount_must_be_positive"}
+        if price <= 0:
+            return {"success": False, "error": "price_unavailable"}
+        if available <= 0:
+            return {"success": False, "error": "binance_usdt_unavailable"}
+
+        spent = min(requested, available)
+        gross_qty = spent / price
+        rate = (
+            max(0.0, float(fee_rate))
+            if fee_rate is not None
+            else max(0.0, float(EXCHANGE_TAKER_FEES.get("Binance", 0.00075)))
+        )
+        fee_bnb = gross_qty * rate
+        net_qty = max(0.0, gross_qty - fee_bnb)
+        if net_qty <= 0:
+            return {"success": False, "error": "net_bnb_zero_after_fee"}
+
+        self.usdt["Binance"] = available - spent
+        self.binance_spot_bnb += net_qty
+        return {
+            "success": True,
+            "requested_usd": requested,
+            "spent_usd": spent,
+            "price_usd": price,
+            "gross_qty": gross_qty,
+            "fee_bnb": fee_bnb,
+            "net_qty": net_qty,
+            "fee_rate": rate,
+            "spot_qty": self.binance_spot_bnb,
+        }
+
+    def transfer_spot_bnb_to_futures(self, qty: float) -> dict:
+        """Simulate moving BNB from Binance Spot to USD-M Futures."""
+        requested = max(0.0, float(qty))
+        available = max(0.0, float(getattr(self, "binance_spot_bnb", 0.0) or 0.0))
+        if requested <= 0:
+            return {"success": False, "error": "amount_must_be_positive"}
+        if available <= 0:
+            return {"success": False, "error": "spot_bnb_unavailable"}
+
+        moved = min(requested, available)
+        self.binance_spot_bnb = available - moved
+        self.binance_futures_bnb += moved
+        return {
+            "success": True,
+            "direction": "spot_to_futures",
+            "asset": "BNB",
+            "amount": moved,
+            "spot_qty": self.binance_spot_bnb,
+            "futures_qty": self.binance_futures_bnb,
+        }
+
+    def deduct_spot_bnb_fee(
+        self,
+        exchange: str,
+        fee_usd: float,
+        bnb_price_usd: float,
+        context: str = "",
+    ) -> float:
+        """Deduct simulated BNB for token-paid Binance Spot trading fees."""
+        if exchange != "Binance":
+            return 0.0
+        fee_value = max(0.0, float(fee_usd))
+        price = max(0.0, float(bnb_price_usd))
+        if fee_value <= 0 or price <= 0:
+            return 0.0
+        qty = fee_value / price
+        available = max(0.0, float(getattr(self, "binance_spot_bnb", 0.0) or 0.0))
+        deducted = min(qty, available)
+        self.binance_spot_bnb = max(0.0, available - deducted)
+        if deducted < qty:
+            logger.warning(
+                f"[Balance] Binance Spot BNB fee reserve exhausted "
+                f"({context}): needed={qty:.8f} BNB, deducted={deducted:.8f} BNB"
+            )
+        return deducted
+
+    def deduct_futures_bnb_fee(
+        self,
+        fee_usd: float,
+        bnb_price_usd: float,
+        context: str = "",
+    ) -> float:
+        """Deduct simulated BNB for Binance USD-M Futures fee payments."""
+        fee_value = max(0.0, float(fee_usd))
+        price = max(0.0, float(bnb_price_usd))
+        if fee_value <= 0 or price <= 0:
+            return 0.0
+        qty = fee_value / price
+        available = max(0.0, float(getattr(self, "binance_futures_bnb", 0.0) or 0.0))
+        deducted = min(qty, available)
+        self.binance_futures_bnb = max(0.0, available - deducted)
+        if deducted < qty:
+            logger.warning(
+                f"[Balance] Binance Futures BNB fee reserve exhausted "
+                f"({context}): needed={qty:.8f} BNB, deducted={deducted:.8f} BNB"
+            )
+        return deducted
+
+    def _can_pay_spot_bnb_fee(
+        self,
+        exchange: str,
+        fee_usd: float,
+        bnb_price_usd: float,
+    ) -> bool:
+        if exchange != "Binance":
+            return True
+        fee_value = max(0.0, float(fee_usd))
+        price = max(0.0, float(bnb_price_usd))
+        if fee_value <= 0:
+            return True
+        if price <= 0:
+            return False
+        available_value = (
+            max(0.0, float(getattr(self, "binance_spot_bnb", 0.0) or 0.0))
+            * price
+        )
+        return available_value >= fee_value
+
+    def _non_token_fee_rate(self, exchange: str, current_rate: float) -> float:
+        configs = getattr(self._fee_manager, "_configs", {}) if self._fee_manager else {}
+        cfg = configs.get(exchange) if isinstance(configs, dict) else None
+        base_rate = getattr(cfg, "base_taker_rate", None)
+        try:
+            return max(float(current_rate), float(base_rate))
+        except (TypeError, ValueError):
+            return float(current_rate)
+
+    def resolve_fee_model_for_trade(
+        self,
+        exchange: str,
+        symbol: str,
+        trade_amount: float,
+        fee_rate: float,
+        fee_model: str,
+        bnb_price: float,
+        *,
+        side: str = "",
+        log_fallback: bool = False,
+    ) -> dict:
+        """Return the effective fee model/rate before a simulated mutation.
+
+        Binance token-paid fees depend on the BNB reserve actually being able
+        to fund the fee. If it cannot, the trade should be scored/executed with
+        the non-discounted received-asset fee model.
+        """
+        rate = max(0.0, float(fee_rate))
+        model = str(fee_model or "received")
+        fee_usd = max(0.0, float(trade_amount)) * rate
+        fallback = False
+        if model == "token" and not self._can_pay_spot_bnb_fee(exchange, fee_usd, bnb_price):
+            fallback = True
+            model = "received"
+            rate = self._non_token_fee_rate(exchange, rate)
+            fee_usd = max(0.0, float(trade_amount)) * rate
+            if log_fallback:
+                label = f" on {side}" if side else ""
+                logger.warning(
+                    f"[Balance] {exchange} token-fee fallback{label} {symbol}: "
+                    f"bnb_price=${bnb_price:.4f}, fee=${fee_usd:.4f}"
+                )
+        return {
+            "fee_rate": rate,
+            "fee_model": model,
+            "fee_usd": fee_usd,
+            "fallback": fallback,
+        }
+
     # ── D-17: In-transit fund tracking ──────────────────────────────────
 
     # Estimated network transit times in seconds per network type
@@ -435,9 +684,18 @@ class BalanceTracker:
         Returns (has_usdt_to_buy, has_crypto_to_sell).
         """
         has_usdt = self.available_usdt_for_trading(buy_exchange) >= trade_amount
-        crypto_qty = self.crypto.get(sell_exchange, {}).get(symbol, 0.0)
-        crypto_value = crypto_qty * sell_price
+        availability = self.crypto_trade_availability(sell_exchange, symbol, sell_price)
+        crypto_value = availability["available_usd"]
         has_crypto = crypto_value >= trade_amount
+        if (
+            not has_crypto
+            and self._is_binance_bnbusdt(sell_exchange, symbol)
+            and availability["reserve_qty"] > 0
+            and availability["held_usd"] >= trade_amount
+        ):
+            self._log_bnb_reserve_sell_block(
+                sell_exchange, symbol, trade_amount, availability
+            )
         return has_usdt, has_crypto
 
     def compute_rebalance_amount(self, exchange: str, symbol: str = "") -> float:
@@ -560,9 +818,8 @@ class BalanceTracker:
         internal_sym = None
         best_value = 0.0
         for sym in self._symbols:
-            qty = self.crypto[exchange].get(sym, 0.0)
             p = prices.get(sym, 0.0)
-            val = qty * p
+            val = self.crypto_trade_availability(exchange, sym, p)["available_usd"]
             if val > best_value:
                 best_value = val
                 internal_sym = sym
@@ -632,7 +889,7 @@ class BalanceTracker:
         for ex in self._exchanges:
             if ex == exchange:
                 continue
-            crypto_val = self.crypto[ex].get(symbol, 0.0) * price
+            crypto_val = self.crypto_trade_availability(ex, symbol, price)["available_usd"]
             if crypto_val >= rebal * 1.2:
                 crypto_sources.append(ex)
         if not crypto_sources:
@@ -640,7 +897,7 @@ class BalanceTracker:
             for ex in self._exchanges:
                 if ex == exchange:
                     continue
-                crypto_val = self.crypto[ex].get(symbol, 0.0) * price
+                crypto_val = self.crypto_trade_availability(ex, symbol, price)["available_usd"]
                 if crypto_val >= min_rebal * 1.2:
                     crypto_sources.append(ex)
                     rebal = min_rebal
@@ -790,9 +1047,8 @@ class BalanceTracker:
         internal_price = 0.0
         best_value = 0.0
         for sym in self._symbols:
-            qty = self.crypto[exchange].get(sym, 0.0)
             p = prices.get(sym, 0.0)
-            val = qty * p
+            val = self.crypto_trade_availability(exchange, sym, p)["available_usd"]
             if val > best_value:
                 best_value = val
                 internal_sym = sym
@@ -849,6 +1105,16 @@ class BalanceTracker:
         if internal_sym and internal_cost < float("inf"):
             fee_usd = internal_cost
             sell_qty = rebal / internal_price
+            available_qty = self.crypto_trade_availability(
+                exchange, internal_sym, internal_price
+            )["available_qty"]
+            if sell_qty > available_qty + 1e-12:
+                logger.info(
+                    f"[Balance] Internal sell blocked by reserve: "
+                    f"{internal_sym} on {exchange}, need={sell_qty:.8f} "
+                    f"available={available_qty:.8f}"
+                )
+                return None
             self.crypto[exchange][internal_sym] -= sell_qty
             self.usdt[exchange] += rebal - fee_usd
             self.total_transfer_fees += fee_usd
@@ -912,8 +1178,8 @@ class BalanceTracker:
         cheapest_fee = float("inf")
         for ex in self._exchanges:
             if ex != exchange:
-                qty = self.crypto[ex].get(symbol, 0.0)
-                if qty * price >= self._trade_amount:
+                crypto_val = self.crypto_trade_availability(ex, symbol, price)["available_usd"]
+                if crypto_val >= self._trade_amount:
                     fee = self._get_withdrawal_fee(ex)
                     if fee < cheapest_fee:
                         cheapest_fee = fee
@@ -939,8 +1205,7 @@ class BalanceTracker:
         for ex in self._exchanges:
             if ex == exchange:
                 continue
-            qty = self.crypto[ex].get(symbol, 0.0)
-            crypto_val = qty * price
+            crypto_val = self.crypto_trade_availability(ex, symbol, price)["available_usd"]
             if crypto_val >= rebal * 1.2:
                 crypto_sources.append(ex)
         # Fallback: try smaller amount from any source
@@ -949,8 +1214,7 @@ class BalanceTracker:
             for ex in self._exchanges:
                 if ex == exchange:
                     continue
-                qty = self.crypto[ex].get(symbol, 0.0)
-                crypto_val = qty * price
+                crypto_val = self.crypto_trade_availability(ex, symbol, price)["available_usd"]
                 if crypto_val >= min_rebal * 1.2:
                     crypto_sources.append(ex)
             if crypto_sources:
@@ -992,6 +1256,16 @@ class BalanceTracker:
 
             # Prefer external crypto if cheaper than internal buy
             if crypto_sources and external_crypto_cost < internal_buy_cost:
+                available_qty = self.crypto_trade_availability(
+                    best_source, symbol, price
+                )["available_qty"]
+                if transfer_qty > available_qty + 1e-12:
+                    logger.info(
+                        f"[Balance] External crypto blocked by reserve: "
+                        f"{symbol} {best_source}→{exchange}, need={transfer_qty:.8f} "
+                        f"available={available_qty:.8f}"
+                    )
+                    return None
                 self.crypto[best_source][symbol] -= transfer_qty
                 self.crypto[exchange][symbol] += transfer_qty
                 self.total_transfer_fees += external_crypto_cost
@@ -1512,6 +1786,14 @@ class BalanceTracker:
         if "Bitfinex" not in self._exchanges:
             return None
 
+        available_qty = self.crypto_trade_availability(
+            source_exchange, symbol, bitfinex_bid
+        )["available_qty"]
+        if qty > available_qty:
+            qty = available_qty
+        if qty <= 0:
+            return None
+
         gross = qty * bitfinex_bid
         min_transfer = max(20.0, self._trade_amount * 2)
         if gross < min_transfer:
@@ -1673,8 +1955,9 @@ class BalanceTracker:
             if price <= 0:
                 continue
 
-            qty = self.crypto[exchange].get(symbol, 0.0)
-            actual = qty * price
+            availability = self.crypto_trade_availability(exchange, symbol, price)
+            qty = availability["held_qty"]
+            actual = availability["available_usd"]
             high_band = target * (1.0 + drift_threshold)
             low_band = target * (1.0 - drift_threshold)
             taker_fee = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
@@ -1685,7 +1968,7 @@ class BalanceTracker:
                 # Sell excess crypto to bring inventory back to target
                 excess_usd = actual - target
                 sell_qty = excess_usd / price
-                if sell_qty > 0 and qty >= sell_qty:
+                if sell_qty > 0 and availability["available_qty"] >= sell_qty:
                     fee_usd = excess_usd * taker_fee
                     self.crypto[exchange][symbol] -= sell_qty
                     self.usdt[exchange] += excess_usd - fee_usd
@@ -1777,6 +2060,7 @@ class BalanceTracker:
         sell_fee: float,
         buy_fee_model: str = "received",
         sell_fee_model: str = "received",
+        bnb_price: float = 0.0,
     ) -> dict | None:
         """
         Execute a simulated trade and update balances.
@@ -1800,6 +2084,50 @@ class BalanceTracker:
 
         info = self._exchange_info
         adjustment = None
+        buy_fee_info = self.resolve_fee_model_for_trade(
+            buy_exchange,
+            symbol,
+            trade_amount,
+            buy_fee,
+            buy_fee_model,
+            bnb_price,
+            side="buy",
+            log_fallback=True,
+        )
+        sell_fee_info = self.resolve_fee_model_for_trade(
+            sell_exchange,
+            symbol,
+            trade_amount,
+            sell_fee,
+            sell_fee_model,
+            bnb_price,
+            side="sell",
+            log_fallback=True,
+        )
+        buy_fee = float(buy_fee_info["fee_rate"])
+        buy_fee_model = str(buy_fee_info["fee_model"])
+        sell_fee = float(sell_fee_info["fee_rate"])
+        sell_fee_model = str(sell_fee_info["fee_model"])
+
+        if self._is_binance_bnbusdt(sell_exchange, symbol):
+            estimated_sell_qty = trade_amount / sell_price if sell_price > 0 else 0.0
+            if sell_fee_model == "spent":
+                estimated_sell_qty *= 1.0 + sell_fee
+            availability = self.crypto_trade_availability(
+                sell_exchange, symbol, sell_price
+            )
+            if estimated_sell_qty > availability["available_qty"] + 1e-12:
+                self._log_bnb_reserve_sell_block(
+                    sell_exchange, symbol, trade_amount, availability
+                )
+                return {
+                    "aborted": True,
+                    "reason": "binance_spot_bnb_reserve_protected",
+                    "sell_qty_required": estimated_sell_qty,
+                    "sell_qty_available": availability["available_qty"],
+                    "reserve_qty": availability["reserve_qty"],
+                    "reserve_usd": availability["reserve_usd"],
+                }
 
         # Buy side: spend USDT, receive crypto
         coins_bought_raw = trade_amount / buy_price
@@ -1839,6 +2167,15 @@ class BalanceTracker:
 
         self.usdt[buy_exchange] -= actual_buy_spend
         self.crypto[buy_exchange][symbol] += coins_after_fee
+        buy_token_fee_usd = 0.0
+        if buy_fee_model == "token":
+            buy_token_fee_usd = actual_buy_spend * buy_fee
+            self.deduct_spot_bnb_fee(
+                buy_exchange,
+                buy_token_fee_usd,
+                bnb_price,
+                context=f"buy {symbol}",
+            )
 
         # Sell side: spend crypto, receive USDT
         coins_to_sell_raw = trade_amount / sell_price
@@ -1873,23 +2210,48 @@ class BalanceTracker:
         else:
             self.crypto[sell_exchange][symbol] -= coins_to_sell
         self.usdt[sell_exchange] += usdt_received
+        sell_token_fee_usd = 0.0
+        if sell_fee_model == "token":
+            sell_token_fee_usd = coins_to_sell * sell_price * sell_fee
+            self.deduct_spot_bnb_fee(
+                sell_exchange,
+                sell_token_fee_usd,
+                bnb_price,
+                context=f"sell {symbol}",
+            )
 
         # D-18: Record trade time for demo sync grace period
         now = time.time()
         self.last_trade_time[buy_exchange] = now
         self.last_trade_time[sell_exchange] = now
 
-        if info:
-            total_rounding_impact = buy_rounding_saved - sell_rounding_loss
-            adjustment = {
-                "buy_qty_raw": coins_after_fee_raw,
-                "buy_qty_rounded": coins_after_fee,
-                "sell_qty_raw": coins_to_sell_raw,
-                "sell_qty_rounded": coins_to_sell,
-                "buy_rounding_saved_usd": buy_rounding_saved,
-                "sell_rounding_loss_usd": sell_rounding_loss,
-                "rounding_impact_usd": total_rounding_impact,
-            }
+        total_rounding_impact = buy_rounding_saved - sell_rounding_loss
+        adjustment = {
+            "buy_qty_raw": coins_after_fee_raw,
+            "buy_qty_rounded": coins_after_fee,
+            "sell_qty_raw": coins_to_sell_raw,
+            "sell_qty_rounded": coins_to_sell,
+            "actual_buy_spend_usd": actual_buy_spend,
+            "actual_sell_received_usd": usdt_received,
+            "buy_fee_rate": buy_fee,
+            "sell_fee_rate": sell_fee,
+            "buy_fee_model": buy_fee_model,
+            "sell_fee_model": sell_fee_model,
+            "buy_fee_fallback": bool(buy_fee_info.get("fallback")),
+            "sell_fee_fallback": bool(sell_fee_info.get("fallback")),
+            "buy_token_fee_usd": buy_token_fee_usd,
+            "sell_token_fee_usd": sell_token_fee_usd,
+            "token_fee_usd": buy_token_fee_usd + sell_token_fee_usd,
+            "actual_profit_usd": (
+                usdt_received
+                - actual_buy_spend
+                - buy_token_fee_usd
+                - sell_token_fee_usd
+            ),
+            "buy_rounding_saved_usd": buy_rounding_saved,
+            "sell_rounding_loss_usd": sell_rounding_loss,
+            "rounding_impact_usd": total_rounding_impact,
+        }
 
         return adjustment
 
@@ -1923,6 +2285,12 @@ class BalanceTracker:
         threshold and triggered a false sell-all.
         """
         total = sum(self.usdt.values()) + float(getattr(self, "binance_futures_usdt", 0.0) or 0.0)
+        bnb_price = float(prices.get("BNBUSDT", 0.0) or 0.0)
+        if bnb_price > 0:
+            total += (
+                float(getattr(self, "binance_spot_bnb", 0.0) or 0.0)
+                + float(getattr(self, "binance_futures_bnb", 0.0) or 0.0)
+            ) * bnb_price
         for ex in self._exchanges:
             ex_prices = (prices_per_exchange or {}).get(ex, {})
             for sym, qty in self.crypto[ex].items():
@@ -1986,10 +2354,19 @@ class BalanceTracker:
             for sym, qty in self.crypto[ex].items():
                 if qty > 0:
                     ex_total += qty * prices.get(sym, 0.0)
+            if ex == "Binance":
+                ex_total += (
+                    float(getattr(self, "binance_spot_bnb", 0.0) or 0.0)
+                    * prices.get("BNBUSDT", 0.0)
+                )
             parts.append(f"{ex} ${ex_total:.0f}")
         futures_reserve = float(getattr(self, "binance_futures_usdt", 0.0) or 0.0)
-        if futures_reserve > 0:
-            parts.append(f"BinanceFutures ${futures_reserve:.0f}")
+        futures_bnb_value = (
+            float(getattr(self, "binance_futures_bnb", 0.0) or 0.0)
+            * prices.get("BNBUSDT", 0.0)
+        )
+        if futures_reserve > 0 or futures_bnb_value > 0:
+            parts.append(f"BinanceFutures ${futures_reserve + futures_bnb_value:.0f}")
         portfolio = self.get_portfolio_value(prices)
         transfer_count = len(self.transfers)
         return [
@@ -2008,6 +2385,9 @@ class BalanceTracker:
             "usdt": dict(self.usdt),
             "crypto": {ex: dict(syms) for ex, syms in self.crypto.items()},
             "binance_futures_usdt": float(getattr(self, "binance_futures_usdt", 0.0) or 0.0),
+            "binance_spot_bnb": float(getattr(self, "binance_spot_bnb", 0.0) or 0.0),
+            "binance_futures_bnb": float(getattr(self, "binance_futures_bnb", 0.0) or 0.0),
+            "binance_spot_bnb_reserved_usd": self.binance_spot_bnb_reserved_usd,
             "_crypto_usd": {ex: dict(syms) for ex, syms in self._crypto_usd.items()},
             "_initial_investment": self._initial_investment,
             "_initialized": self._initialized,
@@ -2027,6 +2407,7 @@ class BalanceTracker:
             "_trading_float_multiplier": self._trading_float_multiplier,
             "_trading_float_replenish_trigger": self._trading_float_replenish_trigger,
             "_trading_float_overflow_multiplier": self._trading_float_overflow_multiplier,
+            "_bnb_reserve_block_log_count": dict(self._bnb_reserve_block_log_count),
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -2036,6 +2417,15 @@ class BalanceTracker:
         saved_crypto = data["crypto"]
         saved_crypto_usd = data["_crypto_usd"]
         self.binance_futures_usdt = float(data.get("binance_futures_usdt", 0.0) or 0.0)
+        self.binance_spot_bnb = float(data.get("binance_spot_bnb", 0.0) or 0.0)
+        self.binance_futures_bnb = float(data.get("binance_futures_bnb", 0.0) or 0.0)
+        self._binance_spot_bnb_reserved_usd = max(
+            0.0, float(data.get("binance_spot_bnb_reserved_usd", self.binance_spot_bnb_reserved_usd) or 0.0)
+        )
+        self._bnb_reserve_block_log_count = defaultdict(
+            int,
+            data.get("_bnb_reserve_block_log_count", {}),
+        )
         for ex in self._exchanges:
             if ex in saved_usdt:
                 self.usdt[ex] = saved_usdt[ex]

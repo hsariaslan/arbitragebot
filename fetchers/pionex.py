@@ -172,6 +172,7 @@ class PionexFetcher(BaseFetcher):
                 last_price=self._last_prices.get(symbol, ""),
                 volume="",
                 updated_at=updated_at,
+                book_received_at=-1.0,
                 bids=depth_bids,
                 asks=depth_asks,
             )

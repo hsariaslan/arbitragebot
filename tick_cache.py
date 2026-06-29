@@ -3,7 +3,8 @@
 Two caches:
 
 1. **Pre-built `exchange_prices`** — once per orchestrator sweep, build the
-   per-symbol list of `(exchange, bid, ask, bids_f, asks_f, received_at)`
+   per-symbol list of `(exchange, bid, ask, bids_f, asks_f, received_at,
+   book_received_at)`
    tuples. Order book levels are pre-parsed to `list[tuple[float, float]]`
    so slippage walkers don't re-parse strings on every call. Each config's
    `_score_tick` and monitor's `_tick` filter this shared dict by their
@@ -82,7 +83,7 @@ def build_sweep_prices(
 
     Output format (per symbol):
       [(exchange_name, bid_f, ask_f, bid_qty_f, ask_qty_f,
-        bids_pre_parsed, asks_pre_parsed, received_at), ...]
+        bids_pre_parsed, asks_pre_parsed, received_at, book_received_at), ...]
 
     Filters applied uniformly:
     - bid + ask both present and > 0
@@ -147,6 +148,7 @@ def build_sweep_prices(
                     bids_f,
                     asks_f,
                     ps.received_at,
+                    ps.book_received_at,
                 )
             )
         if entries:
@@ -158,18 +160,18 @@ def filter_for_config(
     sweep_prices: dict[str, list[tuple]],
     symbol: str,
     active_exchanges: set[str] | list[str],
-) -> list[tuple[str, float, float, list, list]]:
+) -> list[tuple]:
     """Return per-config exchange_prices subset for the optimizer's `_score_tick`.
 
-    Returns 5-tuples `(ex, bid, ask, bids_f, asks_f)` — drops the qty + recv_at
-    columns since `_score_tick` doesn't use them. The shape matches the
-    legacy `exchange_prices` list so the call site only swaps its source.
+    Returns `(ex, bid, ask, bids_f, asks_f, received_at, book_received_at)`.
+    The optimizer needs book timestamps for strict freshness scoring, but
+    not the top-of-book qty columns used by monitor execution.
     """
     active = set(active_exchanges) if not isinstance(active_exchanges, set) else active_exchanges
     entries = sweep_prices.get(symbol, [])
     return [
-        (ex, bid_f, ask_f, bids_f, asks_f)
-        for ex, bid_f, ask_f, _bq, _aq, bids_f, asks_f, _recvd in entries
+        (ex, bid_f, ask_f, bids_f, asks_f, recvd, book_recvd)
+        for ex, bid_f, ask_f, _bq, _aq, bids_f, asks_f, recvd, book_recvd in entries
         if ex in active
     ]
 
@@ -179,11 +181,11 @@ def filter_for_config_full(
     symbol: str,
     active_exchanges: set[str] | list[str],
 ) -> list[tuple]:
-    """Full 8-tuple per-config view for `monitor._tick`.
+    """Full 9-tuple per-config view for `monitor._tick`.
 
-    Returns `(ex, bid, ask, bid_qty, ask_qty, bids_f, asks_f, received_at)` —
-    monitor needs depth qtys for the depth gate and received_at for the
-    per-tick freshness/age stats.
+    Returns `(ex, bid, ask, bid_qty, ask_qty, bids_f, asks_f, received_at,
+    book_received_at)`. Monitor needs qtys for the depth gate and timestamps
+    for freshness/age stats.
     """
     active = set(active_exchanges) if not isinstance(active_exchanges, set) else active_exchanges
     entries = sweep_prices.get(symbol, [])

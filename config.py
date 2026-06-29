@@ -408,6 +408,33 @@ ONE_LEG_FAILURE_RATE: float = 0.02          # Probability of simulated one-legge
 ONE_LEG_UNWIND_SLIPPAGE_MULT: float = 1.5   # Slippage multiplier for emergency unwind trades
 MAX_POSITION_MULTIPLIER: float = 3.0        # Max accumulated crypto per symbol per buyer exchange (× trade_amount, 0=unlimited). Lowered from 5.0 in v0.27 (S20 showed 76% pos_cap skip rate at 2.0).
 
+# Live-realism slippage guards. The raw slippage walker returns zero
+# slippage when book depth is missing for backward compatibility; trading
+# paths use these stricter gates so missing/thin books do not look
+# profitable.
+STRICT_SLIPPAGE_GUARDS_ENABLED: bool = True
+REQUIRE_ORDER_BOOK_DEPTH: bool = True
+ORDER_BOOK_DEPTH_BUFFER_MULTIPLIER: float = 1.25  # visible depth must cover trade size × this
+MISSING_ORDER_BOOK_PENALTY_PCT: float = 0.25      # only used when require_book_depth=false
+MAX_LEG_SLIPPAGE_PCT: float = 0.05                # per-leg cap after multiplier/buffer
+MAX_TOTAL_SLIPPAGE_PCT: float = 0.08              # two-leg cap after multiplier/buffer
+SLIPPAGE_SAFETY_MULTIPLIER: float = 1.5           # pessimism against visible-book estimate
+SLIPPAGE_LATENCY_BUFFER_PCT: float = 0.01         # extra two-leg buffer for submit latency/book fade
+BOOK_AGE_GUARD_ENABLED: bool = True
+MAX_BOOK_AGE_SECONDS: float = 2.0                 # max age for streaming order-book data
+EVENT_DRIVEN_MAX_BOOK_AGE_SECONDS: float = 15.0   # event-driven books may be quiet without being stale
+DEPTH_AWARE_TRADE_SIZE_SHRINK_ENABLED: bool = True
+MIN_DEPTH_SHRINK_RATIO: float = 0.5               # shrink only if at least this fraction remains tradeable
+
+# Demo/live order policy for spot legs. Marketable-limit FOK keeps taker-like
+# speed while avoiding partial fills and rejecting instead of filling through
+# unlimited slippage.
+SPOT_EXECUTION_ORDER_MODE: str = "marketable_limit_fok"  # market | marketable_limit_ioc | marketable_limit_fok
+MARKETABLE_LIMIT_PRICE_BUFFER_PCT: float = 0.02          # buy cap above ask / sell floor below bid
+DEMO_ONE_LEG_DRILL_ENABLED: bool = False
+DEMO_ONE_LEG_DRILL_EVERY_N: int = 0                      # 0 disables forced demo one-leg drills
+DEMO_ONE_LEG_DRILL_SIDE: str = "alternate"               # buy | sell | alternate
+
 # Price momentum filter (Feature 3 — penalize symbols trending down)
 MOMENTUM_FILTER_ENABLED: bool = True
 MOMENTUM_LOOKBACK_HOURS: float = 24.0       # Compare current price vs N hours ago
@@ -491,6 +518,19 @@ HEDGE_EVALUATION_INTERVAL_SECONDS: float = 60.0   # periodic hedge sanity check
 HEDGE_LEVERAGE: int = 2                       # isolated USD-M leverage; 2x keeps margin practical without aggressive liquidation risk
 HEDGE_MARGIN_BUFFER_PCT: float = 0.20         # keep available margin >= initial_margin × 1.2
 HEDGE_ADJUST_THRESHOLD_PCT: float = 0.01      # adjust when inventory drifts > 1%
+BINANCE_FUTURES_TAKER_FEE_RATE: float = 0.0005  # USD-M VIP 0 market-order taker fee: 0.05%
+BINANCE_FUTURES_BNB_DISCOUNT_ENABLED: bool = True
+BINANCE_FUTURES_BNB_DISCOUNT_PCT: float = 0.10  # USD-M futures BNB fee discount: 10%
+BINANCE_FUTURES_REFERRAL_CASHBACK_ENABLED: bool = False
+BINANCE_FUTURES_REFERRAL_CASHBACK_PCT: float = 0.10
+BINANCE_FUTURES_BNB_AUTO_TOPUP_ENABLED: bool = True
+BINANCE_FUTURES_BNB_MIN_USD: float = 5.0
+BINANCE_FUTURES_BNB_TARGET_PCT: float = 0.05  # maintain BNB worth 5% of group capital in USD-M futures
+BINANCE_FUTURES_BNB_TRANSFER_MIN_USD: float = 5.0
+BINANCE_SPOT_BNB_MIN_USD: float = 5.0        # keep this much BNB value in Spot for spot-fee discounts
+BINANCE_SPOT_BNB_AUTO_BUY_ENABLED: bool = True
+BINANCE_SPOT_BNB_TARGET_PCT: float = 0.01    # maintain Spot BNB worth 1% of group capital for spot-fee discounts
+BINANCE_SPOT_BNB_BUY_MIN_USD: float = 10.0   # avoid dust BNB auto-buys
 FUTURES_CAPITAL_TARGET_PCT: float = 0.40      # reserve 40% of group capital in Binance USD-M futures at 2x
 FUTURES_CAPITAL_TOPUP_PCT: float = 0.35       # top up from Binance Spot when futures reserve falls below 35%
 FUTURES_CAPITAL_EMERGENCY_PCT: float = 0.30   # block new spot exposure when futures reserve falls below 30%

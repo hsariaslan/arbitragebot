@@ -19,6 +19,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -45,6 +46,7 @@ class TradeResult:
     requested_price: float = 0.0         # what sim expected (ticker price)
     actual_avg_price: float = 0.0        # D-08: actual fill price
     actual_fee: float = 0.0              # actual fee amount charged
+    actual_fee_usd: float = 0.0          # fee converted to USD/USDT value
     fee_rate: float = 0.0                # actual fee rate (e.g. 0.001)
     fee_currency: str = ""               # D-05: "USDT", "BTC", "BNB", etc.
     is_maker: bool = False               # D-13: maker vs taker
@@ -89,6 +91,7 @@ class TradeResult:
             "requested_price": self.requested_price,
             "actual_avg_price": self.actual_avg_price,
             "actual_fee": self.actual_fee,
+            "actual_fee_usd": self.actual_fee_usd,
             "fee_rate": self.fee_rate,
             "fee_currency": self.fee_currency,
             "is_maker": self.is_maker,
@@ -222,6 +225,26 @@ class ExecutionEngine(ABC):
         """Place a market order. Returns TradeResult with fill details."""
         ...
 
+    async def place_marketable_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        client_order_id: str,
+        limit_price: float,
+        time_in_force: str = "IOC",
+        expected_price: float = 0.0,
+    ) -> TradeResult:
+        """Place a taker-style limit order capped at a worst acceptable price."""
+        return self._failed_result(
+            symbol,
+            side,
+            qty,
+            expected_price,
+            f"marketable_limit_unsupported:{time_in_force}",
+            client_order_id,
+        )
+
     @abstractmethod
     async def get_order_status(self, symbol: str, order_id: str) -> TradeResult:
         """Query the status of an existing order."""
@@ -258,6 +281,26 @@ class ExecutionEngine(ABC):
             timestamp=time.time(),
         )
 
+    def round_limit_price(self, symbol: str, side: str, limit_price: float) -> Decimal:
+        """Round a limit cap/floor to exchange tick size without tightening buys."""
+        price_dec = Decimal(str(limit_price))
+        if not self._exchange_info:
+            return price_dec
+        rounded = self._exchange_info.round_price(
+            self.exchange_name,
+            symbol,
+            price_dec,
+        )
+        rules = self._exchange_info.get_rules(self.exchange_name, symbol)
+        if (
+            side.lower() == "buy"
+            and rules is not None
+            and rules.tick_size > 0
+            and rounded < price_dec
+        ):
+            rounded += rules.tick_size
+        return rounded
+
 
 # ── Demo Executor Coordinator ────────────────────────────────────────────
 
@@ -274,9 +317,23 @@ class DemoExecutor:
         self,
         exchange_info: ExchangeInfoManager | None,
         executors: dict[str, ExecutionEngine],
+        execution_order_mode: str = "marketable_limit_fok",
+        marketable_limit_price_buffer_pct: float = 0.02,
+        demo_one_leg_drill_enabled: bool = False,
+        demo_one_leg_drill_every_n: int = 0,
+        demo_one_leg_drill_side: str = "alternate",
     ) -> None:
         self._exchange_info = exchange_info
         self._executors = executors
+        self._execution_order_mode = execution_order_mode
+        self._marketable_limit_price_buffer_pct = max(
+            0.0,
+            float(marketable_limit_price_buffer_pct),
+        )
+        self._demo_one_leg_drill_enabled = bool(demo_one_leg_drill_enabled)
+        self._demo_one_leg_drill_every_n = max(0, int(demo_one_leg_drill_every_n))
+        self._demo_one_leg_drill_side = demo_one_leg_drill_side
+        self._demo_one_leg_drill_count: int = 0
         self._total_trades: int = 0
         self._one_legged_count: int = 0
         self._rejection_count: int = 0
@@ -291,6 +348,10 @@ class DemoExecutor:
         self._demo_positions: dict[str, dict[str, float]] = defaultdict(
             lambda: defaultdict(float)
         )
+        self._protected_position_floor: dict[str, dict[str, float]] = defaultdict(
+            lambda: defaultdict(float)
+        )
+        self._protected_sell_log_count: dict[str, int] = defaultdict(int)
 
     @property
     def supported_exchanges(self) -> list[str]:
@@ -319,6 +380,59 @@ class DemoExecutor:
         """Get tracked demo crypto position for an exchange+symbol."""
         return self._demo_positions.get(exchange, {}).get(symbol, 0.0)
 
+    def set_protected_position_floor(
+        self,
+        exchange: str,
+        symbol: str,
+        qty: float,
+    ) -> None:
+        """Reserve quantity that normal demo sell legs must not consume."""
+        self._protected_position_floor[exchange][symbol] = max(0.0, float(qty))
+
+    def get_protected_position_floor(self, exchange: str, symbol: str) -> float:
+        return max(
+            0.0,
+            float(self._protected_position_floor.get(exchange, {}).get(symbol, 0.0) or 0.0),
+        )
+
+    @staticmethod
+    def _base_asset(symbol: str) -> str:
+        for quote in ("USDT", "USDC", "USD", "BTC", "ETH"):
+            if symbol.endswith(quote) and len(symbol) > len(quote):
+                return symbol[: -len(quote)]
+        return symbol
+
+    def _fee_usd(self, result: TradeResult) -> float:
+        """Best-effort USD value for an exchange-reported fee."""
+        if not result.success:
+            return 0.0
+        fee_usd = max(0.0, float(getattr(result, "actual_fee_usd", 0.0) or 0.0))
+        if fee_usd > 0:
+            return fee_usd
+        amount = max(0.0, float(result.actual_fee or 0.0))
+        if amount <= 0:
+            return 0.0
+        ccy = str(result.fee_currency or "").upper()
+        if ccy in ("USDT", "USDC", "USD"):
+            return amount
+        base = self._base_asset(result.symbol).upper()
+        if ccy == base and result.actual_avg_price > 0:
+            return amount * result.actual_avg_price
+        notional = result.filled_qty * result.actual_avg_price
+        if result.fee_rate > 0 and notional > 0:
+            return notional * result.fee_rate
+        return 0.0
+
+    def _leg_cashflow_usd(self, result: TradeResult) -> float:
+        """Signed cashflow after fees: buy is negative, sell is positive."""
+        if not result.success:
+            return 0.0
+        notional = result.filled_qty * result.actual_avg_price
+        fee_usd = self._fee_usd(result)
+        if result.side.lower() == "buy":
+            return -notional - fee_usd
+        return notional - fee_usd
+
     def cap_sell_qty(self, exchange: str, symbol: str, requested_qty: float) -> float:
         """Cap sell quantity to available demo position.
 
@@ -326,7 +440,20 @@ class DemoExecutor:
         Returns requested_qty if sufficient position exists.
         Returns reduced qty if partial position available.
         """
-        available = self.get_demo_position(exchange, symbol)
+        position = self.get_demo_position(exchange, symbol)
+        protected = self.get_protected_position_floor(exchange, symbol)
+        available = max(0.0, position - protected)
+        if protected > 0 and requested_qty > available:
+            key = f"{exchange}:{symbol}"
+            self._protected_sell_log_count[key] += 1
+            count = self._protected_sell_log_count[key]
+            if count == 1 or count % 100 == 0:
+                logger.info(
+                    f"[DemoTrade] PROTECTED_SELL_CAP {exchange} {symbol}: "
+                    f"position={position:.8f} protected={protected:.8f} "
+                    f"available={available:.8f} requested={requested_qty:.8f} "
+                    f"count={count}"
+                )
         if available <= 0:
             return 0.0
         if requested_qty <= available:
@@ -336,6 +463,56 @@ class DemoExecutor:
     def can_execute(self, buy_ex: str, sell_ex: str) -> bool:
         """Check if both exchanges have executors available."""
         return buy_ex in self._executors and sell_ex in self._executors
+
+    def _normal_order_tif(self) -> str:
+        return "FOK" if str(self._execution_order_mode).lower().endswith("_fok") else "IOC"
+
+    def _marketable_limit_price(self, side: str, expected_price: float) -> float:
+        if expected_price <= 0:
+            return expected_price
+        buffer_pct = self._marketable_limit_price_buffer_pct / 100.0
+        if side.lower() == "buy":
+            return expected_price * (1.0 + buffer_pct)
+        return expected_price * max(0.0, 1.0 - buffer_pct)
+
+    def _drill_side_for_trade(self) -> str:
+        if not self._demo_one_leg_drill_enabled or self._demo_one_leg_drill_every_n <= 0:
+            return ""
+        if self._total_trades % self._demo_one_leg_drill_every_n != 0:
+            return ""
+        side = str(self._demo_one_leg_drill_side).lower()
+        if side in ("buy", "sell"):
+            return side
+        return "buy" if self._demo_one_leg_drill_count % 2 == 0 else "sell"
+
+    async def _place_normal_order(
+        self,
+        executor: ExecutionEngine,
+        symbol: str,
+        side: str,
+        qty: float,
+        client_order_id: str,
+        expected_price: float,
+    ) -> TradeResult:
+        mode = str(self._execution_order_mode).lower()
+        if mode == "market":
+            return await executor.place_market_order(
+                symbol,
+                side,
+                qty,
+                client_order_id,
+                expected_price=expected_price,
+            )
+        tif = self._normal_order_tif()
+        return await executor.place_marketable_limit_order(
+            symbol,
+            side,
+            qty,
+            client_order_id,
+            limit_price=self._marketable_limit_price(side, expected_price),
+            time_in_force=tif,
+            expected_price=expected_price,
+        )
 
     async def execute_arbitrage(
         self,
@@ -350,7 +527,7 @@ class DemoExecutor:
     ) -> ArbitrageResult:
         """Execute a full arbitrage trade (buy + sell) in parallel.
 
-        Places market orders on both exchanges simultaneously.
+        Places both legs simultaneously using the configured spot order mode.
         If one leg fails, attempts to unwind the other (D-11).
         Returns ArbitrageResult with actual fill data for comparison.
         """
@@ -362,6 +539,13 @@ class DemoExecutor:
 
         buy_client_id = generate_client_order_id(symbol, "buy")
         sell_client_id = generate_client_order_id(symbol, "sell")
+        drill_side = self._drill_side_for_trade()
+        if drill_side:
+            self._demo_one_leg_drill_count += 1
+            logger.warning(
+                f"[ExecutorDrill] Forcing {symbol} {drill_side} leg failure "
+                f"on trade #{self._total_trades} to exercise one-leg recovery"
+            )
 
         # Track pending orders for crash recovery
         pending = [
@@ -373,12 +557,48 @@ class DemoExecutor:
         self._pending_orders.extend(pending)
 
         # Fire both legs in parallel
-        buy_task = buy_executor.place_market_order(
-            symbol, "buy", buy_qty, buy_client_id, expected_price=buy_price,
-        )
-        sell_task = sell_executor.place_market_order(
-            symbol, "sell", sell_qty, sell_client_id, expected_price=sell_price,
-        )
+        if drill_side == "buy":
+            buy_task = asyncio.sleep(
+                0,
+                result=buy_executor._failed_result(
+                    symbol,
+                    "buy",
+                    buy_qty,
+                    buy_price,
+                    "forced_demo_one_leg_drill",
+                    buy_client_id,
+                ),
+            )
+        else:
+            buy_task = self._place_normal_order(
+                buy_executor,
+                symbol,
+                "buy",
+                buy_qty,
+                buy_client_id,
+                buy_price,
+            )
+        if drill_side == "sell":
+            sell_task = asyncio.sleep(
+                0,
+                result=sell_executor._failed_result(
+                    symbol,
+                    "sell",
+                    sell_qty,
+                    sell_price,
+                    "forced_demo_one_leg_drill",
+                    sell_client_id,
+                ),
+            )
+        else:
+            sell_task = self._place_normal_order(
+                sell_executor,
+                symbol,
+                "sell",
+                sell_qty,
+                sell_client_id,
+                sell_price,
+            )
 
         results = await asyncio.gather(buy_task, sell_task, return_exceptions=True)
 
@@ -435,15 +655,30 @@ class DemoExecutor:
             self.update_demo_position(buy_ex, symbol, "buy", buy_result.filled_qty)
         if sell_result.success:
             self.update_demo_position(sell_ex, symbol, "sell", sell_result.filled_qty)
+        if recovery_result and recovery_result.success:
+            if buy_result.success and not sell_result.success:
+                self.update_demo_position(
+                    buy_ex,
+                    symbol,
+                    "sell",
+                    recovery_result.filled_qty,
+                )
+            elif sell_result.success and not buy_result.success:
+                self.update_demo_position(
+                    sell_ex,
+                    symbol,
+                    "buy",
+                    recovery_result.filled_qty,
+                )
 
         # Compute actual profit
-        actual_profit = 0.0
-        if buy_result.success and sell_result.success:
-            buy_cost = buy_result.filled_qty * buy_result.actual_avg_price
-            buy_fee_cost = buy_result.actual_fee if buy_result.fee_currency == "USDT" else 0.0
-            sell_revenue = sell_result.filled_qty * sell_result.actual_avg_price
-            sell_fee_cost = sell_result.actual_fee if sell_result.fee_currency == "USDT" else 0.0
-            actual_profit = sell_revenue - buy_cost - buy_fee_cost - sell_fee_cost
+        actual_profit = (
+            self._leg_cashflow_usd(buy_result)
+            + self._leg_cashflow_usd(sell_result)
+            + self._leg_cashflow_usd(recovery_result)
+            if recovery_result
+            else self._leg_cashflow_usd(buy_result) + self._leg_cashflow_usd(sell_result)
+        )
 
         sim_profit = trade_size * (
             (sell_price - buy_price) / buy_price * 100
@@ -465,6 +700,7 @@ class DemoExecutor:
         )
         logger.info(
             f"[Executor] {symbol} {buy_ex}→{sell_ex} {status}: "
+            f"mode={self._execution_order_mode} "
             f"buy@{buy_result.actual_avg_price:.4f} "
             f"sell@{sell_result.actual_avg_price:.4f} "
             f"slippage={arb_result.avg_slippage_pct:.4f}% "
@@ -754,15 +990,15 @@ class DemoExecutor:
 
                 client_id = generate_client_order_id(symbol, "setup")
 
-                # Wait for rate limit
-                if hasattr(executor, '_rate_limiter'):
-                    while not await executor._rate_limiter.acquire():
-                        await asyncio.sleep(0.1)
-
                 t0 = time.time()
                 try:
-                    result = await executor.place_market_order(
-                        symbol, "buy", qty, client_id, expected_price=price,
+                    result = await self._place_normal_order(
+                        executor,
+                        symbol,
+                        "buy",
+                        qty,
+                        client_id,
+                        price,
                     )
                 except Exception as e:
                     result = TradeResult(
@@ -784,8 +1020,7 @@ class DemoExecutor:
                 demo_cost = 0.0
                 if result.success:
                     demo_cost = result.filled_qty * result.actual_avg_price
-                    if result.fee_currency == "USDT":
-                        demo_cost += result.actual_fee
+                    demo_cost += self._fee_usd(result)
                     filled_count += 1
                     if result.is_partial:
                         partial_count += 1
@@ -864,7 +1099,9 @@ class DemoExecutor:
             "one_legged_count": self._one_legged_count,
             "rejection_count": self._rejection_count,
             "partial_fill_count": self._partial_fill_count,
+            "demo_one_leg_drill_count": self._demo_one_leg_drill_count,
             "demo_positions": demo_pos,
+            "protected_sell_log_count": dict(self._protected_sell_log_count),
         }
 
     def from_state_dict(self, data: dict) -> None:
@@ -873,9 +1110,14 @@ class DemoExecutor:
         self._one_legged_count = data.get("one_legged_count", 0)
         self._rejection_count = data.get("rejection_count", 0)
         self._partial_fill_count = data.get("partial_fill_count", 0)
+        self._demo_one_leg_drill_count = data.get("demo_one_leg_drill_count", 0)
         for ex, syms in data.get("demo_positions", {}).items():
             for sym, qty in syms.items():
                 self._demo_positions[ex][sym] = qty
+        self._protected_sell_log_count = defaultdict(
+            int,
+            data.get("protected_sell_log_count", {}),
+        )
 
     async def close(self) -> None:
         """Clean up all executor sessions."""

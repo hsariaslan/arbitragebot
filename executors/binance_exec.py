@@ -21,7 +21,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 
-from config import BINANCE_TESTNET_API_KEY, BINANCE_TESTNET_API_SECRET
+from config import BINANCE_TESTNET_API_KEY, BINANCE_TESTNET_API_SECRET, EXCHANGE_TAKER_FEES
 from executor import ExecutionEngine, RateLimiter, TradeResult
 
 if TYPE_CHECKING:
@@ -133,6 +133,101 @@ class BinanceExecutor(ExecutionEngine):
                 f"exception: {e}", client_order_id,
             )
 
+    async def place_marketable_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        client_order_id: str,
+        limit_price: float,
+        time_in_force: str = "IOC",
+        expected_price: float = 0.0,
+    ) -> TradeResult:
+        """Place a limit IOC/FOK order that crosses the book with a price cap."""
+        if not await self._rate_limiter.acquire():
+            return self._failed_result(
+                symbol,
+                side,
+                qty,
+                expected_price,
+                "rate_limited",
+                client_order_id,
+            )
+
+        session = await self._ensure_session()
+        t0 = time.time()
+        price_dec = self.round_limit_price(symbol, side, limit_price)
+
+        params = {
+            "symbol": self.format_symbol(symbol),
+            "side": side.upper(),
+            "type": "LIMIT",
+            "timeInForce": time_in_force.upper(),
+            "quantity": f"{qty:.8f}".rstrip("0").rstrip("."),
+            "price": format(price_dec, "f").rstrip("0").rstrip("."),
+            "newClientOrderId": client_order_id,
+            "newOrderRespType": "FULL",
+            "timestamp": str(int(time.time() * 1000)),
+        }
+
+        signed_query = self._sign(params)
+        url = f"{_BASE_URL}/api/v3/order?{signed_query}"
+
+        try:
+            async with session.post(url, headers=self._headers()) as resp:
+                data = await resp.json()
+
+            latency = (time.time() - t0) * 1000.0
+
+            if resp.status != 200 or "orderId" not in data:
+                error = data.get("msg", str(data))
+                code = data.get("code", resp.status)
+                count = self._rejected_symbols.get(symbol, 0) + 1
+                self._rejected_symbols[symbol] = count
+                if count == 1:
+                    logger.warning(
+                        f"[BinanceExec] Limit {time_in_force} rejected: "
+                        f"{symbol} {side} qty={qty} price={params['price']} — "
+                        f"{code}: {error}"
+                    )
+                elif count == 2:
+                    logger.info(
+                        f"[BinanceExec] {symbol} limit rejection repeated — "
+                        f"suppressing further logs"
+                    )
+                return self._failed_result(
+                    symbol,
+                    side,
+                    qty,
+                    expected_price,
+                    f"{code}: {error}",
+                    client_order_id,
+                )
+
+            result = self._parse_order_response(
+                data,
+                symbol,
+                side,
+                qty,
+                expected_price,
+                client_order_id,
+                latency,
+            )
+            if result.success and result.fill_ratio < 0.999:
+                result.error = f"partial_fill:{result.fill_ratio:.4f}"
+            return result
+
+        except Exception as e:
+            logger.error(f"[BinanceExec] Limit order exception: {symbol} {side} — {e}")
+            return self._failed_result(
+                symbol,
+                side,
+                qty,
+                expected_price,
+                f"exception: {e}",
+                client_order_id,
+            )
+
     def _parse_order_response(
         self, data: dict, symbol: str, side: str, qty: float,
         expected_price: float, client_order_id: str, latency: float,
@@ -169,10 +264,22 @@ class BinanceExecutor(ExecutionEngine):
         if avg_price == 0 and executed_qty > 0 and cum_quote_qty > 0:
             avg_price = cum_quote_qty / executed_qty
 
-        # Determine fee rate
+        notional = total_cost if total_cost > 0 else cum_quote_qty
+
+        # Determine fee rate and USD value.
         fee_rate = 0.0
-        if total_commission > 0 and total_cost > 0:
-            fee_rate = total_commission / total_cost if commission_asset == "USDT" else 0.0
+        actual_fee_usd = 0.0
+        base_asset = symbol[:-4] if symbol.endswith("USDT") else symbol
+        if total_commission > 0 and notional > 0:
+            if commission_asset in ("USDT", "USDC", "USD"):
+                actual_fee_usd = total_commission
+            elif commission_asset == base_asset and avg_price > 0:
+                actual_fee_usd = total_commission * avg_price
+            elif commission_asset == "BNB":
+                fee_rate = float(EXCHANGE_TAKER_FEES.get("Binance", 0.00075))
+                actual_fee_usd = notional * fee_rate
+            if fee_rate <= 0 and actual_fee_usd > 0:
+                fee_rate = actual_fee_usd / notional
 
         success = status == "FILLED" or executed_qty > 0
 
@@ -188,6 +295,7 @@ class BinanceExecutor(ExecutionEngine):
             requested_price=expected_price,
             actual_avg_price=avg_price,
             actual_fee=total_commission,
+            actual_fee_usd=actual_fee_usd,
             fee_rate=fee_rate,
             fee_currency=commission_asset,
             is_maker=is_maker,

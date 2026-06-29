@@ -29,10 +29,13 @@ script `scripts/test_futures_executor.py` for verification.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
+import re
 import time
+from decimal import Decimal, ROUND_DOWN
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
@@ -54,6 +57,8 @@ logger = logging.getLogger(__name__)
 _TESTNET_BASE_URL = "https://testnet.binancefuture.com"
 _LIVE_BASE_URL = "https://fapi.binance.com"
 _SPOT_LIVE_BASE_URL = "https://api.binance.com"
+_ACCOUNT_INFO_PATH = "/fapi/v2/account"
+_BAN_UNTIL_RE = re.compile(r"banned until\s+(\d{10,13})", re.IGNORECASE)
 
 
 def _is_blank(value: Any) -> bool:
@@ -76,6 +81,22 @@ def _to_int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _floor_to_step(value: float, step: float) -> float:
+    if step <= 0:
+        return max(0.0, float(value))
+    rounded = (
+        Decimal(str(max(0.0, float(value))))
+        / Decimal(str(step))
+    ).to_integral_value(rounding=ROUND_DOWN) * Decimal(str(step))
+    return float(rounded)
+
+
+def _fmt_decimal(value: float) -> str:
+    d = Decimal(str(max(0.0, float(value)))).normalize()
+    s = format(d, "f").rstrip("0").rstrip(".")
+    return s if s else "0"
 
 
 def _number_with_fallback(primary: Any, fallback: Any, default: float = 0.0) -> float:
@@ -112,8 +133,12 @@ class BinanceFuturesExecutor(ExecutionEngine):
         # Per-symbol exchange filters: {symbol: {step, tick, min_qty, min_notional}}
         # Loaded lazily on first need from /fapi/v1/exchangeInfo.
         self._symbol_filters: dict[str, dict] = {}
+        self._spot_symbol_filters: dict[str, dict] = {}
         self._exchange_info_loaded: bool = False
         self._sapi_base_url = _SPOT_LIVE_BASE_URL
+        self._account_info_backoff_until: float = 0.0
+        self._account_info_backoff_reason: str = ""
+        self._account_info_backoff_logged: bool = False
 
     # ── Internal helpers ──────────────────────────────────────────────
 
@@ -144,6 +169,34 @@ class BinanceFuturesExecutor(ExecutionEngine):
         """Binance Futures uses BTCUSDT format. 1000X contracts kept verbatim."""
         return symbol
 
+    def _account_info_backoff_remaining(self) -> float:
+        return max(0.0, self._account_info_backoff_until - time.time())
+
+    def _record_account_info_backoff(self, status: int, data: dict) -> None:
+        """Respect Binance rate-limit bans on the expensive account summary call."""
+        code = data.get("code") if isinstance(data, dict) else None
+        if status not in (418, 429) and code != -1003:
+            return
+
+        msg = str(data.get("msg") or data.get("error") or data)
+        now = time.time()
+        until = now + 60.0
+        match = _BAN_UNTIL_RE.search(msg)
+        if match:
+            raw_ts = int(match.group(1))
+            ban_ts = raw_ts / 1000.0 if raw_ts > 10_000_000_000 else float(raw_ts)
+            until = max(until, ban_ts + 2.0)
+
+        self._account_info_backoff_until = max(self._account_info_backoff_until, until)
+        self._account_info_backoff_reason = msg
+        self._account_info_backoff_logged = False
+
+    def _maybe_clear_account_info_backoff(self, path: str, status: int) -> None:
+        if path == _ACCOUNT_INFO_PATH and status == 200:
+            self._account_info_backoff_until = 0.0
+            self._account_info_backoff_reason = ""
+            self._account_info_backoff_logged = False
+
     async def _signed_request(
         self,
         method: str,
@@ -154,6 +207,24 @@ class BinanceFuturesExecutor(ExecutionEngine):
         """Make a signed REST request. Returns (http_status, response_json)."""
         if not self._credentials_ok():
             return (0, {"error": "credentials not configured"})
+        if path == _ACCOUNT_INFO_PATH:
+            remaining = self._account_info_backoff_remaining()
+            if remaining > 0:
+                if not self._account_info_backoff_logged:
+                    logger.warning(
+                        f"[BinanceFutures] account-info backoff active for "
+                        f"{remaining:.0f}s after rate-limit response: "
+                        f"{self._account_info_backoff_reason}"
+                    )
+                    self._account_info_backoff_logged = True
+                return (
+                    0,
+                    {
+                        "error": "account_info_backoff",
+                        "retry_after_seconds": round(remaining, 1),
+                        "reason": self._account_info_backoff_reason,
+                    },
+                )
         if not await self._rate_limiter.acquire():
             return (0, {"error": "rate_limited"})
 
@@ -170,7 +241,11 @@ class BinanceFuturesExecutor(ExecutionEngine):
                     data = await resp.json(content_type=None)
                 except Exception:
                     data = {"raw": await resp.text()}
-                return (resp.status, data if isinstance(data, dict) else {"data": data})
+                data = data if isinstance(data, dict) else {"data": data}
+                if path == _ACCOUNT_INFO_PATH:
+                    self._maybe_clear_account_info_backoff(path, resp.status)
+                    self._record_account_info_backoff(resp.status, data)
+                return (resp.status, data)
         except Exception as e:
             return (0, {"error": f"request_exception: {e}"})
 
@@ -205,6 +280,64 @@ class BinanceFuturesExecutor(ExecutionEngine):
                 return (resp.status, data if isinstance(data, dict) else {"data": data})
         except Exception as e:
             return (0, {"error": f"request_exception: {e}"})
+
+    async def _spot_signed_request(
+        self,
+        method: str,
+        path: str,
+        params: dict,
+        recv_window: int = 5000,
+    ) -> tuple[int, dict]:
+        """Make a signed Binance Spot REST request using the live REST host."""
+        if self._mode != "live":
+            return (0, {"error": "spot_account_requires_live_mode"})
+        if not self._credentials_ok():
+            return (0, {"error": "credentials not configured"})
+        if not await self._rate_limiter.acquire():
+            return (0, {"error": "rate_limited"})
+
+        session = await self._ensure_session()
+        params = dict(params)
+        params["timestamp"] = str(int(time.time() * 1000))
+        params["recvWindow"] = str(recv_window)
+        signed = self._sign(params)
+        url = f"{self._sapi_base_url}{path}?{signed}"
+
+        try:
+            async with session.request(method, url, headers=self._headers()) as resp:
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    data = {"raw": await resp.text()}
+                return (resp.status, data if isinstance(data, dict) else {"data": data})
+        except Exception as e:
+            return (0, {"error": f"request_exception: {e}"})
+
+    async def get_ticker_price(self, symbol: str) -> float:
+        """Return a public Binance Futures ticker price."""
+        session = await self._ensure_session()
+        url = f"{self._base_url}/fapi/v1/ticker/price?symbol={symbol}"
+        try:
+            async with session.get(url) as resp:
+                data = await resp.json(content_type=None)
+            if isinstance(data, dict):
+                return _to_float(data.get("price"))
+        except Exception as e:
+            logger.warning(f"[BinanceFutures] ticker price fetch failed: {symbol}: {e}")
+        return 0.0
+
+    async def get_spot_ticker_price(self, symbol: str = "BNBUSDT") -> float:
+        """Return a public Binance Spot ticker price."""
+        session = await self._ensure_session()
+        url = f"{self._sapi_base_url}/api/v3/ticker/price?symbol={symbol}"
+        try:
+            async with session.get(url) as resp:
+                data = await resp.json(content_type=None)
+            if isinstance(data, dict):
+                return _to_float(data.get("price"))
+        except Exception as e:
+            logger.warning(f"[BinanceFutures] spot ticker price fetch failed: {symbol}: {e}")
+        return 0.0
 
     # ── Exchange filters (LOT_SIZE, MIN_NOTIONAL, PRICE_FILTER) ───────
 
@@ -265,6 +398,51 @@ class BinanceFuturesExecutor(ExecutionEngine):
             await self._load_exchange_info()
         return self._symbol_filters.get(symbol)
 
+    async def get_spot_symbol_filters(self, symbol: str) -> dict | None:
+        """Return cached Binance Spot filters for a symbol."""
+        if symbol in self._spot_symbol_filters:
+            return self._spot_symbol_filters[symbol]
+
+        session = await self._ensure_session()
+        url = f"{self._sapi_base_url}/api/v3/exchangeInfo?symbol={symbol}"
+        try:
+            async with session.get(url) as resp:
+                data = await resp.json(content_type=None)
+        except Exception as e:
+            logger.warning(f"[BinanceFutures] spot exchangeInfo fetch failed: {symbol}: {e}")
+            return None
+
+        symbols = data.get("symbols", []) if isinstance(data, dict) else []
+        if not symbols:
+            logger.warning(f"[BinanceFutures] spot exchangeInfo empty for {symbol}: {data}")
+            return None
+
+        sym_info = symbols[0]
+        step = 0.0
+        tick = 0.0
+        min_qty = 0.0
+        min_notional = 0.0
+        for filt in sym_info.get("filters", []):
+            filt_type = filt.get("filterType")
+            if filt_type == "LOT_SIZE":
+                step = _to_float(filt.get("stepSize"))
+                min_qty = _to_float(filt.get("minQty"))
+            elif filt_type == "PRICE_FILTER":
+                tick = _to_float(filt.get("tickSize"))
+            elif filt_type in ("MIN_NOTIONAL", "NOTIONAL"):
+                min_notional = _to_float(filt.get("minNotional", filt.get("notional")))
+
+        filters = {
+            "step": step,
+            "tick": tick,
+            "min_qty": min_qty,
+            "min_notional": min_notional,
+            "base_precision": _to_int(sym_info.get("baseAssetPrecision"), 8),
+            "quote_precision": _to_int(sym_info.get("quoteAssetPrecision"), 8),
+        }
+        self._spot_symbol_filters[symbol] = filters
+        return filters
+
     async def round_quantity(self, symbol: str, qty: float) -> float:
         """Round qty DOWN to the symbol's LOT_SIZE step (truncate-toward-zero).
 
@@ -286,6 +464,100 @@ class BinanceFuturesExecutor(ExecutionEngine):
         if rounded < min_qty:
             return 0.0
         return rounded
+
+    async def place_spot_market_buy_bnb(
+        self,
+        quote_usd: float,
+        client_order_id: str = "",
+    ) -> dict:
+        """Buy BNB on Binance Spot with a market order by quote amount."""
+        if self._mode != "live":
+            return {"success": False, "error": "spot_bnb_buy_requires_live_mode"}
+        quote = max(0.0, float(quote_usd))
+        if quote <= 0:
+            return {"success": False, "error": "quote_usd_must_be_positive"}
+
+        symbol = "BNBUSDT"
+        filters = await self.get_spot_symbol_filters(symbol)
+        if not filters:
+            return {"success": False, "error": "spot_symbol_filters_unavailable"}
+
+        min_notional = float(filters.get("min_notional", 0.0) or 0.0)
+        if min_notional > 0 and quote < min_notional:
+            return {
+                "success": False,
+                "error": f"bnb_quote_below_min_notional ${quote:.2f} < ${min_notional:.2f}",
+            }
+
+        params: dict = {
+            "symbol": symbol,
+            "side": "BUY",
+            "type": "MARKET",
+            "quoteOrderQty": _fmt_decimal(quote),
+            "newOrderRespType": "FULL",
+        }
+        if client_order_id:
+            params["newClientOrderId"] = client_order_id[:36]
+
+        status, data = await self._spot_signed_request("POST", "/api/v3/order", params)
+        if status != 200 or "orderId" not in data:
+            error = data.get("msg", data.get("error", str(data)))
+            logger.warning(
+                f"[BinanceFutures] Spot BNB market buy failed: "
+                f"quote=${quote:.2f} status={status} resp={data}"
+            )
+            return {"success": False, "status": status, "error": error, "raw": data}
+
+        order_id = str(data.get("orderId", ""))
+        executed_qty = _to_float(data.get("executedQty"))
+        quote_spent = _to_float(data.get("cummulativeQuoteQty"))
+        fees: dict[str, float] = {}
+        for fill in data.get("fills", []) if isinstance(data, dict) else []:
+            if not isinstance(fill, dict):
+                continue
+            asset = str(fill.get("commissionAsset") or "")
+            commission = _to_float(fill.get("commission"))
+            if asset and commission > 0:
+                fees[asset] = fees.get(asset, 0.0) + commission
+
+        fee_bnb = fees.get("BNB", 0.0)
+        fee_usdt = fees.get("USDT", 0.0)
+        estimated_fee_bnb = 0.0
+        if executed_qty > 0 and not data.get("fills"):
+            estimated_fee_bnb = executed_qty * 0.001
+        net_qty = max(0.0, executed_qty - fee_bnb)
+        if estimated_fee_bnb > 0:
+            net_qty = max(0.0, net_qty - estimated_fee_bnb)
+            fees["BNB_ESTIMATED"] = estimated_fee_bnb
+        avg_price = quote_spent / executed_qty if executed_qty > 0 else 0.0
+        if net_qty <= 0:
+            return {
+                "success": False,
+                "status": data.get("status"),
+                "order_id": order_id,
+                "error": "spot_bnb_market_buy_not_filled",
+                "requested_usd": quote,
+                "filled_qty": executed_qty,
+                "spent_usdt": quote_spent + fee_usdt,
+                "raw": data,
+            }
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "order_id": order_id,
+            "status": data.get("status"),
+            "requested_usd": quote,
+            "filled_qty": executed_qty,
+            "net_qty": net_qty,
+            "spent_usdt": quote_spent + fee_usdt,
+            "avg_price": avg_price,
+            "fee_bnb": fee_bnb,
+            "estimated_fee_bnb": estimated_fee_bnb,
+            "fee_usdt": fee_usdt,
+            "fees": fees,
+            "raw": data,
+        }
 
     # ── Configuration (one-time per symbol) ───────────────────────────
 
@@ -404,7 +676,11 @@ class BinanceFuturesExecutor(ExecutionEngine):
                 )
             return self._failed_result(symbol, side, qty, expected_price, f"{code}: {error}", client_order_id)
 
-        return self._parse_order_response(data, symbol, side, rounded_qty, expected_price, client_order_id, latency)
+        result = self._parse_order_response(
+            data, symbol, side, rounded_qty, expected_price, client_order_id, latency
+        )
+        await self._populate_order_fees(result)
+        return result
 
     async def close_position(self, symbol: str) -> TradeResult | None:
         """Close any open position for a symbol via market order with reduceOnly.
@@ -429,7 +705,11 @@ class BinanceFuturesExecutor(ExecutionEngine):
         status, data = await self._signed_request("GET", "/fapi/v1/order", params)
         if status != 200 or "orderId" not in data:
             return self._failed_result(symbol, "?", 0.0, 0.0, str(data), str(order_id))
-        return self._parse_order_response(data, symbol, data.get("side", "?"), 0.0, 0.0, str(order_id), 0.0)
+        result = self._parse_order_response(
+            data, symbol, data.get("side", "?"), 0.0, 0.0, str(order_id), 0.0
+        )
+        await self._populate_order_fees(result)
+        return result
 
     # ── Positions / account ───────────────────────────────────────────
 
@@ -494,9 +774,10 @@ class BinanceFuturesExecutor(ExecutionEngine):
 
     async def get_account_info(self) -> dict:
         """Return wallet/margin balance summary."""
-        status, data = await self._signed_request("GET", "/fapi/v2/account", {})
+        status, data = await self._signed_request("GET", _ACCOUNT_INFO_PATH, {})
         if status != 200:
-            logger.warning(f"[BinanceFutures] get_account_info failed: resp={data}")
+            if data.get("error") != "account_info_backoff":
+                logger.warning(f"[BinanceFutures] get_account_info failed: resp={data}")
             return {}
         assets = data.get("assets", []) if isinstance(data, dict) else []
         usdt_asset = next(
@@ -542,6 +823,66 @@ class BinanceFuturesExecutor(ExecutionEngine):
                 return _to_float(row.get("availableBalance"))
         return 0.0
 
+    async def _populate_order_fees(self, result: TradeResult) -> None:
+        """Populate actual futures commission from user trades when available."""
+        if not result.success or not result.order_id or not result.symbol:
+            return
+        params = {"symbol": result.symbol, "orderId": result.order_id}
+        trades: list[dict] = []
+        for attempt in range(2):
+            status, data = await self._signed_request("GET", "/fapi/v1/userTrades", params)
+            rows = data.get("data") if isinstance(data, dict) and "data" in data else data
+            if status == 200 and isinstance(rows, list):
+                trades = [row for row in rows if isinstance(row, dict)]
+                if trades:
+                    break
+            if attempt == 0:
+                await asyncio.sleep(0.15)
+        if not trades:
+            return
+
+        commissions: dict[str, float] = {}
+        quote_qty = 0.0
+        qty = 0.0
+        for trade in trades:
+            asset = str(trade.get("commissionAsset") or "")
+            commission = _to_float(trade.get("commission"))
+            if asset and commission > 0:
+                commissions[asset] = commissions.get(asset, 0.0) + commission
+            quote_qty += _to_float(trade.get("quoteQty"))
+            qty += _to_float(trade.get("qty"))
+
+        if quote_qty > 0 and qty > 0:
+            result.actual_avg_price = quote_qty / qty
+            result.filled_qty = qty
+        if not commissions:
+            return
+
+        result.raw_response["commissions"] = commissions
+        if len(commissions) == 1:
+            asset, amount = next(iter(commissions.items()))
+            result.actual_fee = amount
+            result.fee_currency = asset
+            notional = result.filled_qty * result.actual_avg_price
+            result.actual_fee_usd = amount if asset == "USDT" else 0.0
+            result.fee_rate = result.actual_fee_usd / notional if notional > 0 else 0.0
+        else:
+            result.actual_fee = sum(commissions.values())
+            result.fee_currency = "MIXED"
+            result.actual_fee_usd = commissions.get("USDT", 0.0)
+            result.fee_rate = 0.0
+
+    async def get_spot_balance(self, asset: str = "BNB") -> float:
+        """Return Spot wallet free+locked balance for an asset (live mode only)."""
+        status, data = await self._spot_signed_request("GET", "/api/v3/account", {})
+        if status != 200:
+            logger.warning(f"[BinanceFutures] spot balance fetch failed: {asset} resp={data}")
+            return 0.0
+        for row in data.get("balances", []) if isinstance(data, dict) else []:
+            if isinstance(row, dict) and row.get("asset") == asset:
+                return _to_float(row.get("free")) + _to_float(row.get("locked"))
+        return 0.0
+
     async def transfer_spot_to_futures(
         self,
         amount_usdt: float,
@@ -567,10 +908,10 @@ class BinanceFuturesExecutor(ExecutionEngine):
             },
         )
         if status == 200 and ("tranId" in data or "data" in data):
-            return {"success": True, "direction": "spot_to_futures", **data}
+            return {"success": True, "direction": "spot_to_futures", "asset": asset, **data}
         logger.warning(
             f"[BinanceFutures] spot→futures transfer failed: "
-            f"amount={amount:.2f} resp={data}"
+            f"amount={amount:.8f} {asset} resp={data}"
         )
         return {"success": False, "direction": "spot_to_futures", "status": status, "error": data}
 

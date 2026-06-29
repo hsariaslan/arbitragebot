@@ -18,7 +18,11 @@ LOCAL_TZ = timezone(timedelta(hours=3))  # UTC+3
 from typing import TYPE_CHECKING
 
 from balance import BalanceTracker
-from slippage import compute_buy_slippage, compute_sell_slippage
+from slippage import (
+    compute_buy_slippage,
+    compute_sell_slippage,
+    evaluate_slippage_policy,
+)
 from config import (
     ACTIVE_EXCHANGES,
     ACTIVE_SYMBOLS,
@@ -144,6 +148,19 @@ class ArbitrageMonitor:
         min_misses_before_rebalance: int = 15,
         net_pct_sizing_enabled: bool = True,
         net_pct_multiplier_cap: float = 2.5,
+        strict_slippage_guards_enabled: bool = True,
+        require_order_book_depth: bool = True,
+        order_book_depth_buffer_multiplier: float = 1.25,
+        missing_order_book_penalty_pct: float = 0.25,
+        max_leg_slippage_pct: float = 0.05,
+        max_total_slippage_pct: float = 0.08,
+        slippage_safety_multiplier: float = 1.5,
+        slippage_latency_buffer_pct: float = 0.01,
+        book_age_guard_enabled: bool = True,
+        max_book_age_seconds: float = 2.0,
+        event_driven_max_book_age_seconds: float = 15.0,
+        depth_aware_trade_size_shrink_enabled: bool = True,
+        min_depth_shrink_ratio: float = 0.5,
     ) -> None:
         self._fetchers = fetchers
         self._balance = balance
@@ -161,6 +178,24 @@ class ArbitrageMonitor:
         self._adaptive_mode: bool = adaptive_mode
         self._net_pct_sizing_enabled: bool = net_pct_sizing_enabled
         self._net_pct_multiplier_cap: float = net_pct_multiplier_cap
+        self._strict_slippage_guards_enabled = bool(strict_slippage_guards_enabled)
+        self._require_order_book_depth = bool(require_order_book_depth)
+        self._order_book_depth_buffer_multiplier = max(0.0, float(order_book_depth_buffer_multiplier))
+        self._missing_order_book_penalty_pct = max(0.0, float(missing_order_book_penalty_pct))
+        self._max_leg_slippage_pct = max(0.0, float(max_leg_slippage_pct))
+        self._max_total_slippage_pct = max(0.0, float(max_total_slippage_pct))
+        self._slippage_safety_multiplier = max(0.0, float(slippage_safety_multiplier))
+        self._slippage_latency_buffer_pct = max(0.0, float(slippage_latency_buffer_pct))
+        self._book_age_guard_enabled = bool(book_age_guard_enabled)
+        self._max_book_age_seconds = max(0.0, float(max_book_age_seconds))
+        self._event_driven_max_book_age_seconds = max(
+            self._max_book_age_seconds,
+            float(event_driven_max_book_age_seconds),
+        )
+        self._depth_aware_trade_size_shrink_enabled = bool(
+            depth_aware_trade_size_shrink_enabled
+        )
+        self._min_depth_shrink_ratio = max(0.0, min(1.0, float(min_depth_shrink_ratio)))
 
         # Quiet-period pause: when no trade has fired for N minutes, the
         # bot's replenish/overflow/reallocation logic still runs, paying
@@ -244,10 +279,23 @@ class ArbitrageMonitor:
 
         # Depth filtering tracking
         self._depth_skips: int = 0
+        self._slippage_guard_skips: int = 0
+        self._book_age_guard_skips: int = 0
+        self._depth_shrink_count: int = 0
+        self._depth_shrink_usd: float = 0.0
+        self._slippage_guard_reason_counts: dict[str, int] = defaultdict(int)
+        self._book_age_guard_reason_counts: dict[str, int] = defaultdict(int)
+        self._depth_shrink_log_count: dict[str, int] = defaultdict(int)
+        self._slippage_guard_reason_samples: dict[str, str] = {}
+        self._book_age_guard_reason_samples: dict[str, str] = {}
+        self._depth_shrink_samples: dict[str, str] = {}
+        self._last_realism_diag_snapshot: tuple[int, int, int] = (0, 0, 0)
 
         # Min notional / min qty rejection tracking (D-02)
         self._notional_skips: int = 0
         self._interval_notional_skips: int = 0
+        self._interval_book_age_skips: int = 0
+        self._interval_depth_shrinks: int = 0
 
         # Throttle counters for diagnostic logging
         self._size_zero_log_count: dict[str, int] = defaultdict(int)
@@ -332,6 +380,7 @@ class ArbitrageMonitor:
         # spot+hedge_pnl) and we reset peak so drawdown is apples-to-apples.
         self._prev_hedge_count: int = 0
         self._hedge_reserve_gate_skips: int = 0
+        self._hedge_reserve_refresh_pending_ts: float = 0.0
 
     def set_optimizer(self, optimizer: "SymbolOptimizer") -> None:
         """Store optimizer reference for score-based rebalance gating."""
@@ -357,6 +406,206 @@ class ArbitrageMonitor:
             f"[Monitor] Demo execution enabled for: "
             f"{executor.supported_exchanges}"
         )
+
+    def _evaluate_slippage_policy(
+        self,
+        buy_slip,
+        sell_slip,
+        buy_book_present: bool,
+        sell_book_present: bool,
+        trade_size: float,
+    ):
+        return evaluate_slippage_policy(
+            buy_slip,
+            sell_slip,
+            buy_book_present,
+            sell_book_present,
+            trade_size,
+            strict_enabled=self._strict_slippage_guards_enabled,
+            require_book_depth=self._require_order_book_depth,
+            depth_buffer_multiplier=self._order_book_depth_buffer_multiplier,
+            max_leg_slippage_pct=self._max_leg_slippage_pct,
+            max_total_slippage_pct=self._max_total_slippage_pct,
+            safety_multiplier=self._slippage_safety_multiplier,
+            latency_buffer_pct=self._slippage_latency_buffer_pct,
+            missing_book_penalty_pct=self._missing_order_book_penalty_pct,
+        )
+
+    @staticmethod
+    def _short_diag(text: str, limit: int = 120) -> str:
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)] + "..."
+
+    def _format_diag_counts(
+        self,
+        counts: dict[str, int],
+        samples: dict[str, str],
+        limit: int = 3,
+    ) -> str:
+        if not counts:
+            return "none"
+        parts = []
+        for reason, count in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]:
+            sample = self._short_diag(samples.get(reason, ""))
+            parts.append(f"{reason}={count}" + (f" sample={sample}" if sample else ""))
+        return "; ".join(parts)
+
+    def _format_depth_shrink_samples(self, limit: int = 3) -> str:
+        if not self._depth_shrink_log_count:
+            return "none"
+        parts = []
+        for key, count in sorted(
+            self._depth_shrink_log_count.items(),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )[:limit]:
+            sample = self._short_diag(self._depth_shrink_samples.get(key, ""))
+            parts.append(f"{key}={count}" + (f" sample={sample}" if sample else ""))
+        return "; ".join(parts)
+
+    def _log_realism_diagnostics(self) -> None:
+        snapshot = (
+            self._slippage_guard_skips,
+            self._book_age_guard_skips,
+            self._depth_shrink_count,
+        )
+        if snapshot == self._last_realism_diag_snapshot:
+            return
+        self._last_realism_diag_snapshot = snapshot
+        logger.info(
+            f"[Session] realism_diag: "
+            f"slippage_top=[{self._format_diag_counts(self._slippage_guard_reason_counts, self._slippage_guard_reason_samples)}] "
+            f"book_age_top=[{self._format_diag_counts(self._book_age_guard_reason_counts, self._book_age_guard_reason_samples)}] "
+            f"depth_shrink_top=[{self._format_depth_shrink_samples()}] "
+            f"settings=slip_leg<={self._max_leg_slippage_pct:.4f}% "
+            f"slip_total<={self._max_total_slippage_pct:.4f}% "
+            f"depth_buffer={self._order_book_depth_buffer_multiplier:.2f}x "
+            f"book_age={self._max_book_age_seconds:.2f}s/"
+            f"{self._event_driven_max_book_age_seconds:.2f}s"
+        )
+
+    def _book_age_limit(self, exchange: str) -> float:
+        if exchange in self._event_driven_exchanges:
+            return self._event_driven_max_book_age_seconds
+        return self._max_book_age_seconds
+
+    def _book_age_guard_ok(
+        self,
+        symbol: str,
+        buy_ex: str,
+        sell_ex: str,
+        buy_book_age: float,
+        sell_book_age: float,
+    ) -> tuple[bool, str]:
+        if not self._book_age_guard_enabled:
+            return True, ""
+        checks = [
+            ("buy", buy_ex, buy_book_age, self._book_age_limit(buy_ex)),
+            ("sell", sell_ex, sell_book_age, self._book_age_limit(sell_ex)),
+        ]
+        for side, exchange, age, limit in checks:
+            if age < 0:
+                return False, f"{side}_book_missing_age {exchange}"
+            if limit > 0 and age > limit:
+                return (
+                    False,
+                    f"{side}_book_stale {exchange} age={age:.3f}s limit={limit:.3f}s",
+                )
+        return True, ""
+
+    def _record_slippage_guard_skip(
+        self,
+        symbol: str,
+        buy_ex: str,
+        sell_ex: str,
+        reason: str,
+        trade_size: float,
+    ) -> None:
+        self._slippage_guard_skips += 1
+        normalized = reason.split(" ", 1)[0] if reason else "unknown"
+        self._slippage_guard_reason_counts[normalized] += 1
+        self._slippage_guard_reason_samples.setdefault(
+            normalized,
+            f"{symbol} {buy_ex}->{sell_ex} {reason or 'unknown'} size=${trade_size:.2f}",
+        )
+        key = f"slip:{normalized}"
+        count = self._size_zero_log_count[key] = self._size_zero_log_count.get(key, 0) + 1
+        if count == 1 or count % 1000 == 0:
+            logger.info(
+                f"[Trade] SLIPPAGE_GUARD_SKIP reason={normalized} "
+                f"sample={symbol} {buy_ex}->{sell_ex} "
+                f"detail={reason or 'unknown'} size=${trade_size:.2f} count={count}"
+            )
+
+    def _record_book_age_skip(
+        self,
+        symbol: str,
+        buy_ex: str,
+        sell_ex: str,
+        reason: str,
+    ) -> None:
+        self._book_age_guard_skips += 1
+        self._interval_book_age_skips += 1
+        normalized = reason.split(" ", 1)[0] if reason else "unknown"
+        self._book_age_guard_reason_counts[normalized] += 1
+        self._book_age_guard_reason_samples.setdefault(
+            normalized,
+            f"{symbol} {buy_ex}->{sell_ex} {reason or 'unknown'}",
+        )
+        key = f"book_age:{normalized}"
+        count = self._size_zero_log_count[key] = self._size_zero_log_count.get(key, 0) + 1
+        if count == 1 or count % 1000 == 0:
+            logger.info(
+                f"[Trade] BOOK_AGE_SKIP reason={normalized} "
+                f"sample={symbol} {buy_ex}->{sell_ex} "
+                f"detail={reason or 'unknown'} count={count}"
+            )
+
+    def _shrink_trade_size_for_depth(
+        self,
+        symbol: str,
+        buy_ex: str,
+        sell_ex: str,
+        requested_size: float,
+        buy_book,
+        sell_book,
+    ) -> float:
+        if not self._depth_aware_trade_size_shrink_enabled or requested_size <= 0:
+            return requested_size
+        buy_probe = compute_buy_slippage(buy_book, requested_size)
+        sell_probe = compute_sell_slippage(sell_book, requested_size)
+        buffer = max(1.0, self._order_book_depth_buffer_multiplier)
+        available = min(buy_probe.total_depth_usd, sell_probe.total_depth_usd)
+        max_size = available / buffer if available > 0 else 0.0
+        if max_size >= requested_size:
+            return requested_size
+        min_trade = max(5.0, self._total_capital * 0.003)
+        min_ratio_size = requested_size * self._min_depth_shrink_ratio
+        if max_size < min_trade or max_size < min_ratio_size:
+            return requested_size
+        new_size = max(0.0, min(requested_size, max_size))
+        if new_size >= requested_size:
+            return requested_size
+        saved = requested_size - new_size
+        self._depth_shrink_count += 1
+        self._interval_depth_shrinks += 1
+        self._depth_shrink_usd += saved
+        key = f"{symbol}:{buy_ex}:{sell_ex}"
+        self._depth_shrink_log_count[key] += 1
+        self._depth_shrink_samples.setdefault(
+            key,
+            f"{symbol} {buy_ex}->{sell_ex} ${requested_size:.2f}->${new_size:.2f} "
+            f"depth=${available:.2f} buffer={buffer:.2f}x",
+        )
+        count = self._depth_shrink_log_count[key]
+        if count == 1 or count % 60 == 0:
+            logger.info(
+                f"[Trade] DEPTH_SHRINK {symbol} {buy_ex}->{sell_ex}: "
+                f"size=${requested_size:.2f}->${new_size:.2f} "
+                f"visible_depth=${available:.2f} buffer={buffer:.2f}x count={count}"
+            )
+        return new_size
 
     def _record_trade_pnl(self, timestamp: float, profit_usd: float) -> None:
         """Record trade profit in hourly and daily P&L buckets."""
@@ -925,6 +1174,15 @@ class ArbitrageMonitor:
             # Cap sell qty to available demo position to avoid "insufficient balance"
             actual_sell_qty = sell_qty
             if has_sell:
+                if sell_ex == "Binance" and symbol == "BNBUSDT" and self._balance:
+                    reserve_usd = float(
+                        getattr(self._balance, "binance_spot_bnb_reserved_usd", 0.0)
+                        or 0.0
+                    )
+                    reserve_qty = reserve_usd / sell_price if sell_price > 0 else 0.0
+                    self._executor.set_protected_position_floor(
+                        sell_ex, symbol, reserve_qty
+                    )
                 actual_sell_qty = self._executor.cap_sell_qty(sell_ex, symbol, sell_qty)
                 if actual_sell_qty <= 0:
                     if self._demo_sell_skip_log.get(f"{sell_ex}:{symbol}", 0) == 0:
@@ -948,6 +1206,24 @@ class ArbitrageMonitor:
                         sell_ex, symbol, Decimal(str(actual_sell_qty))
                     )
                     actual_sell_qty = float(rounded)
+                    meets_min_qty = self._exchange_info.check_min_qty(
+                        sell_ex, symbol, rounded
+                    )
+                    meets_min_notional = self._exchange_info.check_min_notional(
+                        sell_ex, symbol, rounded, Decimal(str(sell_price))
+                    )
+                    if actual_sell_qty <= 0 or not meets_min_qty or not meets_min_notional:
+                        skip_key = f"{sell_ex}:{symbol}:min_order"
+                        if self._demo_sell_skip_log.get(skip_key, 0) == 0:
+                            logger.info(
+                                f"[DemoTrade] {symbol} SKIP sell on {sell_ex}: "
+                                f"capped qty below min order "
+                                f"(qty={actual_sell_qty:.8f}, price={sell_price:.8f})"
+                            )
+                        self._demo_sell_skip_log[skip_key] = (
+                            self._demo_sell_skip_log.get(skip_key, 0) + 1
+                        )
+                        has_sell = False
 
             if has_buy and has_sell:
                 # Both legs available — use full arbitrage execution
@@ -968,9 +1244,13 @@ class ArbitrageMonitor:
                     client_id = generate_client_order_id(symbol, "buy")
                     executor = self._executor._executors[buy_ex]
                     try:
-                        buy_result = await executor.place_market_order(
-                            symbol, "buy", buy_qty, client_id,
-                            expected_price=buy_price,
+                        buy_result = await self._executor._place_normal_order(
+                            executor,
+                            symbol,
+                            "buy",
+                            buy_qty,
+                            client_id,
+                            buy_price,
                         )
                     except Exception as e:
                         from executor import TradeResult
@@ -990,9 +1270,13 @@ class ArbitrageMonitor:
                     client_id = generate_client_order_id(symbol, "sell")
                     executor = self._executor._executors[sell_ex]
                     try:
-                        sell_result = await executor.place_market_order(
-                            symbol, "sell", actual_sell_qty, client_id,
-                            expected_price=sell_price,
+                        sell_result = await self._executor._place_normal_order(
+                            executor,
+                            symbol,
+                            "sell",
+                            actual_sell_qty,
+                            client_id,
+                            sell_price,
                         )
                     except Exception as e:
                         from executor import TradeResult
@@ -1240,6 +1524,17 @@ class ArbitrageMonitor:
                 f"[DemoCompare] {sym} profit: sim=${sim_trade.profit_usd:.4f} "
                 f"actual=${result.actual_profit_usd:.4f} diff=${profit_diff:+.4f}"
             )
+        if buy.success and sell.success:
+            qty_gap = buy.filled_qty - sell.filled_qty
+            qty_base = max(buy.filled_qty, sell.filled_qty, 1e-12)
+            if abs(qty_gap) / qty_base > 0.001:
+                gap_usd = abs(qty_gap) * max(buy.actual_avg_price, sell.actual_avg_price)
+                logger.warning(
+                    f"[DemoCompare] {sym} fill quantity mismatch: "
+                    f"buy={buy.filled_qty:.8f} sell={sell.filled_qty:.8f} "
+                    f"gap={qty_gap:+.8f} (~${gap_usd:.4f}); "
+                    f"check partial fills/rounding and demo inventory"
+                )
 
         # Update demo accuracy counters
         self._demo_trade_count += 1
@@ -1269,8 +1564,8 @@ class ArbitrageMonitor:
             f"buy_price={sim_trade.buy_price:.6f}\u2192{buy.actual_avg_price:.6f} "
             f"sell_price={sim_trade.sell_price:.6f}\u2192{sell.actual_avg_price:.6f} "
             f"buy_fill={buy.fill_ratio:.2%} sell_fill={sell.fill_ratio:.2%} "
-            f"buy_fee={buy.actual_fee:.6f}({buy.fee_currency}) "
-            f"sell_fee={sell.actual_fee:.6f}({sell.fee_currency}) "
+            f"buy_fee={buy.actual_fee:.6f}({buy.fee_currency})=${buy.actual_fee_usd:.6f} "
+            f"sell_fee={sell.actual_fee:.6f}({sell.fee_currency})=${sell.actual_fee_usd:.6f} "
             f"latency={result.total_latency_ms:.0f}ms "
             f"data_age={sim_trade.data_age_ms:.0f}ms"
         )
@@ -1411,7 +1706,7 @@ class ArbitrageMonitor:
                     f"{side}@{leg.exchange}={status} "
                     f"price={leg.actual_avg_price:.6f} "
                     f"fill={leg.fill_ratio:.2%} "
-                    f"fee={leg.actual_fee:.6f}({leg.fee_currency}) "
+                    f"fee={leg.actual_fee:.6f}({leg.fee_currency})=${leg.actual_fee_usd:.6f} "
                     f"latency={leg.latency_ms:.0f}ms"
                 )
             else:
@@ -1634,7 +1929,12 @@ class ArbitrageMonitor:
                     prices = self._get_current_prices()
                     portfolio = self._balance.get_portfolio_value(
                         prices,
-                        hedge_pnl_usd=float(hedge_state.get("total_unrealized_pnl_usd", 0.0)),
+                        hedge_pnl_usd=float(
+                            hedge_state.get(
+                                "total_pnl_usd",
+                                hedge_state.get("total_unrealized_pnl_usd", 0.0),
+                            )
+                        ),
                     )
                     direction = "hedge_opened" if cur_count > 0 else "hedge_closed"
                     self._anomaly.reset_peak_on_basis_change(portfolio, direction)
@@ -1682,9 +1982,9 @@ class ArbitrageMonitor:
 
             if sweep_prices is not None:
                 # Shared-cache fast path: read pre-built (ex, bid, ask, bid_qty,
-                # ask_qty, bids_f, asks_f, received_at) tuples and assemble
-                # the legacy 7-tuple format the rest of `_tick` consumes.
-                for ex, bid_f, ask_f, bid_qty_f, ask_qty_f, bids_f, asks_f, recv_at in (
+                # ask_qty, bids_f, asks_f, received_at, book_received_at) tuples
+                # and assemble the route tuple the rest of `_tick` consumes.
+                for ex, bid_f, ask_f, bid_qty_f, ask_qty_f, bids_f, asks_f, recv_at, book_recv_at in (
                     filter_for_config_full(sweep_prices, symbol, self._active_exchanges)
                 ):
                     # Per-config age stats — same numbers, just sourced
@@ -1701,6 +2001,7 @@ class ArbitrageMonitor:
                             self._stale_skips[ex] += 1
                             continue
                         self._fresh_samples[ex] += 1
+                    book_age = now - book_recv_at if book_recv_at and book_recv_at > 0 else -1.0
                     # D-03: Round prices to tick size (corrects float imprecision)
                     if self._exchange_info:
                         from decimal import Decimal
@@ -1712,7 +2013,7 @@ class ArbitrageMonitor:
                         ))
                     bid_depth = bid_f * bid_qty_f if bid_qty_f > 0 else float("inf")
                     ask_depth = ask_f * ask_qty_f if ask_qty_f > 0 else float("inf")
-                    exchange_prices.append((ex, bid_f, ask_f, bid_depth, ask_depth, bids_f, asks_f))
+                    exchange_prices.append((ex, bid_f, ask_f, bid_depth, ask_depth, bids_f, asks_f, book_age))
             else:
                 # Legacy single-config path: build per-tick from fetchers.
                 for fetcher in self._fetchers:
@@ -1734,6 +2035,7 @@ class ArbitrageMonitor:
                             self._stale_skips[fetcher.exchange_name] += 1
                             continue
                         self._fresh_samples[fetcher.exchange_name] += 1
+                    book_age = now - ps.book_received_at if ps.book_received_at > 0 else -1.0
                     try:
                         bid_f = float(ps.bid)
                         ask_f = float(ps.ask)
@@ -1759,13 +2061,13 @@ class ArbitrageMonitor:
                         ask_qty_f = 0.0
                     bid_depth = bid_f * bid_qty_f if bid_qty_f > 0 else float("inf")
                     ask_depth = ask_f * ask_qty_f if ask_qty_f > 0 else float("inf")
-                    exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, bid_depth, ask_depth, ps.bids, ps.asks))
+                    exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, bid_depth, ask_depth, ps.bids, ps.asks, book_age))
 
             if len(exchange_prices) < 2:
                 continue
 
             # Track per-exchange internal spread (bid-ask on same exchange)
-            for ex_name, ex_bid, ex_ask, _, _, _, _ in exchange_prices:
+            for ex_name, ex_bid, ex_ask, _, _, _, _, _ in exchange_prices:
                 if ex_bid > 0:
                     internal_spread = (ex_ask - ex_bid) / ex_bid * 100
                     self._exchange_spread_sum[ex_name] += internal_spread
@@ -1777,12 +2079,14 @@ class ArbitrageMonitor:
             best_row = None
             best_buy_asks = None
             best_sell_bids = None
+            best_buy_book_age = -1.0
+            best_sell_book_age = -1.0
             # Track best without EVD penalty for demotion detection
             best_raw_net = float("-inf")
             best_raw_sell_ex: str = ""
 
-            for i, (ex_buy, _, ask_i, _, ask_depth_i, _bids_i, asks_i) in enumerate(exchange_prices):
-                for j, (ex_sell, bid_j, _, bid_depth_j, _, bids_j, _asks_j) in enumerate(exchange_prices):
+            for i, (ex_buy, _, ask_i, _, ask_depth_i, _bids_i, asks_i, buy_book_age) in enumerate(exchange_prices):
+                for j, (ex_sell, bid_j, _, bid_depth_j, _, bids_j, _asks_j, sell_book_age) in enumerate(exchange_prices):
                     if i == j:
                         continue
 
@@ -1801,12 +2105,39 @@ class ArbitrageMonitor:
                         self._depth_skips += 1
                         continue
 
+                    age_ok, age_reason = self._book_age_guard_ok(
+                        symbol,
+                        ex_buy,
+                        ex_sell,
+                        buy_book_age,
+                        sell_book_age,
+                    )
+                    if not age_ok:
+                        self._record_book_age_skip(symbol, ex_buy, ex_sell, age_reason)
+                        continue
+
                     spread_pct = (bid_j - ask_i) / ask_i * 100
 
                     # Compute slippage estimate using trade_amount
                     buy_slip = compute_buy_slippage(asks_i, self._trade_amount)
                     sell_slip = compute_sell_slippage(bids_j, self._trade_amount)
-                    slippage_pct = buy_slip.slippage_pct + sell_slip.slippage_pct
+                    slip_policy = self._evaluate_slippage_policy(
+                        buy_slip,
+                        sell_slip,
+                        bool(asks_i),
+                        bool(bids_j),
+                        self._trade_amount,
+                    )
+                    if not slip_policy.ok:
+                        self._record_slippage_guard_skip(
+                            symbol,
+                            ex_buy,
+                            ex_sell,
+                            slip_policy.reason,
+                            self._trade_amount,
+                        )
+                        continue
+                    slippage_pct = slip_policy.adjusted_total_pct
 
                     # Scoring fees for pair selection (includes cashback weighting)
                     s_buy = self._fee_manager.get_scoring_fee(ex_buy, symbol) if self._fee_manager else 0.001
@@ -1848,6 +2179,8 @@ class ArbitrageMonitor:
                                     spread_pct, fee_pct, net_pct, profit_usd)
                         best_buy_asks = asks_i
                         best_sell_bids = bids_j
+                        best_buy_book_age = buy_book_age
+                        best_sell_book_age = sell_book_age
 
             # EVD demotion detection: raw winner was event-driven but penalized winner differs
             if (
@@ -1953,6 +2286,28 @@ class ArbitrageMonitor:
                             if trade_size < min_trade:
                                 self._position_cap_skips += 1
                                 trade_size = 0
+
+                    age_ok, age_reason = self._book_age_guard_ok(
+                        sym,
+                        buy_ex,
+                        sell_ex,
+                        best_buy_book_age,
+                        best_sell_book_age,
+                    )
+                    if not age_ok:
+                        self._record_book_age_skip(sym, buy_ex, sell_ex, age_reason)
+                        if self._balance:
+                            self._balance.skipped_trades += 1
+                        continue
+
+                    trade_size = self._shrink_trade_size_for_depth(
+                        sym,
+                        buy_ex,
+                        sell_ex,
+                        trade_size,
+                        best_buy_asks,
+                        best_sell_bids,
+                    )
 
                     if self._balance and self._balance.initialized:
                         # Track miss-streak for rebalancing (even when trade_size is 0)
@@ -2066,6 +2421,14 @@ class ArbitrageMonitor:
                                     trade_size = self._compute_trade_size(
                                         buy_ex, sell_ex, sym, net, bid_p,
                                     ) if self._adaptive_mode else self._trade_amount
+                                    trade_size = self._shrink_trade_size_for_depth(
+                                        sym,
+                                        buy_ex,
+                                        sell_ex,
+                                        trade_size,
+                                        best_buy_asks,
+                                        best_sell_bids,
+                                    )
                                     if trade_size > 0:
                                         has_usdt, has_crypto = self._balance.can_execute(
                                             buy_ex, sell_ex, sym, trade_size, bid_p
@@ -2073,15 +2436,30 @@ class ArbitrageMonitor:
                                         can_trade = has_usdt and has_crypto
 
                         if can_trade and self._hedge_manager is not None:
-                            if getattr(self._hedge_manager, "_execution_mode", "simulation") in ("testnet", "live"):
+                            hedge_mode = getattr(self._hedge_manager, "_execution_mode", "simulation")
+                            reserve_ok = True
+                            reserve_reason = "ok"
+                            if hedge_mode in ("testnet", "live"):
+                                reserve_status = getattr(self._hedge_manager, "_reserve_status", {}) or {}
+                                last_check = float(reserve_status.get("last_check_ts", 0.0) or 0.0)
+                                if last_check <= 0 or (now - last_check) > 5.0:
+                                    reserve_ok = False
+                                    reserve_reason = "futures_reserve_refresh_pending"
+                                    if now - self._hedge_reserve_refresh_pending_ts >= 5.0:
+                                        self._hedge_reserve_refresh_pending_ts = now
+                                        try:
+                                            _safe_task(
+                                                self._hedge_manager.refresh_reserve_status(allow_transfer=True),
+                                                "hedge_reserve_refresh_before_trade",
+                                            )
+                                        except Exception as e:
+                                            logger.warning(f"[Hedge] reserve refresh before trade failed: {e}")
+                            if reserve_ok:
                                 try:
-                                    _safe_task(
-                                        self._hedge_manager.refresh_reserve_status(allow_transfer=True),
-                                        "hedge_reserve_refresh_before_trade",
-                                    )
+                                    reserve_ok, reserve_reason = self._hedge_manager.can_open_spot_position()
                                 except Exception as e:
-                                    logger.warning(f"[Hedge] reserve refresh before trade failed: {e}")
-                            reserve_ok, reserve_reason = self._hedge_manager.can_open_spot_position()
+                                    reserve_ok = False
+                                    reserve_reason = f"reserve_gate_error:{e}"
                             if not reserve_ok:
                                 self._hedge_reserve_gate_skips += 1
                                 if self._hedge_reserve_gate_skips == 1 or self._hedge_reserve_gate_skips % 60 == 0:
@@ -2093,6 +2471,68 @@ class ArbitrageMonitor:
 
                         # Execute the trade or count the skip
                         if can_trade:
+                            buy_slip_actual = compute_buy_slippage(best_buy_asks, trade_size)
+                            sell_slip_actual = compute_sell_slippage(best_sell_bids, trade_size)
+                            slip_policy_actual = self._evaluate_slippage_policy(
+                                buy_slip_actual,
+                                sell_slip_actual,
+                                bool(best_buy_asks),
+                                bool(best_sell_bids),
+                                trade_size,
+                            )
+                            if not slip_policy_actual.ok:
+                                self._record_slippage_guard_skip(
+                                    sym,
+                                    buy_ex,
+                                    sell_ex,
+                                    slip_policy_actual.reason,
+                                    trade_size,
+                                )
+                                self._balance.skipped_trades += 1
+                                continue
+                            current_prices = self._get_current_prices()
+                            bnb_price = self._get_bnb_price(current_prices)
+                            buy_fee_rate = self._fee_manager.get_taker_fee(buy_ex, sym) if self._fee_manager else 0.001
+                            sell_fee_rate = self._fee_manager.get_taker_fee(sell_ex, sym) if self._fee_manager else 0.001
+                            buy_fee_model = self._fee_manager.get_fee_model(buy_ex) if self._fee_manager else "received"
+                            sell_fee_model = self._fee_manager.get_fee_model(sell_ex) if self._fee_manager else "received"
+                            buy_fee_info = self._balance.resolve_fee_model_for_trade(
+                                buy_ex,
+                                sym,
+                                trade_size,
+                                buy_fee_rate,
+                                buy_fee_model,
+                                bnb_price,
+                                side="buy",
+                                log_fallback=False,
+                            )
+                            sell_fee_info = self._balance.resolve_fee_model_for_trade(
+                                sell_ex,
+                                sym,
+                                trade_size,
+                                sell_fee_rate,
+                                sell_fee_model,
+                                bnb_price,
+                                side="sell",
+                                log_fallback=False,
+                            )
+                            buy_fee_rate = float(buy_fee_info["fee_rate"])
+                            sell_fee_rate = float(sell_fee_info["fee_rate"])
+                            buy_fee_model = str(buy_fee_info["fee_model"])
+                            sell_fee_model = str(sell_fee_info["fee_model"])
+                            effective_fee_pct = (buy_fee_rate + sell_fee_rate) * 100
+                            actual_slippage = slip_policy_actual.adjusted_total_pct
+                            net_adjusted = spread - effective_fee_pct - actual_slippage
+                            if net_adjusted <= 0 or net_adjusted < pair_min_net:
+                                self._low_profit_skips += 1
+                                self._balance.skipped_trades += 1
+                                logger.info(
+                                    f"[Trade] SLIPPAGE_NET_SKIP {sym} {buy_ex}->{sell_ex}: "
+                                    f"net={net_adjusted:+.4f}% min={pair_min_net:.4f}% "
+                                    f"slip={actual_slippage:.4f}% size=${trade_size:.2f}"
+                                )
+                                continue
+                            actual_profit = trade_size * (net_adjusted / 100)
                             miss_key = f"{sym}:{buy_ex}:{sell_ex}"
                             # Only fully reset streak if trade is substantial (≥50% of base amount).
                             # Tiny residual trades shouldn't prevent rebalance from triggering.
@@ -2101,20 +2541,31 @@ class ArbitrageMonitor:
                                 self._rebalance_empty_backoff.pop(miss_key, None)
                             else:
                                 self._miss_streak[miss_key] = max(0, self._miss_streak.get(miss_key, 0) - 1)
-                            buy_fee_rate = self._fee_manager.get_taker_fee(buy_ex, sym) if self._fee_manager else 0.001
-                            sell_fee_rate = self._fee_manager.get_taker_fee(sell_ex, sym) if self._fee_manager else 0.001
-                            buy_fee_model = self._fee_manager.get_fee_model(buy_ex) if self._fee_manager else "received"
-                            sell_fee_model = self._fee_manager.get_fee_model(sell_ex) if self._fee_manager else "received"
                             trade_adj = self._balance.execute_trade(
                                 buy_ex, sell_ex, sym, trade_size,
                                 ask_p, bid_p, buy_fee_rate, sell_fee_rate,
                                 buy_fee_model=buy_fee_model,
                                 sell_fee_model=sell_fee_model,
+                                bnb_price=bnb_price,
                             )
+                            if trade_adj and trade_adj.get("aborted"):
+                                self._balance.skipped_trades += 1
+                                logger.warning(
+                                    f"[Trade] EXECUTION_ABORT {sym} {buy_ex}->{sell_ex}: "
+                                    f"{trade_adj.get('reason', 'unknown')} "
+                                    f"size=${trade_size:.2f}"
+                                )
+                                continue
+                            if trade_adj and "actual_profit_usd" in trade_adj:
+                                slippage_cost = trade_size * (actual_slippage / 100.0)
+                                actual_profit = float(trade_adj["actual_profit_usd"]) - slippage_cost
+                                net_adjusted = (actual_profit / trade_size * 100.0) if trade_size > 0 else 0.0
+                                fee = effective_fee_pct
                             logger.info(
                                 f"[Fee] {sym} {buy_ex}->{sell_ex}: "
                                 f"buy={buy_fee_rate*100:.4f}% sell={sell_fee_rate*100:.4f}% "
                                 f"model={buy_fee_model}/{sell_fee_model}"
+                                f" token_fee=${(trade_adj or {}).get('token_fee_usd', 0.0):.4f}"
                             )
                             # Record referral cashback if enabled
                             if self._fee_manager:
@@ -2151,12 +2602,6 @@ class ArbitrageMonitor:
 
                     if can_trade:
                         self._interval_executed += 1
-                        # Recompute slippage with actual trade size
-                        buy_slip_actual = compute_buy_slippage(best_buy_asks, trade_size)
-                        sell_slip_actual = compute_sell_slippage(best_sell_bids, trade_size)
-                        actual_slippage = buy_slip_actual.slippage_pct + sell_slip_actual.slippage_pct
-                        net_adjusted = spread - fee - actual_slippage
-                        actual_profit = trade_size * (net_adjusted / 100)
 
                         # One-legged failure simulation
                         one_leg_flag = False
@@ -2332,6 +2777,9 @@ class ArbitrageMonitor:
                         )
             sym_info = " | ".join(sym_details) if sym_details else syms
             notional_part = f" notional_reject={self._interval_notional_skips}" if self._interval_notional_skips else ""
+            slippage_part = f" slippage_guard={self._slippage_guard_skips}" if self._slippage_guard_skips else ""
+            book_age_part = f" book_age_skip={self._interval_book_age_skips}" if self._interval_book_age_skips else ""
+            shrink_part = f" depth_shrink={self._interval_depth_shrinks}" if self._interval_depth_shrinks else ""
             logger.info(
                 f"[Monitor] Status @{self._tick_count}s: "
                 f"profitable={self._interval_profitable} "
@@ -2339,7 +2787,7 @@ class ArbitrageMonitor:
                 f"skip_size={self._interval_size_skips} "
                 f"skip_balance={self._interval_balance_skips} "
                 f"low_profit={self._low_profit_skips}"
-                f"{notional_part} | {sym_info}"
+                f"{notional_part}{slippage_part}{book_age_part}{shrink_part} | {sym_info}"
             )
             # Reset interval counters
             self._interval_profitable = 0
@@ -2347,6 +2795,8 @@ class ArbitrageMonitor:
             self._interval_balance_skips = 0
             self._interval_executed = 0
             self._interval_notional_skips = 0
+            self._interval_book_age_skips = 0
+            self._interval_depth_shrinks = 0
 
         # 5-minute periodic snapshots: balance + session P&L
         if self._tick_count % 300 == 0 and self._tick_count > 0 and self._balance and self._balance.initialized:
@@ -2375,12 +2825,18 @@ class ArbitrageMonitor:
             if self._hedge_manager is not None:
                 try:
                     hedge_state = self._hedge_manager.get_debug_state()
-                    hedge_pnl = float(hedge_state.get("total_unrealized_pnl_usd", 0.0))
+                    hedge_pnl = float(
+                        hedge_state.get(
+                            "total_pnl_usd",
+                            hedge_state.get("total_unrealized_pnl_usd", 0.0),
+                        )
+                    )
                     hedge_funding = float(hedge_state.get("cumulative_funding_usd", 0.0))
+                    hedge_fees = float(hedge_state.get("cumulative_execution_fees_usd", 0.0))
                     hedged_total = total + hedge_pnl
                     hedge_extra = (
                         f" | hedged=${hedged_total:.0f} "
-                        f"(hedge_pnl=${hedge_pnl:+.2f})"
+                        f"(hedge_pnl=${hedge_pnl:+.2f}, fees=${hedge_fees:.2f})"
                     )
                     if (
                         hedge_state.get("enabled", False)
@@ -2432,11 +2888,15 @@ class ArbitrageMonitor:
                 f"ref_earn=${ref_earn:.2f}, "
                 f"sz0={size_zero_total}, rebal_blocked={rebal_blocked_total}, "
                 f"phantom={self._phantom_spread_count}, "
+                f"slip_guard={self._slippage_guard_skips}, "
+                f"book_age={self._book_age_guard_skips}, "
+                f"depth_shrink={self._depth_shrink_count}/${self._depth_shrink_usd:.2f}, "
                 f"evd_sell={self._event_driven_seller_penalties}/demoted={self._event_driven_seller_demoted}, "
                 f"one_leg={self._one_leg_sim_count}/${self._one_leg_sim_cost:.2f}, "
                 f"pos_cap={self._position_cap_skips}, "
                 f"anomaly={self._anomaly._total_pauses}p/{self._anomaly._total_warnings}w/{self._anomaly._total_symbol_blocks}sb"
             )
+            self._log_realism_diagnostics()
             # Demo accuracy stats (only when demo trades have been placed)
             if self._demo_trade_count > 0:
                 avg_lat = self._demo_total_latency_ms / self._demo_trade_count
@@ -2500,7 +2960,42 @@ class ArbitrageMonitor:
                             break
                     except (ValueError, TypeError):
                         continue
+        bnb_price = self._get_bnb_price(prices)
+        if bnb_price > 0:
+            prices["BNBUSDT"] = bnb_price
         return prices
+
+    def _get_bnb_price(self, prices: dict[str, float] | None = None) -> float:
+        """Return a BNBUSDT mark/mid price for BNB fee accounting."""
+        if prices:
+            try:
+                px = float(prices.get("BNBUSDT", 0.0) or 0.0)
+                if px > 0:
+                    return px
+            except (TypeError, ValueError):
+                pass
+
+        for fetcher in self._fetchers:
+            if fetcher.exchange_name not in self._active_exchanges:
+                continue
+            state = fetcher.get_state()
+            ps = state.get("BNBUSDT") if isinstance(state, dict) else None
+            if ps and ps.bid and ps.ask:
+                try:
+                    mid = (float(ps.bid) + float(ps.ask)) / 2.0
+                    if mid > 0:
+                        return mid
+                except (TypeError, ValueError):
+                    continue
+
+        if self._hedge_manager is not None:
+            try:
+                px = float(getattr(self._hedge_manager, "_last_bnb_price_usd", 0.0) or 0.0)
+                if px > 0:
+                    return px
+            except (TypeError, ValueError):
+                pass
+        return 0.0
 
     def _get_per_exchange_prices(self) -> dict[str, dict[str, float]]:
         """Get current mid prices per (exchange, symbol).
@@ -2796,6 +3291,15 @@ class ArbitrageMonitor:
             "_stale_skips": dict(self._stale_skips),
             "_fresh_samples": dict(self._fresh_samples),
             "_depth_skips": self._depth_skips,
+            "_slippage_guard_skips": self._slippage_guard_skips,
+            "_book_age_guard_skips": self._book_age_guard_skips,
+            "_depth_shrink_count": self._depth_shrink_count,
+            "_depth_shrink_usd": self._depth_shrink_usd,
+            "_slippage_guard_reason_counts": dict(self._slippage_guard_reason_counts),
+            "_book_age_guard_reason_counts": dict(self._book_age_guard_reason_counts),
+            "_slippage_guard_reason_samples": dict(self._slippage_guard_reason_samples),
+            "_book_age_guard_reason_samples": dict(self._book_age_guard_reason_samples),
+            "_depth_shrink_samples": dict(self._depth_shrink_samples),
             "_notional_skips": self._notional_skips,
             "_exchange_age_sum": dict(self._exchange_age_sum),
             "_exchange_age_max": dict(self._exchange_age_max),
@@ -2864,6 +3368,30 @@ class ArbitrageMonitor:
         self._stale_skips = defaultdict(int, data.get("_stale_skips", {}))
         self._fresh_samples = defaultdict(int, data.get("_fresh_samples", {}))
         self._depth_skips = data.get("_depth_skips", 0)
+        self._slippage_guard_skips = data.get("_slippage_guard_skips", 0)
+        self._book_age_guard_skips = data.get("_book_age_guard_skips", 0)
+        self._depth_shrink_count = data.get("_depth_shrink_count", 0)
+        self._depth_shrink_usd = data.get("_depth_shrink_usd", 0.0)
+        self._slippage_guard_reason_counts = defaultdict(
+            int,
+            data.get("_slippage_guard_reason_counts", {}),
+        )
+        self._book_age_guard_reason_counts = defaultdict(
+            int,
+            data.get("_book_age_guard_reason_counts", {}),
+        )
+        self._slippage_guard_reason_samples = dict(
+            data.get("_slippage_guard_reason_samples", {})
+        )
+        self._book_age_guard_reason_samples = dict(
+            data.get("_book_age_guard_reason_samples", {})
+        )
+        self._depth_shrink_samples = dict(data.get("_depth_shrink_samples", {}))
+        self._last_realism_diag_snapshot = (
+            int(self._slippage_guard_skips),
+            int(self._book_age_guard_skips),
+            int(self._depth_shrink_count),
+        )
         self._notional_skips = data.get("_notional_skips", 0)
         self._exchange_age_sum = defaultdict(float, data.get("_exchange_age_sum", {}))
         self._exchange_age_max = defaultdict(float, data.get("_exchange_age_max", {}))

@@ -147,6 +147,112 @@ class BybitExecutor(ExecutionEngine):
                 f"exception: {e}", client_order_id,
             )
 
+    async def place_marketable_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        client_order_id: str,
+        limit_price: float,
+        time_in_force: str = "IOC",
+        expected_price: float = 0.0,
+    ) -> TradeResult:
+        """Place a limit IOC/FOK order that crosses the book with a price cap."""
+        if not await self._rate_limiter.acquire():
+            return self._failed_result(
+                symbol,
+                side,
+                qty,
+                expected_price,
+                "rate_limited",
+                client_order_id,
+            )
+
+        session = await self._ensure_session()
+        t0 = time.time()
+        price_dec = self.round_limit_price(symbol, side, limit_price)
+        tif = "FOK" if time_in_force.upper() == "FOK" else "IOC"
+        body_dict = {
+            "category": "spot",
+            "symbol": self.format_symbol(symbol),
+            "side": side.capitalize(),
+            "orderType": "Limit",
+            "qty": f"{qty:.8f}".rstrip("0").rstrip("."),
+            "price": format(price_dec, "f").rstrip("0").rstrip("."),
+            "timeInForce": tif,
+            "orderLinkId": client_order_id[:36],
+        }
+        body = json.dumps(body_dict)
+
+        headers = self._sign_headers("POST", body)
+        url = f"{_BASE_URL}/v5/order/create"
+
+        try:
+            async with session.post(url, headers=headers, data=body) as resp:
+                data = await resp.json()
+
+            ret_code = data.get("retCode", -1)
+            if ret_code != 0:
+                error = data.get("retMsg", str(data))
+                count = self._rejected_symbols.get(symbol, 0) + 1
+                self._rejected_symbols[symbol] = count
+                if count == 1:
+                    logger.warning(
+                        f"[BybitExec] Limit {tif} rejected: "
+                        f"{symbol} {side} qty={qty} price={body_dict['price']} — "
+                        f"{ret_code}: {error}"
+                    )
+                elif count == 2:
+                    logger.info(
+                        f"[BybitExec] {symbol} limit rejection repeated — "
+                        f"suppressing further logs"
+                    )
+                return self._failed_result(
+                    symbol,
+                    side,
+                    qty,
+                    expected_price,
+                    f"{ret_code}: {error}",
+                    client_order_id,
+                )
+
+            result_data = data.get("result", {})
+            order_id = result_data.get("orderId", "")
+            if not order_id:
+                return self._failed_result(
+                    symbol,
+                    side,
+                    qty,
+                    expected_price,
+                    "no orderId in response",
+                    client_order_id,
+                )
+
+            await asyncio.sleep(0.2)
+            fill_result = await self._query_order(
+                symbol,
+                order_id,
+                side,
+                qty,
+                expected_price,
+                client_order_id,
+            )
+            fill_result.latency_ms = (time.time() - t0) * 1000.0
+            if fill_result.success and fill_result.fill_ratio < 0.999:
+                fill_result.error = f"partial_fill:{fill_result.fill_ratio:.4f}"
+            return fill_result
+
+        except Exception as e:
+            logger.error(f"[BybitExec] Limit order exception: {symbol} {side} — {e}")
+            return self._failed_result(
+                symbol,
+                side,
+                qty,
+                expected_price,
+                f"exception: {e}",
+                client_order_id,
+            )
+
     async def _query_order(
         self, symbol: str, order_id: str, side: str,
         qty: float, expected_price: float, client_order_id: str,
@@ -195,6 +301,7 @@ class BybitExecutor(ExecutionEngine):
                 # Bybit fee is typically in quote currency for spot
                 fee = abs(cum_exec_fee)
                 fee_rate = fee / cum_exec_value if cum_exec_value > 0 else 0
+                actual_fee_usd = fee
 
                 return TradeResult(
                     success=True,
@@ -208,6 +315,7 @@ class BybitExecutor(ExecutionEngine):
                     requested_price=expected_price,
                     actual_avg_price=avg_price,
                     actual_fee=fee,
+                    actual_fee_usd=actual_fee_usd,
                     fee_rate=fee_rate,
                     fee_currency="USDT",  # Bybit spot typically charges in quote
                     is_maker=False,
