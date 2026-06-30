@@ -5749,6 +5749,18 @@ class DashboardServer:
         df = self._demo_fetcher
         if not df:
             return {}
+        execution_mode = str(
+            getattr(
+                self._monitor,
+                "_execution_mode",
+                self._settings.get("execution_mode", "simulation"),
+            )
+        )
+        if execution_mode not in ("demo", "demo_only"):
+            return {
+                "enabled": False,
+                "reason": f"execution_mode={execution_mode}",
+            }
 
         # Only include symbols the sim actually holds (qty > 0).
         # Active symbols with 0 holdings have pre-loaded testnet crypto, not ours.
