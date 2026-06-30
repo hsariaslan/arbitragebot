@@ -210,6 +210,7 @@ class HedgeManager:
         # Per-symbol asyncio.Lock to serialize concurrent operations.
         # Created lazily — only when a symbol is first touched.
         self._symbol_locks: dict[str, asyncio.Lock] = {}
+        self._close_failure_backoff: dict[str, tuple[float, float, int]] = {}
 
         # Last evaluation timestamp
         self._last_evaluation_ts: float = 0.0
@@ -1163,9 +1164,20 @@ class HedgeManager:
 
         # Real mode: query then close
         f_sym, mult = get_futures_symbol(spot_symbol)
+        backoff = self._close_failure_backoff.get(spot_symbol)
+        if backoff:
+            retry_at, delay, attempts = backoff
+            if now < retry_at:
+                logger.debug(
+                    f"[Hedge] CLOSE_BACKOFF {spot_symbol}: retry in "
+                    f"{retry_at - now:.0f}s after {attempts} failed close attempts"
+                )
+                return False
+
         result = await self._executor.close_position(f_sym)
         if result is None:
             # No real position — sync shadow to zero
+            self._close_failure_backoff.pop(spot_symbol, None)
             sh.qty = 0.0
             sh.entry_price = 0.0
             sh.opened_at = 0.0
@@ -1178,11 +1190,22 @@ class HedgeManager:
             return True
         if not result.success:
             self._total_executor_errors += 1
+            previous = self._close_failure_backoff.get(spot_symbol)
+            prev_delay = previous[1] if previous else 30.0
+            attempts = (previous[2] if previous else 0) + 1
+            next_delay = min(max(prev_delay * 2.0, 60.0), 600.0)
+            self._close_failure_backoff[spot_symbol] = (
+                time.time() + next_delay,
+                next_delay,
+                attempts,
+            )
             logger.error(
-                f"[Hedge] CLOSE_FAILED {spot_symbol} err={result.error} reason={reason}"
+                f"[Hedge] CLOSE_FAILED {spot_symbol} err={result.error} reason={reason} "
+                f"next_retry={next_delay:.0f}s attempts={attempts}"
             )
             return False
 
+        self._close_failure_backoff.pop(spot_symbol, None)
         sh.qty = 0.0
         sh.entry_price = 0.0
         sh.opened_at = 0.0
@@ -1962,6 +1985,14 @@ class HedgeManager:
             "_bnb_fee_reserve_status": dict(self._bnb_fee_reserve_status),
             "_last_bnb_reserve_status_log_ts": self._last_bnb_reserve_status_log_ts,
             "_last_bnb_reserve_status_signature": self._last_bnb_reserve_status_signature,
+            "_close_failure_backoff": {
+                sym: {
+                    "retry_at": retry_at,
+                    "delay": delay,
+                    "attempts": attempts,
+                }
+                for sym, (retry_at, delay, attempts) in self._close_failure_backoff.items()
+            },
             "_total_opens": self._total_opens,
             "_total_closes": self._total_closes,
             "_total_adjusts": self._total_adjusts,
@@ -1993,6 +2024,19 @@ class HedgeManager:
         self._last_bnb_reserve_status_signature = str(
             data.get("_last_bnb_reserve_status_signature", "")
         )
+        self._close_failure_backoff = {}
+        now = time.time()
+        raw_backoff = data.get("_close_failure_backoff", {})
+        if isinstance(raw_backoff, dict):
+            for sym, item in raw_backoff.items():
+                if not isinstance(item, dict):
+                    continue
+                retry_at = float(item.get("retry_at", 0.0) or 0.0)
+                if retry_at <= now:
+                    continue
+                delay = float(item.get("delay", 60.0) or 60.0)
+                attempts = int(item.get("attempts", 1) or 1)
+                self._close_failure_backoff[str(sym)] = (retry_at, delay, attempts)
         self._sync_balance_bnb_reserve_floor()
         self._total_opens = int(data.get("_total_opens", 0))
         self._total_closes = int(data.get("_total_closes", 0))
