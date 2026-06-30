@@ -10,6 +10,15 @@ Do not add current-version or release-history notes to `CLAUDE.md`. Keep runtime
 
 ## Version History
 
+### v0.34.1-beta — Realized P&L & Rebalance Cost Fixes
+
+- Fixed simulated trade accounting so both arbitrage legs use the same executable base quantity, exchange minimums, available balances, and fee models before wallet mutation.
+- Applied order-book slippage to simulated execution prices, so balances, trade P&L, and later portfolio/inventory state use the same realized economics.
+- Added preflight realized-net skips for opportunities that become negative or below the configured minimum after fees, rounding, inventory limits, and slippage-adjusted prices.
+- Tightened rebalance admission so paid internal/external rebalances need a positive realized profit estimate, and net-P&L gates account for all rebalance fees, not only withdrawal fees.
+- Added per-symbol Binance Futures close backoff for transient testnet/live close failures and suppressed demo comparison output for simulation-only configs.
+- Regenerated local `settings.json` and `arbitragebot-configs.json` with 30 configs total: six carefully tuned configs in each of the five config groups.
+
 ### v0.34.0-beta — Live-Realism Execution & Fee Hardening
 
 - Added strict order-book slippage/depth gates so scoring and execution reject missing, stale, thin, or overly expensive books before routes can trade.
