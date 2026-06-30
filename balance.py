@@ -111,7 +111,7 @@ class BalanceTracker:
         self._trade_amount = trade_amount
         self._max_rebalance = trade_amount * 4  # cap at 4× trade size
         self._adaptive_mode = adaptive_mode
-        self._estimated_profit_per_trade: float = 0.02
+        self._estimated_profit_per_trade: float = 0.0
         self._allocations = allocations
         self.binance_futures_usdt: float = max(0.0, float(futures_reserve_usdt))
         self.binance_spot_bnb: float = 0.0
@@ -241,6 +241,37 @@ class BalanceTracker:
     def _record_external_fee(self, fee: float) -> None:
         """Record external transfer fee for hourly budget tracking."""
         self._external_fee_log.append((time.time(), fee))
+
+    def _paid_transfer_worthwhile(
+        self,
+        fee_usd: float,
+        context: str,
+        *,
+        max_trades_to_recoup: float = 50.0,
+    ) -> bool:
+        """Gate paid rebalance-class moves until realized edge can repay them."""
+        fee = max(0.0, float(fee_usd))
+        if fee <= 0.02:
+            return True
+        if not self._adaptive_mode:
+            return True
+
+        est = max(0.0, float(self._estimated_profit_per_trade or 0.0))
+        if est <= 0:
+            logger.debug(
+                f"[Balance] {context} skipped: fee ${fee:.4f} with no positive "
+                "realized profit estimate"
+            )
+            return False
+
+        trades_to_recoup = fee / est
+        if trades_to_recoup > max_trades_to_recoup:
+            logger.debug(
+                f"[Balance] {context} skipped: fee ${fee:.4f} needs "
+                f"{trades_to_recoup:.0f} trades to recoup"
+            )
+            return False
+        return True
 
     def _get_withdrawal_fee(self, exchange: str, amount: float = 0.0) -> float:
         """Get withdrawal fee for an exchange, using TransferFeeManager if available."""
@@ -623,6 +654,286 @@ class BalanceTracker:
             "fee_usd": fee_usd,
             "fallback": fallback,
         }
+
+    def _round_trade_qty(self, exchange: str, symbol: str, qty: float) -> float:
+        if qty <= 0:
+            return 0.0
+        if not self._exchange_info:
+            return float(qty)
+        from decimal import Decimal
+
+        rounded = self._exchange_info.round_quantity(
+            exchange, symbol, Decimal(str(qty))
+        )
+        return max(0.0, float(rounded))
+
+    def _order_meets_exchange_minimums(
+        self,
+        exchange: str,
+        symbol: str,
+        qty: float,
+        price: float,
+        side: str,
+    ) -> tuple[bool, str]:
+        if qty <= 0 or price <= 0:
+            return False, f"{side}_qty_zero"
+        if not self._exchange_info:
+            return True, ""
+        from decimal import Decimal
+
+        rules = self._exchange_info.get_rules(exchange, symbol)
+        if not rules:
+            return True, ""
+        qty_d = Decimal(str(qty))
+        price_d = Decimal(str(price))
+        if not self._exchange_info.check_min_qty(exchange, symbol, qty_d):
+            return False, f"{side}_min_qty {float(rules.min_qty)}"
+        if not self._exchange_info.check_min_notional(exchange, symbol, qty_d, price_d):
+            return False, f"{side}_min_notional ${float(rules.min_notional):.2f}"
+        return True, ""
+
+    def _build_trade_adjustment(
+        self,
+        buy_exchange: str,
+        sell_exchange: str,
+        symbol: str,
+        trade_amount: float,
+        buy_price: float,
+        sell_price: float,
+        buy_fee: float,
+        sell_fee: float,
+        buy_fee_model: str,
+        sell_fee_model: str,
+        bnb_price: float,
+        *,
+        mutate: bool,
+    ) -> dict:
+        """Build or apply a same-base-quantity trade mutation.
+
+        The requested trade_amount is a buy-side quote budget. The executable
+        order quantity is rounded down on both exchanges and capped by the
+        sell-side inventory and buy-side USDT actually available. P&L is then
+        computed from the same base quantity on both legs, with all fee models
+        converted to USD cost.
+        """
+        requested = max(0.0, float(trade_amount))
+        buy_px = max(0.0, float(buy_price))
+        sell_px = max(0.0, float(sell_price))
+        if requested <= 0 or buy_px <= 0 or sell_px <= 0:
+            return {"aborted": True, "reason": "invalid_trade_inputs"}
+
+        buy_fee_info = self.resolve_fee_model_for_trade(
+            buy_exchange,
+            symbol,
+            requested,
+            buy_fee,
+            buy_fee_model,
+            bnb_price,
+            side="buy",
+            log_fallback=mutate,
+        )
+        sell_fee_info = self.resolve_fee_model_for_trade(
+            sell_exchange,
+            symbol,
+            requested,
+            sell_fee,
+            sell_fee_model,
+            bnb_price,
+            side="sell",
+            log_fallback=mutate,
+        )
+        buy_fee = float(buy_fee_info["fee_rate"])
+        buy_fee_model = str(buy_fee_info["fee_model"])
+        sell_fee = float(sell_fee_info["fee_rate"])
+        sell_fee_model = str(sell_fee_info["fee_model"])
+
+        raw_qty = requested / buy_px
+        buy_qty_limit = self._round_trade_qty(buy_exchange, symbol, raw_qty)
+        sell_qty_limit = self._round_trade_qty(sell_exchange, symbol, raw_qty)
+
+        buy_spend_multiplier = 1.0 + buy_fee if buy_fee_model == "spent" else 1.0
+        buy_usdt_available = self.available_usdt_for_trading(buy_exchange)
+        max_buy_qty_by_usdt = (
+            buy_usdt_available / (buy_px * buy_spend_multiplier)
+            if buy_px > 0 and buy_spend_multiplier > 0
+            else 0.0
+        )
+        buy_balance_qty_limit = self._round_trade_qty(
+            buy_exchange, symbol, max_buy_qty_by_usdt
+        )
+
+        availability = self.crypto_trade_availability(sell_exchange, symbol, sell_px)
+        sell_spend_multiplier = 1.0 + sell_fee if sell_fee_model == "spent" else 1.0
+        max_sell_qty_by_inventory = (
+            availability["available_qty"] / sell_spend_multiplier
+            if sell_spend_multiplier > 0
+            else 0.0
+        )
+        sell_inventory_qty_limit = self._round_trade_qty(
+            sell_exchange, symbol, max_sell_qty_by_inventory
+        )
+
+        order_qty = min(
+            buy_qty_limit,
+            sell_qty_limit,
+            buy_balance_qty_limit,
+            sell_inventory_qty_limit,
+        )
+        order_qty = self._round_trade_qty(buy_exchange, symbol, order_qty)
+        order_qty = self._round_trade_qty(sell_exchange, symbol, order_qty)
+
+        if (
+            self._is_binance_bnbusdt(sell_exchange, symbol)
+            and order_qty < min(buy_qty_limit, sell_qty_limit)
+        ):
+            self._log_bnb_reserve_sell_block(
+                sell_exchange, symbol, requested, availability
+            )
+
+        if order_qty <= 0:
+            return {
+                "aborted": True,
+                "reason": "rounded_or_available_qty_zero",
+                "buy_qty_limit": buy_qty_limit,
+                "sell_qty_limit": sell_qty_limit,
+                "buy_qty_available": buy_balance_qty_limit,
+                "sell_qty_available": sell_inventory_qty_limit,
+            }
+
+        buy_ok, buy_reason = self._order_meets_exchange_minimums(
+            buy_exchange, symbol, order_qty, buy_px, "buy"
+        )
+        if not buy_ok:
+            return {"aborted": True, "reason": buy_reason, "order_qty": order_qty}
+        sell_ok, sell_reason = self._order_meets_exchange_minimums(
+            sell_exchange, symbol, order_qty, sell_px, "sell"
+        )
+        if not sell_ok:
+            return {"aborted": True, "reason": sell_reason, "order_qty": order_qty}
+
+        buy_notional = order_qty * buy_px
+        sell_notional = order_qty * sell_px
+        buy_fee_usd = buy_notional * buy_fee
+        sell_fee_usd = sell_notional * sell_fee
+
+        actual_buy_spend = buy_notional + (
+            buy_fee_usd if buy_fee_model == "spent" else 0.0
+        )
+        buy_qty_received = order_qty
+        if buy_fee_model == "received":
+            buy_qty_received = max(0.0, order_qty * (1.0 - buy_fee))
+
+        sell_qty_spent = order_qty
+        if sell_fee_model == "spent":
+            sell_qty_spent = order_qty * (1.0 + sell_fee)
+        actual_sell_received = sell_notional - (
+            sell_fee_usd if sell_fee_model == "received" else 0.0
+        )
+
+        if actual_buy_spend > buy_usdt_available + 1e-12:
+            return {
+                "aborted": True,
+                "reason": "buy_usdt_insufficient_after_fees",
+                "required_usdt": actual_buy_spend,
+                "available_usdt": buy_usdt_available,
+            }
+        if sell_qty_spent > availability["available_qty"] + 1e-12:
+            return {
+                "aborted": True,
+                "reason": "sell_inventory_insufficient_after_fees",
+                "sell_qty_required": sell_qty_spent,
+                "sell_qty_available": availability["available_qty"],
+                "reserve_qty": availability["reserve_qty"],
+                "reserve_usd": availability["reserve_usd"],
+            }
+
+        buy_token_fee_usd = buy_fee_usd if buy_fee_model == "token" else 0.0
+        sell_token_fee_usd = sell_fee_usd if sell_fee_model == "token" else 0.0
+        actual_profit_usd = sell_notional - buy_notional - buy_fee_usd - sell_fee_usd
+
+        if mutate:
+            self.usdt[buy_exchange] -= actual_buy_spend
+            self.crypto[buy_exchange][symbol] += buy_qty_received
+            self.crypto[sell_exchange][symbol] -= sell_qty_spent
+            self.usdt[sell_exchange] += actual_sell_received
+            if buy_fee_model == "token":
+                self.deduct_spot_bnb_fee(
+                    buy_exchange,
+                    buy_token_fee_usd,
+                    bnb_price,
+                    context=f"buy {symbol}",
+                )
+            if sell_fee_model == "token":
+                self.deduct_spot_bnb_fee(
+                    sell_exchange,
+                    sell_token_fee_usd,
+                    bnb_price,
+                    context=f"sell {symbol}",
+                )
+            now = time.time()
+            self.last_trade_time[buy_exchange] = now
+            self.last_trade_time[sell_exchange] = now
+
+        buy_rounding_saved = requested - buy_notional
+        sell_rounding_loss = max(0.0, (raw_qty - order_qty) * sell_px)
+        total_rounding_impact = buy_rounding_saved - sell_rounding_loss
+        return {
+            "buy_qty_raw": raw_qty,
+            "buy_qty_rounded": order_qty,
+            "buy_qty_received": buy_qty_received,
+            "sell_qty_raw": raw_qty,
+            "sell_qty_rounded": order_qty,
+            "sell_qty_spent": sell_qty_spent,
+            "order_qty": order_qty,
+            "actual_buy_notional_usd": buy_notional,
+            "actual_sell_notional_usd": sell_notional,
+            "actual_buy_spend_usd": actual_buy_spend,
+            "actual_sell_received_usd": actual_sell_received,
+            "buy_fee_rate": buy_fee,
+            "sell_fee_rate": sell_fee,
+            "buy_fee_model": buy_fee_model,
+            "sell_fee_model": sell_fee_model,
+            "buy_fee_fallback": bool(buy_fee_info.get("fallback")),
+            "sell_fee_fallback": bool(sell_fee_info.get("fallback")),
+            "buy_fee_usd": buy_fee_usd,
+            "sell_fee_usd": sell_fee_usd,
+            "buy_token_fee_usd": buy_token_fee_usd,
+            "sell_token_fee_usd": sell_token_fee_usd,
+            "token_fee_usd": buy_token_fee_usd + sell_token_fee_usd,
+            "actual_profit_usd": actual_profit_usd,
+            "buy_rounding_saved_usd": buy_rounding_saved,
+            "sell_rounding_loss_usd": sell_rounding_loss,
+            "rounding_impact_usd": total_rounding_impact,
+        }
+
+    def preview_trade(
+        self,
+        buy_exchange: str,
+        sell_exchange: str,
+        symbol: str,
+        trade_amount: float,
+        buy_price: float,
+        sell_price: float,
+        buy_fee: float,
+        sell_fee: float,
+        buy_fee_model: str = "received",
+        sell_fee_model: str = "received",
+        bnb_price: float = 0.0,
+    ) -> dict:
+        return self._build_trade_adjustment(
+            buy_exchange,
+            sell_exchange,
+            symbol,
+            trade_amount,
+            buy_price,
+            sell_price,
+            buy_fee,
+            sell_fee,
+            buy_fee_model,
+            sell_fee_model,
+            bnb_price,
+            mutate=False,
+        )
 
     # ── D-17: In-transit fund tracking ──────────────────────────────────
 
@@ -1012,17 +1323,12 @@ class BalanceTracker:
                 external_source = min(eligible, key=lambda ex: self._get_withdrawal_fee(ex))
             external_cost = self._get_withdrawal_fee(external_source)
 
-            # Transfer worthiness check (adaptive mode only)
-            if self._adaptive_mode and self._estimated_profit_per_trade > 0:
-                trades_to_recoup = external_cost / self._estimated_profit_per_trade
-                if trades_to_recoup > 50:
-                    logger.debug(
-                        f"[Balance] External transfer {external_source}→{exchange} "
-                        f"skipped: fee ${external_cost:.2f} needs "
-                        f"{trades_to_recoup:.0f} trades to recoup"
-                    )
-                    external_cost = float("inf")
-                    external_source = None
+            if not self._paid_transfer_worthwhile(
+                external_cost,
+                f"External transfer {external_source}→{exchange}",
+            ):
+                external_cost = float("inf")
+                external_source = None
 
             # Hourly external transfer budget check
             if external_source and not self._check_hourly_transfer_budget(external_cost):
@@ -1101,6 +1407,13 @@ class BalanceTracker:
                 f"(fee: ${external_cost:.4f}, internal would be ${internal_cost:.4f})"
             )
             return transfer
+
+        if internal_sym and internal_cost < float("inf") and not self._paid_transfer_worthwhile(
+            internal_cost,
+            f"Internal sell {internal_sym} on {exchange}",
+        ):
+            internal_cost = float("inf")
+            internal_sym = None
 
         if internal_sym and internal_cost < float("inf"):
             fee_usd = internal_cost
@@ -1233,11 +1546,11 @@ class BalanceTracker:
             # (same networks, similar fees)
             external_crypto_cost = self._get_withdrawal_fee(best_source)
 
-            # Transfer worthiness check
-            if self._adaptive_mode and self._estimated_profit_per_trade > 0:
-                trades_to_recoup = external_crypto_cost / self._estimated_profit_per_trade
-                if trades_to_recoup > 50:
-                    crypto_sources = []  # Skip, fall through to internal
+            if not self._paid_transfer_worthwhile(
+                external_crypto_cost,
+                f"External crypto {best_source}→{exchange}",
+            ):
+                crypto_sources = []  # Skip, fall through to internal
 
             # Hourly external transfer budget check
             if crypto_sources and not self._check_hourly_transfer_budget(external_crypto_cost):
@@ -1295,6 +1608,15 @@ class BalanceTracker:
         if self.usdt[exchange] >= rebal:
             fee_rate = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
             fee_usd = rebal * fee_rate
+            if not self._paid_transfer_worthwhile(
+                fee_usd,
+                f"Internal buy {symbol} on {exchange}",
+            ):
+                logger.info(
+                    f"[Balance] Internal buy blocked by profit gate: "
+                    f"{symbol} on {exchange}, fee=${fee_usd:.4f}"
+                )
+                return None
             buy_qty = (rebal - fee_usd) / price
             self.usdt[exchange] -= rebal
             self.crypto[exchange][symbol] += buy_qty
@@ -1340,17 +1662,6 @@ class BalanceTracker:
         if richest_ex:
             withdrawal_fee = self._get_withdrawal_fee(richest_ex)
 
-            # Transfer worthiness check (adaptive mode only)
-            if self._adaptive_mode and self._estimated_profit_per_trade > 0:
-                trades_to_recoup = withdrawal_fee / self._estimated_profit_per_trade
-                if trades_to_recoup > 50:
-                    logger.debug(
-                        f"[Balance] External+buy {richest_ex}→{exchange} "
-                        f"skipped: fee ${withdrawal_fee:.2f} needs "
-                        f"{trades_to_recoup:.0f} trades to recoup"
-                    )
-                    return None
-
             # Hourly external transfer budget check
             if not self._check_hourly_transfer_budget(withdrawal_fee):
                 return None
@@ -1364,6 +1675,11 @@ class BalanceTracker:
 
             fee_rate = self._fee_manager.get_taker_fee(exchange) if self._fee_manager else 0.001
             buy_fee = ext_buy_rebal * fee_rate
+            if not self._paid_transfer_worthwhile(
+                withdrawal_fee + buy_fee,
+                f"External+buy {richest_ex}→{exchange}",
+            ):
+                return None
 
             # Transfer USDT
             self.usdt[richest_ex] -= ext_buy_rebal + withdrawal_fee
@@ -1527,6 +1843,11 @@ class BalanceTracker:
 
         if max_fee_per_source is not None and fee > max_fee_per_source:
             return []
+        if not self._paid_transfer_worthwhile(
+            fee,
+            f"Trading float replenish {hub}→Bitfinex",
+        ):
+            return []
         if not self._check_hourly_transfer_budget(fee):
             return []
 
@@ -1641,6 +1962,11 @@ class BalanceTracker:
 
             if max_fee_per_source is not None and fee > max_fee_per_source:
                 continue
+            if not self._paid_transfer_worthwhile(
+                fee,
+                f"Custody consolidation {ex}→{hub}",
+            ):
+                continue
             if not self._check_hourly_transfer_budget(fee):
                 continue
 
@@ -1693,6 +2019,11 @@ class BalanceTracker:
             return None
 
         fee = self._get_withdrawal_fee("Bitfinex", amount)
+        if not self._paid_transfer_worthwhile(
+            fee,
+            f"Trading float overflow Bitfinex→{hub}",
+        ):
+            return None
         if not self._check_hourly_transfer_budget(fee):
             return None
 
@@ -1740,6 +2071,11 @@ class BalanceTracker:
             return None
 
         fee = self._get_withdrawal_fee(source_exchange, amount)
+        if not self._paid_transfer_worthwhile(
+            fee,
+            f"Custody sweep {source_exchange}→{hub}",
+        ):
+            return None
         if not self._check_hourly_transfer_budget(fee):
             return None
 
@@ -1806,6 +2142,11 @@ class BalanceTracker:
             return None
 
         withdrawal_fee = self._get_withdrawal_fee(source_exchange)
+        if not self._paid_transfer_worthwhile(
+            withdrawal_fee,
+            f"Idle crypto consolidation {source_exchange}→Bitfinex",
+        ):
+            return None
         if not self._check_hourly_transfer_budget(withdrawal_fee):
             return None
 
@@ -2077,183 +2418,22 @@ class BalanceTracker:
 
         When exchange_info is available, quantities are rounded DOWN to
         the exchange's lot_size_step (D-01) and unspent USDT stays in
-        balance. Returns a dict with rounding details, or None if no
-        exchange_info.
+        balance. Returns a dict with rounding, fee, and realized P&L details.
         """
-        from decimal import Decimal, ROUND_DOWN
-
-        info = self._exchange_info
-        adjustment = None
-        buy_fee_info = self.resolve_fee_model_for_trade(
+        return self._build_trade_adjustment(
             buy_exchange,
-            symbol,
-            trade_amount,
-            buy_fee,
-            buy_fee_model,
-            bnb_price,
-            side="buy",
-            log_fallback=True,
-        )
-        sell_fee_info = self.resolve_fee_model_for_trade(
             sell_exchange,
             symbol,
             trade_amount,
+            buy_price,
+            sell_price,
+            buy_fee,
             sell_fee,
+            buy_fee_model,
             sell_fee_model,
             bnb_price,
-            side="sell",
-            log_fallback=True,
+            mutate=True,
         )
-        buy_fee = float(buy_fee_info["fee_rate"])
-        buy_fee_model = str(buy_fee_info["fee_model"])
-        sell_fee = float(sell_fee_info["fee_rate"])
-        sell_fee_model = str(sell_fee_info["fee_model"])
-
-        if self._is_binance_bnbusdt(sell_exchange, symbol):
-            estimated_sell_qty = trade_amount / sell_price if sell_price > 0 else 0.0
-            if sell_fee_model == "spent":
-                estimated_sell_qty *= 1.0 + sell_fee
-            availability = self.crypto_trade_availability(
-                sell_exchange, symbol, sell_price
-            )
-            if estimated_sell_qty > availability["available_qty"] + 1e-12:
-                self._log_bnb_reserve_sell_block(
-                    sell_exchange, symbol, trade_amount, availability
-                )
-                return {
-                    "aborted": True,
-                    "reason": "binance_spot_bnb_reserve_protected",
-                    "sell_qty_required": estimated_sell_qty,
-                    "sell_qty_available": availability["available_qty"],
-                    "reserve_qty": availability["reserve_qty"],
-                    "reserve_usd": availability["reserve_usd"],
-                }
-
-        # Buy side: spend USDT, receive crypto
-        coins_bought_raw = trade_amount / buy_price
-
-        if buy_fee_model == "received":
-            # Fee deducted from received crypto (default sim behavior)
-            coins_after_fee_raw = coins_bought_raw * (1.0 - buy_fee)
-        elif buy_fee_model == "spent":
-            # Fee added to USDT spent, full crypto received
-            coins_after_fee_raw = coins_bought_raw
-        else:  # "token"
-            # Full qty received, fee from discount token
-            coins_after_fee_raw = coins_bought_raw
-
-        if info:
-            # Round quantity to exchange lot size (D-01)
-            coins_after_fee_dec = info.round_quantity(
-                buy_exchange, symbol, Decimal(str(coins_after_fee_raw))
-            )
-            coins_after_fee = float(coins_after_fee_dec)
-            if buy_fee_model == "received":
-                actual_buy_spend = coins_after_fee / (1.0 - buy_fee) * buy_price if coins_after_fee > 0 else 0.0
-            elif buy_fee_model == "spent":
-                actual_buy_spend = coins_after_fee * buy_price * (1.0 + buy_fee)
-            else:  # "token"
-                actual_buy_spend = coins_after_fee * buy_price
-            buy_rounding_saved = trade_amount - actual_buy_spend
-        else:
-            coins_after_fee = coins_after_fee_raw
-            if buy_fee_model == "spent":
-                actual_buy_spend = trade_amount * (1.0 + buy_fee)
-            elif buy_fee_model == "token":
-                actual_buy_spend = trade_amount
-            else:
-                actual_buy_spend = trade_amount
-            buy_rounding_saved = 0.0
-
-        self.usdt[buy_exchange] -= actual_buy_spend
-        self.crypto[buy_exchange][symbol] += coins_after_fee
-        buy_token_fee_usd = 0.0
-        if buy_fee_model == "token":
-            buy_token_fee_usd = actual_buy_spend * buy_fee
-            self.deduct_spot_bnb_fee(
-                buy_exchange,
-                buy_token_fee_usd,
-                bnb_price,
-                context=f"buy {symbol}",
-            )
-
-        # Sell side: spend crypto, receive USDT
-        coins_to_sell_raw = trade_amount / sell_price
-
-        if info:
-            coins_to_sell_dec = info.round_quantity(
-                sell_exchange, symbol, Decimal(str(coins_to_sell_raw))
-            )
-            coins_to_sell = float(coins_to_sell_dec)
-            if sell_fee_model == "received":
-                usdt_received = coins_to_sell * sell_price * (1.0 - sell_fee)
-            elif sell_fee_model == "spent":
-                # Fee in crypto: sell more crypto but receive full USDT value
-                usdt_received = coins_to_sell * sell_price
-            else:  # "token"
-                usdt_received = coins_to_sell * sell_price
-            sell_rounding_loss = (coins_to_sell_raw - coins_to_sell) * sell_price * (1.0 - sell_fee)
-        else:
-            coins_to_sell = coins_to_sell_raw
-            if sell_fee_model == "received":
-                usdt_received = trade_amount * (1.0 - sell_fee)
-            elif sell_fee_model == "spent":
-                # Fee in crypto: need to sell more to cover fee
-                usdt_received = trade_amount
-            else:  # "token"
-                usdt_received = trade_amount
-            sell_rounding_loss = 0.0
-
-        if sell_fee_model == "spent":
-            # Fee charged in crypto (the spent asset)
-            self.crypto[sell_exchange][symbol] -= coins_to_sell * (1.0 + sell_fee)
-        else:
-            self.crypto[sell_exchange][symbol] -= coins_to_sell
-        self.usdt[sell_exchange] += usdt_received
-        sell_token_fee_usd = 0.0
-        if sell_fee_model == "token":
-            sell_token_fee_usd = coins_to_sell * sell_price * sell_fee
-            self.deduct_spot_bnb_fee(
-                sell_exchange,
-                sell_token_fee_usd,
-                bnb_price,
-                context=f"sell {symbol}",
-            )
-
-        # D-18: Record trade time for demo sync grace period
-        now = time.time()
-        self.last_trade_time[buy_exchange] = now
-        self.last_trade_time[sell_exchange] = now
-
-        total_rounding_impact = buy_rounding_saved - sell_rounding_loss
-        adjustment = {
-            "buy_qty_raw": coins_after_fee_raw,
-            "buy_qty_rounded": coins_after_fee,
-            "sell_qty_raw": coins_to_sell_raw,
-            "sell_qty_rounded": coins_to_sell,
-            "actual_buy_spend_usd": actual_buy_spend,
-            "actual_sell_received_usd": usdt_received,
-            "buy_fee_rate": buy_fee,
-            "sell_fee_rate": sell_fee,
-            "buy_fee_model": buy_fee_model,
-            "sell_fee_model": sell_fee_model,
-            "buy_fee_fallback": bool(buy_fee_info.get("fallback")),
-            "sell_fee_fallback": bool(sell_fee_info.get("fallback")),
-            "buy_token_fee_usd": buy_token_fee_usd,
-            "sell_token_fee_usd": sell_token_fee_usd,
-            "token_fee_usd": buy_token_fee_usd + sell_token_fee_usd,
-            "actual_profit_usd": (
-                usdt_received
-                - actual_buy_spend
-                - buy_token_fee_usd
-                - sell_token_fee_usd
-            ),
-            "buy_rounding_saved_usd": buy_rounding_saved,
-            "sell_rounding_loss_usd": sell_rounding_loss,
-            "rounding_impact_usd": total_rounding_impact,
-        }
-
-        return adjustment
 
     def get_portfolio_value(
         self,
@@ -2451,7 +2631,7 @@ class BalanceTracker:
         self.total_external_transfer_fees = data.get("total_external_transfer_fees", 0.0)
         self.skipped_trades = data.get("skipped_trades", 0)
         self._last_rebalance = data.get("_last_rebalance", {})
-        self._estimated_profit_per_trade = data.get("_estimated_profit_per_trade", 0.02)
+        self._estimated_profit_per_trade = data.get("_estimated_profit_per_trade", 0.0)
         self.last_trade_time = data.get("last_trade_time", {})
         self._in_transit = [
             InTransitFund(**f) for f in data.get("_in_transit", [])

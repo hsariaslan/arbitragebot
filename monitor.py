@@ -942,20 +942,57 @@ class ArbitrageMonitor:
                 f"{self._quiet_period_pause_minutes:.0f}m)"
             )
 
-        # Block when net P&L is negative (after warm-up: trades + grace period)
+        trading_pnl = self._cumulative_pnl
+        credited_cb = (
+            self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
+        )
+        total_fees = self._balance.total_transfer_fees
+
+        # Before a config has proven a positive realized edge, only allow
+        # no-cost/near-free refill plans. This prevents zero-trade configs from
+        # burning internal taker fees during startup discovery.
+        if (
+            trading_pnl + credited_cb <= 0
+            and symbol
+            and trade_amount is not None
+            and prices is not None
+        ):
+            preview = self._balance.preview_refill_rebalance(
+                buy_ex,
+                sell_ex,
+                symbol,
+                trade_amount,
+                prices,
+                max_external_fee_usd=0.02,
+            )
+            preview_fee = sum(
+                max(0.0, float(item.get("fee_usd", 0.0) or 0.0))
+                for item in preview.get("plan", [])
+                if item.get("allowed", True)
+            )
+            if not preview.get("allowed"):
+                return False, f"preprofit_refill_gate ({preview.get('reason', 'blocked')})"
+            if preview_fee > 0.02:
+                return False, (
+                    f"preprofit_cost_gate (planned_fee=${preview_fee:.4f} "
+                    "with no positive realized edge)"
+                )
+
+        if total_fees > 0 and trading_pnl + credited_cb <= 0:
+            return False, (
+                f"net_pnl_gate_preprofit (pnl=${trading_pnl:.2f} + "
+                f"cb=${credited_cb:.2f} <= 0 after fees=${total_fees:.2f})"
+            )
+
+        # Block when net P&L is below rebalance costs (after warm-up: trades + grace period)
         warmup_trades = getattr(self, "_net_pnl_gate_warmup_trades", 10)
         grace_seconds = getattr(self, "_net_pnl_gate_grace_seconds", 1800)
         elapsed = time.time() - self._start_time if self._start_time else 0
         if self._cumulative_trade_count >= warmup_trades and elapsed >= grace_seconds:
-            trading_pnl = self._cumulative_pnl
-            credited_cb = (
-                self._fee_manager._total_credited_cashback if self._fee_manager else 0.0
-            )
-            total_fees = self._balance.total_external_transfer_fees
             if trading_pnl + credited_cb < total_fees:
                 return False, (
                     f"net_pnl_gate (pnl=${trading_pnl:.2f} + cb=${credited_cb:.2f} "
-                    f"< ext_fees=${total_fees:.2f})"
+                    f"< rebalance_fees=${total_fees:.2f})"
                 )
 
         # ROI gate: profit margin vs amortized rebalance cost
@@ -2492,10 +2529,26 @@ class ArbitrageMonitor:
                                 continue
                             current_prices = self._get_current_prices()
                             bnb_price = self._get_bnb_price(current_prices)
-                            buy_fee_rate = self._fee_manager.get_taker_fee(buy_ex, sym) if self._fee_manager else 0.001
-                            sell_fee_rate = self._fee_manager.get_taker_fee(sell_ex, sym) if self._fee_manager else 0.001
-                            buy_fee_model = self._fee_manager.get_fee_model(buy_ex) if self._fee_manager else "received"
-                            sell_fee_model = self._fee_manager.get_fee_model(sell_ex) if self._fee_manager else "received"
+                            buy_fee_rate = (
+                                self._fee_manager.get_taker_fee(buy_ex, sym)
+                                if self._fee_manager
+                                else 0.001
+                            )
+                            sell_fee_rate = (
+                                self._fee_manager.get_taker_fee(sell_ex, sym)
+                                if self._fee_manager
+                                else 0.001
+                            )
+                            buy_fee_model = (
+                                self._fee_manager.get_fee_model(buy_ex)
+                                if self._fee_manager
+                                else "received"
+                            )
+                            sell_fee_model = (
+                                self._fee_manager.get_fee_model(sell_ex)
+                                if self._fee_manager
+                                else "received"
+                            )
                             buy_fee_info = self._balance.resolve_fee_model_for_trade(
                                 buy_ex,
                                 sym,
@@ -2520,19 +2573,74 @@ class ArbitrageMonitor:
                             sell_fee_rate = float(sell_fee_info["fee_rate"])
                             buy_fee_model = str(buy_fee_info["fee_model"])
                             sell_fee_model = str(sell_fee_info["fee_model"])
-                            effective_fee_pct = (buy_fee_rate + sell_fee_rate) * 100
                             actual_slippage = slip_policy_actual.adjusted_total_pct
-                            net_adjusted = spread - effective_fee_pct - actual_slippage
+                            exec_buy_price = ask_p * (
+                                1.0 + slip_policy_actual.adjusted_buy_pct / 100.0
+                            )
+                            exec_sell_price = bid_p * (
+                                1.0 - slip_policy_actual.adjusted_sell_pct / 100.0
+                            )
+                            if exec_buy_price <= 0 or exec_sell_price <= 0:
+                                self._low_profit_skips += 1
+                                self._balance.skipped_trades += 1
+                                logger.info(
+                                    f"[Trade] PREFLIGHT_SKIP {sym} {buy_ex}->{sell_ex}: "
+                                    f"invalid_slippage_adjusted_price "
+                                    f"buy=${exec_buy_price:.8f} sell=${exec_sell_price:.8f}"
+                                )
+                                continue
+                            preflight = self._balance.preview_trade(
+                                buy_ex,
+                                sell_ex,
+                                sym,
+                                trade_size,
+                                exec_buy_price,
+                                exec_sell_price,
+                                buy_fee_rate,
+                                sell_fee_rate,
+                                buy_fee_model=buy_fee_model,
+                                sell_fee_model=sell_fee_model,
+                                bnb_price=bnb_price,
+                            )
+                            if preflight.get("aborted"):
+                                self._low_profit_skips += 1
+                                self._balance.skipped_trades += 1
+                                logger.info(
+                                    f"[Trade] PREFLIGHT_SKIP {sym} {buy_ex}->{sell_ex}: "
+                                    f"{preflight.get('reason', 'unknown')} "
+                                    f"requested=${trade_size:.2f}"
+                                )
+                                continue
+                            buy_fee_rate = float(preflight["buy_fee_rate"])
+                            sell_fee_rate = float(preflight["sell_fee_rate"])
+                            buy_fee_model = str(preflight["buy_fee_model"])
+                            sell_fee_model = str(preflight["sell_fee_model"])
+                            effective_fee_pct = (buy_fee_rate + sell_fee_rate) * 100
+                            executed_size = max(
+                                0.0,
+                                float(preflight.get("actual_buy_notional_usd", trade_size)),
+                            )
+                            if executed_size <= 0:
+                                self._low_profit_skips += 1
+                                self._balance.skipped_trades += 1
+                                logger.info(
+                                    f"[Trade] PREFLIGHT_SKIP {sym} {buy_ex}->{sell_ex}: "
+                                    f"actual_notional_zero requested=${trade_size:.2f}"
+                                )
+                                continue
+                            actual_profit = float(preflight["actual_profit_usd"])
+                            net_adjusted = actual_profit / executed_size * 100.0
                             if net_adjusted <= 0 or net_adjusted < pair_min_net:
                                 self._low_profit_skips += 1
                                 self._balance.skipped_trades += 1
                                 logger.info(
-                                    f"[Trade] SLIPPAGE_NET_SKIP {sym} {buy_ex}->{sell_ex}: "
+                                    f"[Trade] REALIZED_NET_SKIP {sym} {buy_ex}->{sell_ex}: "
                                     f"net={net_adjusted:+.4f}% min={pair_min_net:.4f}% "
-                                    f"slip={actual_slippage:.4f}% size=${trade_size:.2f}"
+                                    f"slip={actual_slippage:.4f}% "
+                                    f"requested=${trade_size:.2f} actual=${executed_size:.2f}"
                                 )
                                 continue
-                            actual_profit = trade_size * (net_adjusted / 100)
+                            trade_size = executed_size
                             miss_key = f"{sym}:{buy_ex}:{sell_ex}"
                             # Only fully reset streak if trade is substantial (≥50% of base amount).
                             # Tiny residual trades shouldn't prevent rebalance from triggering.
@@ -2540,10 +2648,14 @@ class ArbitrageMonitor:
                                 self._miss_streak[miss_key] = 0
                                 self._rebalance_empty_backoff.pop(miss_key, None)
                             else:
-                                self._miss_streak[miss_key] = max(0, self._miss_streak.get(miss_key, 0) - 1)
+                                self._miss_streak[miss_key] = max(
+                                    0,
+                                    self._miss_streak.get(miss_key, 0) - 1,
+                                )
                             trade_adj = self._balance.execute_trade(
                                 buy_ex, sell_ex, sym, trade_size,
-                                ask_p, bid_p, buy_fee_rate, sell_fee_rate,
+                                exec_buy_price, exec_sell_price,
+                                buy_fee_rate, sell_fee_rate,
                                 buy_fee_model=buy_fee_model,
                                 sell_fee_model=sell_fee_model,
                                 bnb_price=bnb_price,
@@ -2557,9 +2669,16 @@ class ArbitrageMonitor:
                                 )
                                 continue
                             if trade_adj and "actual_profit_usd" in trade_adj:
-                                slippage_cost = trade_size * (actual_slippage / 100.0)
-                                actual_profit = float(trade_adj["actual_profit_usd"]) - slippage_cost
-                                net_adjusted = (actual_profit / trade_size * 100.0) if trade_size > 0 else 0.0
+                                trade_size = max(
+                                    0.0,
+                                    float(trade_adj.get("actual_buy_notional_usd", trade_size)),
+                                )
+                                actual_profit = float(trade_adj["actual_profit_usd"])
+                                net_adjusted = (
+                                    (actual_profit / trade_size * 100.0)
+                                    if trade_size > 0
+                                    else 0.0
+                                )
                                 fee = effective_fee_pct
                             logger.info(
                                 f"[Fee] {sym} {buy_ex}->{sell_ex}: "
@@ -2630,7 +2749,7 @@ class ArbitrageMonitor:
                         trade = SimulatedTrade(
                             timestamp=now, symbol=sym,
                             buy_exchange=buy_ex, sell_exchange=sell_ex,
-                            buy_price=ask_p, sell_price=bid_p,
+                            buy_price=exec_buy_price, sell_price=exec_sell_price,
                             spread_pct=spread, fee_pct=fee,
                             net_pct=net_adjusted, profit_usd=actual_profit,
                             trade_amount=trade_size,
@@ -2651,16 +2770,24 @@ class ArbitrageMonitor:
                         self._cumulative_pnl += actual_profit
                         self._last_trade_ts = time.time()  # quiet-period reset
                         self._cumulative_trade_count += 1
+                        if self._balance and self._trades:
+                            recent_profits = [
+                                t.profit_usd for t in list(self._trades)[-100:]
+                            ]
+                            avg_profit = sum(recent_profits) / len(recent_profits)
+                            self._balance._estimated_profit_per_trade = max(0.0, avg_profit)
                         self._record_trade_pnl(now, actual_profit)
                         self._anomaly.record_trade(now, sym, actual_profit, context={
                             "buy_ex": buy_ex, "sell_ex": sell_ex,
                             "net_pct": net_adjusted, "trade_size": trade_size,
                         })
-                        qty = trade_size / ask_p if ask_p > 0 else 0.0
+                        qty = float(adj.get("order_qty", 0.0) or 0.0)
+                        if qty <= 0 and exec_buy_price > 0:
+                            qty = trade_size / exec_buy_price
                         slip_str = f" slip={actual_slippage:.4f}%" if actual_slippage > 0 else ""
                         logger.info(
                             f"[Trade] #{self._cumulative_trade_count} {sym} {buy_ex}->{sell_ex}: "
-                            f"buy@${ask_p:.4f} sell@${bid_p:.4f} qty={qty:.4f} "
+                            f"buy@${exec_buy_price:.4f} sell@${exec_sell_price:.4f} qty={qty:.4f} "
                             f"size=${trade_size:.2f} profit=${actual_profit:.4f} "
                             f"(net={net_adjusted:+.4f}%{slip_str})"
                         )
@@ -2756,7 +2883,7 @@ class ArbitrageMonitor:
                 if self._tick_count % 60 == 0 and self._balance and self._trades:
                     recent_profits = [t.profit_usd for t in list(self._trades)[-100:]]
                     avg_profit = sum(recent_profits) / len(recent_profits)
-                    self._balance._estimated_profit_per_trade = max(0.005, avg_profit)
+                    self._balance._estimated_profit_per_trade = max(0.0, avg_profit)
                 if self._adaptive_mode and self._tick_count % 300 == 0 and self._tick_count > 0:
                     self.record_config_snapshot("adaptive_update")
 
