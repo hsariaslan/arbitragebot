@@ -10,6 +10,18 @@ Do not add current-version or release-history notes to `CLAUDE.md`. Keep runtime
 
 ## Version History
 
+### v0.34.2-beta — Realism Guard & Simulation Noise Fixes
+
+- Fixed Bybit order-book depth handling to merge v5 snapshots and deltas instead of treating deltas as full books.
+- Increased Binance visible depth to 20 levels and fixed MEXC depth-state propagation for more realistic slippage/depth checks.
+- Split slippage diagnostics into true slippage, missing-book, visible-depth, and book-age guard counters across backend state, dashboard payloads, and XLSX export.
+- Added depth-aware size shrinking before rejecting opportunities for insufficient visible book depth.
+- Added a short Binance Futures account-info cache to reduce reserve polling rate-limit risk while still invalidating after capital transfers.
+- Forced multi-config spot execution to simulation, disabled demo comparison polling in forced simulation, and kept hedge testnet/live mode separate.
+- Filtered Bitfinex subscriptions to supported symbols and fixed two-character Bitfinex pair formatting such as `ARUSDT` and `OPUSDT`.
+- Aligned rotation gating with displayed net P&L by using all transfer fees, not external-only fees.
+- Made simulated BNB reserve auto-buy wallet-aware and throttled noisy unstable-candidate rejection logs.
+
 ### v0.34.1-beta — Realized P&L & Rebalance Cost Fixes
 
 - Fixed simulated trade accounting so both arbitrage legs use the same executable base quantity, exchange minimums, available balances, and fee models before wallet mutation.
