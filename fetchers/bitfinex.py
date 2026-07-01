@@ -72,12 +72,12 @@ class BitfinexFetcher(BaseFetcher):
         """Convert BTCUSDT -> tBTCUST or tLINK:UST.
 
         Bitfinex uses UST for USDT. Legacy pairs with 3-char base use
-        concatenated format (tBTCUST, 6 chars). Longer bases require
-        a colon separator (tLINK:UST, tDOGE:UST).
+        concatenated format (tBTCUST, 6 chars). Two-char and longer bases
+        require a colon separator (tOP:UST, tLINK:UST, tDOGE:UST).
         """
         if symbol.endswith("USDT"):
             base = symbol[:-4]
-            if len(base) <= 3:
+            if len(base) == 3:
                 return f"t{base}UST"
             return f"t{base}:UST"
         return f"t{symbol}"
@@ -99,6 +99,38 @@ class BitfinexFetcher(BaseFetcher):
             base = inner[:-3]
             return f"{base}USDT"
         return bfx_symbol
+
+    def restrict_to_supported_symbols(self, supported: set[str]) -> None:
+        """Drop symbols Bitfinex does not list before opening subscriptions."""
+        if self._running:
+            logger.warning(
+                f"[{self.exchange_name}] Cannot restrict symbols while fetcher is running"
+            )
+            return
+        if not supported:
+            logger.warning(
+                f"[{self.exchange_name}] No supported-symbol list available; "
+                "keeping configured subscriptions"
+            )
+            return
+
+        requested = list(self.symbols)
+        filtered = [s for s in requested if s in supported]
+        if not filtered:
+            logger.warning(
+                f"[{self.exchange_name}] Supported-symbol filter removed all "
+                f"{len(requested)} configured symbols; keeping original list"
+            )
+            return
+
+        skipped = [s for s in requested if s not in supported]
+        self.symbols = filtered
+        self._state = {s: self._state.get(s, PriceState()) for s in filtered}
+        if skipped:
+            logger.info(
+                f"[{self.exchange_name}] Filtered {len(skipped)} unsupported "
+                f"symbols before subscription; streaming {len(filtered)}/{len(requested)}"
+            )
 
     async def _on_connect(self, ws: Any) -> None:
         """Subscribe to ticker channel for all symbols (up to 30 per connection)."""

@@ -192,6 +192,14 @@ class ExchangeInfoManager:
         """Get trading rules for a symbol on a specific exchange."""
         return self._rules.get(f"{exchange}:{symbol}")
 
+    def supported_symbols(self, exchange: str) -> set[str]:
+        """Return symbols with loaded trading rules for one exchange."""
+        return {
+            rules.symbol
+            for rules in self._rules.values()
+            if rules.exchange == exchange
+        }
+
     def round_quantity(self, exchange: str, symbol: str, qty: Decimal) -> Decimal:
         """Round a quantity DOWN to the exchange's lot size step.
 
@@ -709,8 +717,8 @@ class ExchangeInfoManager:
         target_map: dict[str, str] = {}
         for sym in SYMBOLS:
             base = sym.replace("USDT", "")
-            bfx_pair = f"{base}UST"
-            target_map[bfx_pair.upper()] = sym
+            target_map[f"{base}UST".upper()] = sym
+            target_map[f"{base}:UST".upper()] = sym
 
         pair_info = data[0]  # First (only) element is the pair info dict
         count = 0
@@ -756,7 +764,7 @@ class ExchangeInfoManager:
                 self._rules[f"{BITFINEX_EXCHANGE_NAME}:{symbol}"] = rules
                 count += 1
 
-        logger.info("[ExchangeInfo] Bitfinex: loaded %d/%d symbols", count, len(target_map))
+        logger.info("[ExchangeInfo] Bitfinex: loaded %d/%d symbols", count, len(SYMBOLS))
         return count
 
     # ─── Cache Persistence ───────────────────────────────────────

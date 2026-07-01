@@ -3,7 +3,7 @@ Bybit Spot WebSocket fetcher.
 
 Connects to Bybit v5 public WebSocket API for spot and streams real-time
 data using two channels per symbol:
-    - orderbook.50 for 50-level bid/ask depth (we use top 5)
+    - orderbook.50 for 50-level bid/ask depth
     - tickers for lastPrice and 24h volume
 
 Bybit v5 Spot valid orderbook depths: 1, 50, 200, 1000.
@@ -39,6 +39,15 @@ logger = logging.getLogger(__name__)
 
 class BybitFetcher(BaseFetcher):
     """Bybit Spot WebSocket fetcher using orderbook.50 + tickers channels."""
+
+    def __init__(self, symbols: list[str] | None = None) -> None:
+        super().__init__(symbols)
+        # Bybit v5 sends an initial order-book snapshot and then delta
+        # messages. Keep a local book per symbol so deltas do not replace the
+        # whole visible depth with only the changed levels.
+        self._book_bids: dict[str, dict[float, float]] = {}
+        self._book_asks: dict[str, dict[float, float]] = {}
+        self._book_ready: set[str] = set()
 
     @property
     def exchange_name(self) -> str:
@@ -104,18 +113,36 @@ class BybitFetcher(BaseFetcher):
             symbol = data.get("s", "")
             bids_raw = data.get("b", [])
             asks_raw = data.get("a", [])
+            update_type = str(raw_message.get("type", "snapshot") or "snapshot").lower()
 
             existing = self._state.get(symbol, PriceState())
 
-            # Parse multi-level depth
-            depth_bids = [(b[0], b[1]) for b in bids_raw if len(b) >= 2] or None
-            depth_asks = [(a[0], a[1]) for a in asks_raw if len(a) >= 2] or None
+            if update_type == "snapshot":
+                self._book_bids[symbol] = {}
+                self._book_asks[symbol] = {}
+                self._book_ready.add(symbol)
+                self._apply_book_levels(self._book_bids[symbol], bids_raw)
+                self._apply_book_levels(self._book_asks[symbol], asks_raw)
+            elif update_type == "delta":
+                if symbol not in self._book_ready:
+                    return None
+                self._apply_book_levels(self._book_bids.setdefault(symbol, {}), bids_raw)
+                self._apply_book_levels(self._book_asks.setdefault(symbol, {}), asks_raw)
+            else:
+                # Unknown orderbook push type: treat non-empty payload as a
+                # partial refresh without clearing known levels.
+                self._apply_book_levels(self._book_bids.setdefault(symbol, {}), bids_raw)
+                self._apply_book_levels(self._book_asks.setdefault(symbol, {}), asks_raw)
+
+            depth_bids, depth_asks = self._top_book_levels(symbol)
+            best_bid = depth_bids[0] if depth_bids else None
+            best_ask = depth_asks[0] if depth_asks else None
 
             price_state = PriceState(
-                bid=bids_raw[0][0] if bids_raw else existing.bid,
-                ask=asks_raw[0][0] if asks_raw else existing.ask,
-                bid_qty=bids_raw[0][1] if bids_raw else existing.bid_qty,
-                ask_qty=asks_raw[0][1] if asks_raw else existing.ask_qty,
+                bid=best_bid[0] if best_bid else existing.bid,
+                ask=best_ask[0] if best_ask else existing.ask,
+                bid_qty=best_bid[1] if best_bid else existing.bid_qty,
+                ask_qty=best_ask[1] if best_ask else existing.ask_qty,
                 last_price=existing.last_price,
                 volume=existing.volume,
                 updated_at=updated_at,
@@ -142,3 +169,41 @@ class BybitFetcher(BaseFetcher):
             return symbol, price_state
 
         return None
+
+    @staticmethod
+    def _apply_book_levels(
+        book: dict[float, float],
+        levels: list,
+    ) -> None:
+        """Apply Bybit snapshot/delta levels to a local price→qty book."""
+        for level in levels or []:
+            if len(level) < 2:
+                continue
+            try:
+                price = float(level[0])
+                qty = float(level[1])
+            except (TypeError, ValueError):
+                continue
+            if price <= 0:
+                continue
+            if qty <= 0:
+                book.pop(price, None)
+            else:
+                book[price] = qty
+
+    def _top_book_levels(
+        self,
+        symbol: str,
+        depth: int = 50,
+    ) -> tuple[list[tuple[str, str]] | None, list[tuple[str, str]] | None]:
+        bids = sorted(
+            self._book_bids.get(symbol, {}).items(),
+            key=lambda kv: -kv[0],
+        )[:depth]
+        asks = sorted(
+            self._book_asks.get(symbol, {}).items(),
+            key=lambda kv: kv[0],
+        )[:depth]
+        depth_bids = [(str(price), str(qty)) for price, qty in bids] or None
+        depth_asks = [(str(price), str(qty)) for price, qty in asks] or None
+        return depth_bids, depth_asks

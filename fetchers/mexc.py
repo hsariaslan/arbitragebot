@@ -267,7 +267,7 @@ class MEXCFetcher(BaseFetcher):
 
                 now = time.time()
                 updated_at = send_time_ms / 1000.0 if send_time_ms else 0.0
-                existing = self._parent._state[symbol]
+                existing = self._state.get(symbol, PriceState())
 
                 price_data = PriceState(
                     bid=bid,
@@ -472,7 +472,7 @@ class _MEXCSubFetcher:
 
                 now = time.time()
                 updated_at = send_time_ms / 1000.0 if send_time_ms else 0.0
-                existing = self._state[symbol]
+                existing = self._parent._state.get(symbol, PriceState())
 
                 price_data = PriceState(
                     bid=bid,

@@ -4,7 +4,7 @@ Binance Spot WebSocket fetcher.
 Connects to Binance Spot WebSocket API and streams real-time data
 for all configured symbols using the combined streams endpoint:
     - @ticker for bid/ask prices, quantities, last price, volume
-    - @depth5@100ms for 5-level order book depth
+    - @depth20@100ms for 20-level order book depth
 
 Binance Spot @ticker stream fields:
     b = best bid price,  B = best bid quantity
@@ -13,9 +13,9 @@ Binance Spot @ticker stream fields:
     v = 24h base asset volume
     E = event time (ms)
 
-Binance @depth5@100ms fields:
-    bids = [[price, qty], ...] up to 5 levels, descending
-    asks = [[price, qty], ...] up to 5 levels, ascending
+Binance @depth20@100ms fields:
+    bids = [[price, qty], ...] up to 20 levels, descending
+    asks = [[price, qty], ...] up to 20 levels, ascending
     lastUpdateId = sequence number
 
 Connection notes:
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 class BinanceFetcher(BaseFetcher):
-    """Binance Spot WebSocket fetcher using @ticker + @depth5 streams."""
+    """Binance Spot WebSocket fetcher using @ticker + @depth20 streams."""
 
     @property
     def exchange_name(self) -> str:
@@ -44,33 +44,33 @@ class BinanceFetcher(BaseFetcher):
         """
         Build combined streams URL.
 
-        Format: wss://stream.binance.com:9443/stream?streams=btcusdt@ticker/btcusdt@depth5@100ms/...
+        Format: wss://stream.binance.com:9443/stream?streams=btcusdt@ticker/btcusdt@depth20@100ms/...
         All streams are active immediately on connection — no subscription handshake needed.
-        Includes both @ticker (bid/ask/last/volume) and @depth5@100ms (5-level order book).
+        Includes both @ticker (bid/ask/last/volume) and @depth20@100ms (20-level order book).
         """
         parts = []
         for s in self.symbols:
             sym = s.lower()
             parts.append(f"{sym}@ticker")
-            parts.append(f"{sym}@depth5@100ms")
+            parts.append(f"{sym}@depth20@100ms")
         streams = "/".join(parts)
         return f"{BINANCE_WS_BASE_URL}?streams={streams}"
 
     def _parse_message(self, raw_message: dict[str, Any]) -> tuple[str, PriceState] | None:
         """
-        Parse a Binance combined stream message (@ticker or @depth5).
+        Parse a Binance combined stream message (@ticker or @depth20).
 
         Ticker: {"stream": "btcusdt@ticker", "data": {"e": "24hrTicker", ...}}
-        Depth:  {"stream": "btcusdt@depth5@100ms", "data": {"lastUpdateId": ..., "bids": [...], "asks": [...]}}
+        Depth:  {"stream": "btcusdt@depth20@100ms", "data": {"lastUpdateId": ..., "bids": [...], "asks": [...]}}
         """
         stream = raw_message.get("stream", "")
         data = raw_message.get("data")
         if data is None:
             return None
 
-        # Depth5 stream: update order book levels
-        if "@depth5" in stream:
-            # Extract symbol from stream name: "btcusdt@depth5@100ms" -> "BTCUSDT"
+        # Depth20 stream: update order book levels
+        if "@depth20" in stream:
+            # Extract symbol from stream name: "btcusdt@depth20@100ms" -> "BTCUSDT"
             symbol = stream.split("@")[0].upper()
             existing = self._state.get(symbol, PriceState())
 
