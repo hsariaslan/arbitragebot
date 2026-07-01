@@ -279,21 +279,31 @@ class ArbitrageMonitor:
 
         # Depth filtering tracking
         self._depth_skips: int = 0
-        self._slippage_guard_skips: int = 0
+        self._slippage_guard_skips: int = 0  # aggregate: slippage + missing book + visible depth
+        self._true_slippage_guard_skips: int = 0
+        self._missing_book_guard_skips: int = 0
+        self._visible_depth_guard_skips: int = 0
         self._book_age_guard_skips: int = 0
         self._depth_shrink_count: int = 0
         self._depth_shrink_usd: float = 0.0
         self._slippage_guard_reason_counts: dict[str, int] = defaultdict(int)
+        self._missing_book_guard_reason_counts: dict[str, int] = defaultdict(int)
+        self._visible_depth_guard_reason_counts: dict[str, int] = defaultdict(int)
         self._book_age_guard_reason_counts: dict[str, int] = defaultdict(int)
         self._depth_shrink_log_count: dict[str, int] = defaultdict(int)
         self._slippage_guard_reason_samples: dict[str, str] = {}
+        self._missing_book_guard_reason_samples: dict[str, str] = {}
+        self._visible_depth_guard_reason_samples: dict[str, str] = {}
         self._book_age_guard_reason_samples: dict[str, str] = {}
         self._depth_shrink_samples: dict[str, str] = {}
-        self._last_realism_diag_snapshot: tuple[int, int, int] = (0, 0, 0)
+        self._last_realism_diag_snapshot: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0)
 
         # Min notional / min qty rejection tracking (D-02)
         self._notional_skips: int = 0
         self._interval_notional_skips: int = 0
+        self._interval_true_slippage_skips: int = 0
+        self._interval_missing_book_skips: int = 0
+        self._interval_visible_depth_skips: int = 0
         self._interval_book_age_skips: int = 0
         self._interval_depth_shrinks: int = 0
 
@@ -466,7 +476,9 @@ class ArbitrageMonitor:
 
     def _log_realism_diagnostics(self) -> None:
         snapshot = (
-            self._slippage_guard_skips,
+            self._true_slippage_guard_skips,
+            self._missing_book_guard_skips,
+            self._visible_depth_guard_skips,
             self._book_age_guard_skips,
             self._depth_shrink_count,
         )
@@ -476,6 +488,8 @@ class ArbitrageMonitor:
         logger.info(
             f"[Session] realism_diag: "
             f"slippage_top=[{self._format_diag_counts(self._slippage_guard_reason_counts, self._slippage_guard_reason_samples)}] "
+            f"missing_book_top=[{self._format_diag_counts(self._missing_book_guard_reason_counts, self._missing_book_guard_reason_samples)}] "
+            f"visible_depth_top=[{self._format_diag_counts(self._visible_depth_guard_reason_counts, self._visible_depth_guard_reason_samples)}] "
             f"book_age_top=[{self._format_diag_counts(self._book_age_guard_reason_counts, self._book_age_guard_reason_samples)}] "
             f"depth_shrink_top=[{self._format_depth_shrink_samples()}] "
             f"settings=slip_leg<={self._max_leg_slippage_pct:.4f}% "
@@ -514,6 +528,14 @@ class ArbitrageMonitor:
                 )
         return True, ""
 
+    @staticmethod
+    def _slippage_guard_bucket(normalized_reason: str) -> str:
+        if normalized_reason.startswith("missing_"):
+            return "missing_book"
+        if "depth_insufficient" in normalized_reason:
+            return "visible_depth"
+        return "slippage"
+
     def _record_slippage_guard_skip(
         self,
         symbol: str,
@@ -524,16 +546,33 @@ class ArbitrageMonitor:
     ) -> None:
         self._slippage_guard_skips += 1
         normalized = reason.split(" ", 1)[0] if reason else "unknown"
-        self._slippage_guard_reason_counts[normalized] += 1
-        self._slippage_guard_reason_samples.setdefault(
-            normalized,
-            f"{symbol} {buy_ex}->{sell_ex} {reason or 'unknown'} size=${trade_size:.2f}",
-        )
-        key = f"slip:{normalized}"
+        bucket = self._slippage_guard_bucket(normalized)
+        sample = f"{symbol} {buy_ex}->{sell_ex} {reason or 'unknown'} size=${trade_size:.2f}"
+        if bucket == "missing_book":
+            self._missing_book_guard_skips += 1
+            self._interval_missing_book_skips += 1
+            self._missing_book_guard_reason_counts[normalized] += 1
+            self._missing_book_guard_reason_samples.setdefault(normalized, sample)
+            log_label = "MISSING_BOOK_SKIP"
+            key = f"missing_book:{normalized}"
+        elif bucket == "visible_depth":
+            self._visible_depth_guard_skips += 1
+            self._interval_visible_depth_skips += 1
+            self._visible_depth_guard_reason_counts[normalized] += 1
+            self._visible_depth_guard_reason_samples.setdefault(normalized, sample)
+            log_label = "VISIBLE_DEPTH_SKIP"
+            key = f"visible_depth:{normalized}"
+        else:
+            self._true_slippage_guard_skips += 1
+            self._interval_true_slippage_skips += 1
+            self._slippage_guard_reason_counts[normalized] += 1
+            self._slippage_guard_reason_samples.setdefault(normalized, sample)
+            log_label = "SLIPPAGE_GUARD_SKIP"
+            key = f"slip:{normalized}"
         count = self._size_zero_log_count[key] = self._size_zero_log_count.get(key, 0) + 1
         if count == 1 or count % 1000 == 0:
             logger.info(
-                f"[Trade] SLIPPAGE_GUARD_SKIP reason={normalized} "
+                f"[Trade] {log_label} reason={normalized} "
                 f"sample={symbol} {buy_ex}->{sell_ex} "
                 f"detail={reason or 'unknown'} size=${trade_size:.2f} count={count}"
             )
@@ -606,6 +645,102 @@ class ArbitrageMonitor:
                 f"visible_depth=${available:.2f} buffer={buffer:.2f}x count={count}"
             )
         return new_size
+
+    def _visible_depth_safe_size_from_slips(
+        self,
+        requested_size: float,
+        buy_slip,
+        sell_slip,
+    ) -> float:
+        """Return the largest currently visible depth-safe size, or 0.
+
+        This is intentionally based only on visible book depth. It avoids
+        rejecting a route at scoring size when the same route is executable at
+        a smaller size, while still refusing to assume hidden depth exists.
+        """
+        if requested_size <= 0:
+            return 0.0
+        buffer = max(1.0, self._order_book_depth_buffer_multiplier)
+        available = min(
+            max(0.0, float(getattr(buy_slip, "total_depth_usd", 0.0) or 0.0)),
+            max(0.0, float(getattr(sell_slip, "total_depth_usd", 0.0) or 0.0)),
+        )
+        if available <= 0:
+            return 0.0
+        max_size = available / buffer
+        if max_size >= requested_size:
+            return requested_size
+        min_trade = max(5.0, self._total_capital * 0.003)
+        if max_size < min_trade or max_size < requested_size * self._min_depth_shrink_ratio:
+            return 0.0
+        return round(max(0.0, min(requested_size, max_size)), 2)
+
+    def _estimate_slippage_probe_size(
+        self,
+        buy_ex: str,
+        sell_ex: str,
+        symbol: str,
+        pre_slippage_net_pct: float,
+        buy_price: float,
+        sell_price: float,
+    ) -> float:
+        """Side-effect-free estimate of the size to use for slippage scoring.
+
+        Final execution still calls `_compute_trade_size()` and preflight. This
+        probe only prevents scoring from rejecting a route using a larger size
+        than the config could currently execute.
+        """
+        if not self._adaptive_mode or not self._balance or not self._balance.initialized:
+            return self._trade_amount
+
+        min_trade = max(5.0, self._total_capital * 0.003)
+        usdt_available = self._balance.available_usdt_for_trading(buy_ex)
+        usdt_buffer = 0.95 if usdt_available < min_trade * 2 else 0.80
+        max_by_usdt = usdt_available * usdt_buffer
+
+        crypto_qty = self._balance.crypto.get(sell_ex, {}).get(symbol, 0.0)
+        crypto_value = crypto_qty * sell_price
+        crypto_buffer = 0.95 if crypto_value < min_trade * 2 else 0.80
+        max_by_crypto = crypto_value * crypto_buffer
+
+        symbol_mult = 1.0
+        if self._optimizer:
+            sym_score = self._optimizer.get_symbol_score(symbol)
+            if sym_score:
+                symbol_mult = sym_score.trade_multiplier
+
+        if self._net_pct_sizing_enabled:
+            if pre_slippage_net_pct >= 0.25:
+                net_mult = 2.5
+            elif pre_slippage_net_pct >= 0.15:
+                net_mult = 2.0
+            elif pre_slippage_net_pct >= 0.08:
+                net_mult = 1.5
+            elif pre_slippage_net_pct >= 0.03:
+                net_mult = 1.0
+            else:
+                net_mult = 0.5
+            net_mult = min(net_mult, self._net_pct_multiplier_cap)
+        else:
+            net_mult = 1.0
+
+        base = self._trade_amount * symbol_mult * net_mult * self._anomaly.trade_size_multiplier
+        probe = min(max_by_usdt, max_by_crypto, base)
+
+        if self._max_position_multiplier > 0 and buy_price > 0:
+            cap = self._trade_amount * self._max_position_multiplier
+            crypto_qty_buy = self._balance.crypto.get(buy_ex, {}).get(symbol, 0.0)
+            crypto_val_buy = crypto_qty_buy * buy_price if crypto_qty_buy > 0 else 0.0
+            remaining_cap = max(0.0, cap - crypto_val_buy)
+            probe = min(probe, remaining_cap)
+
+        # If current balances cannot support even the min trade, keep the
+        # configured amount for scoring so the route can still trigger the
+        # existing rebalance/miss-streak path. A zero probe here would hide
+        # inventory starvation rather than model execution realism.
+        if probe < min_trade:
+            return self._trade_amount
+        return round(max(min_trade, probe), 2)
 
     def _record_trade_pnl(self, timestamp: float, profit_usd: float) -> None:
         """Record trade profit in hourly and daily P&L buckets."""
@@ -2154,32 +2289,72 @@ class ArbitrageMonitor:
                         continue
 
                     spread_pct = (bid_j - ask_i) / ask_i * 100
+                    # Scoring fees for pair selection (includes cashback weighting)
+                    s_buy = self._fee_manager.get_scoring_fee(ex_buy, symbol) if self._fee_manager else 0.001
+                    s_sell = self._fee_manager.get_scoring_fee(ex_sell, symbol) if self._fee_manager else 0.001
+                    pre_slippage_scoring_net = spread_pct - (s_buy + s_sell) * 100
 
-                    # Compute slippage estimate using trade_amount
-                    buy_slip = compute_buy_slippage(asks_i, self._trade_amount)
-                    sell_slip = compute_sell_slippage(bids_j, self._trade_amount)
+                    # Taker fees for actual trade profitability.
+                    t_buy = self._fee_manager.get_taker_fee(ex_buy, symbol) if self._fee_manager else 0.001
+                    t_sell = self._fee_manager.get_taker_fee(ex_sell, symbol) if self._fee_manager else 0.001
+                    fee_pct = (t_buy + t_sell) * 100
+                    pre_slippage_trade_net = spread_pct - fee_pct
+
+                    slippage_probe_size = self._estimate_slippage_probe_size(
+                        ex_buy,
+                        ex_sell,
+                        symbol,
+                        pre_slippage_trade_net,
+                        ask_i,
+                        bid_j,
+                    )
+
+                    # Compute slippage estimate using the side-effect-free
+                    # candidate size, not always the configured base amount.
+                    buy_slip = compute_buy_slippage(asks_i, slippage_probe_size)
+                    sell_slip = compute_sell_slippage(bids_j, slippage_probe_size)
                     slip_policy = self._evaluate_slippage_policy(
                         buy_slip,
                         sell_slip,
                         bool(asks_i),
                         bool(bids_j),
-                        self._trade_amount,
+                        slippage_probe_size,
                     )
+                    if (
+                        not slip_policy.ok
+                        and self._depth_aware_trade_size_shrink_enabled
+                        and "depth_insufficient" in (slip_policy.reason or "")
+                    ):
+                        shrunken_probe = self._visible_depth_safe_size_from_slips(
+                            slippage_probe_size,
+                            buy_slip,
+                            sell_slip,
+                        )
+                        if 0 < shrunken_probe < slippage_probe_size:
+                            buy_slip = compute_buy_slippage(asks_i, shrunken_probe)
+                            sell_slip = compute_sell_slippage(bids_j, shrunken_probe)
+                            retry_policy = self._evaluate_slippage_policy(
+                                buy_slip,
+                                sell_slip,
+                                bool(asks_i),
+                                bool(bids_j),
+                                shrunken_probe,
+                            )
+                            if retry_policy.ok:
+                                slippage_probe_size = shrunken_probe
+                                slip_policy = retry_policy
                     if not slip_policy.ok:
                         self._record_slippage_guard_skip(
                             symbol,
                             ex_buy,
                             ex_sell,
                             slip_policy.reason,
-                            self._trade_amount,
+                            slippage_probe_size,
                         )
                         continue
                     slippage_pct = slip_policy.adjusted_total_pct
 
-                    # Scoring fees for pair selection (includes cashback weighting)
-                    s_buy = self._fee_manager.get_scoring_fee(ex_buy, symbol) if self._fee_manager else 0.001
-                    s_sell = self._fee_manager.get_scoring_fee(ex_sell, symbol) if self._fee_manager else 0.001
-                    raw_scoring_net = spread_pct - (s_buy + s_sell) * 100 - slippage_pct
+                    raw_scoring_net = pre_slippage_scoring_net - slippage_pct
                     scoring_net = raw_scoring_net
 
                     # Per-role boost: multiply scoring_net by the buyer/seller
@@ -2203,12 +2378,8 @@ class ArbitrageMonitor:
                         best_raw_net = raw_scoring_net
                         best_raw_sell_ex = ex_sell
 
-                    # Taker fees for profit calculation (actual fee charged)
-                    t_buy = self._fee_manager.get_taker_fee(ex_buy, symbol) if self._fee_manager else 0.001
-                    t_sell = self._fee_manager.get_taker_fee(ex_sell, symbol) if self._fee_manager else 0.001
-                    fee_pct = (t_buy + t_sell) * 100
                     net_pct = spread_pct - fee_pct - slippage_pct
-                    profit_usd = self._trade_amount * (net_pct / 100)
+                    profit_usd = slippage_probe_size * (net_pct / 100)
 
                     if scoring_net > best_scoring_net:
                         best_scoring_net = scoring_net
@@ -2904,7 +3075,9 @@ class ArbitrageMonitor:
                         )
             sym_info = " | ".join(sym_details) if sym_details else syms
             notional_part = f" notional_reject={self._interval_notional_skips}" if self._interval_notional_skips else ""
-            slippage_part = f" slippage_guard={self._slippage_guard_skips}" if self._slippage_guard_skips else ""
+            slippage_part = f" slippage_guard={self._interval_true_slippage_skips}" if self._interval_true_slippage_skips else ""
+            missing_book_part = f" missing_book={self._interval_missing_book_skips}" if self._interval_missing_book_skips else ""
+            visible_depth_part = f" visible_depth={self._interval_visible_depth_skips}" if self._interval_visible_depth_skips else ""
             book_age_part = f" book_age_skip={self._interval_book_age_skips}" if self._interval_book_age_skips else ""
             shrink_part = f" depth_shrink={self._interval_depth_shrinks}" if self._interval_depth_shrinks else ""
             logger.info(
@@ -2914,7 +3087,8 @@ class ArbitrageMonitor:
                 f"skip_size={self._interval_size_skips} "
                 f"skip_balance={self._interval_balance_skips} "
                 f"low_profit={self._low_profit_skips}"
-                f"{notional_part}{slippage_part}{book_age_part}{shrink_part} | {sym_info}"
+                f"{notional_part}{slippage_part}{missing_book_part}"
+                f"{visible_depth_part}{book_age_part}{shrink_part} | {sym_info}"
             )
             # Reset interval counters
             self._interval_profitable = 0
@@ -2922,6 +3096,9 @@ class ArbitrageMonitor:
             self._interval_balance_skips = 0
             self._interval_executed = 0
             self._interval_notional_skips = 0
+            self._interval_true_slippage_skips = 0
+            self._interval_missing_book_skips = 0
+            self._interval_visible_depth_skips = 0
             self._interval_book_age_skips = 0
             self._interval_depth_shrinks = 0
 
@@ -3015,7 +3192,9 @@ class ArbitrageMonitor:
                 f"ref_earn=${ref_earn:.2f}, "
                 f"sz0={size_zero_total}, rebal_blocked={rebal_blocked_total}, "
                 f"phantom={self._phantom_spread_count}, "
-                f"slip_guard={self._slippage_guard_skips}, "
+                f"slip_guard={self._true_slippage_guard_skips}, "
+                f"missing_book={self._missing_book_guard_skips}, "
+                f"visible_depth={self._visible_depth_guard_skips}, "
                 f"book_age={self._book_age_guard_skips}, "
                 f"depth_shrink={self._depth_shrink_count}/${self._depth_shrink_usd:.2f}, "
                 f"evd_sell={self._event_driven_seller_penalties}/demoted={self._event_driven_seller_demoted}, "
@@ -3419,12 +3598,19 @@ class ArbitrageMonitor:
             "_fresh_samples": dict(self._fresh_samples),
             "_depth_skips": self._depth_skips,
             "_slippage_guard_skips": self._slippage_guard_skips,
+            "_true_slippage_guard_skips": self._true_slippage_guard_skips,
+            "_missing_book_guard_skips": self._missing_book_guard_skips,
+            "_visible_depth_guard_skips": self._visible_depth_guard_skips,
             "_book_age_guard_skips": self._book_age_guard_skips,
             "_depth_shrink_count": self._depth_shrink_count,
             "_depth_shrink_usd": self._depth_shrink_usd,
             "_slippage_guard_reason_counts": dict(self._slippage_guard_reason_counts),
+            "_missing_book_guard_reason_counts": dict(self._missing_book_guard_reason_counts),
+            "_visible_depth_guard_reason_counts": dict(self._visible_depth_guard_reason_counts),
             "_book_age_guard_reason_counts": dict(self._book_age_guard_reason_counts),
             "_slippage_guard_reason_samples": dict(self._slippage_guard_reason_samples),
+            "_missing_book_guard_reason_samples": dict(self._missing_book_guard_reason_samples),
+            "_visible_depth_guard_reason_samples": dict(self._visible_depth_guard_reason_samples),
             "_book_age_guard_reason_samples": dict(self._book_age_guard_reason_samples),
             "_depth_shrink_samples": dict(self._depth_shrink_samples),
             "_notional_skips": self._notional_skips,
@@ -3496,26 +3682,90 @@ class ArbitrageMonitor:
         self._fresh_samples = defaultdict(int, data.get("_fresh_samples", {}))
         self._depth_skips = data.get("_depth_skips", 0)
         self._slippage_guard_skips = data.get("_slippage_guard_skips", 0)
+        raw_slip_reasons = data.get("_slippage_guard_reason_counts", {})
+        raw_slip_samples = data.get("_slippage_guard_reason_samples", {})
+        true_reasons = {
+            k: v for k, v in raw_slip_reasons.items()
+            if self._slippage_guard_bucket(str(k)) == "slippage"
+        }
+        missing_reasons = {
+            k: v for k, v in raw_slip_reasons.items()
+            if self._slippage_guard_bucket(str(k)) == "missing_book"
+        }
+        visible_reasons = {
+            k: v for k, v in raw_slip_reasons.items()
+            if self._slippage_guard_bucket(str(k)) == "visible_depth"
+        }
+        has_split_realism_state = "_true_slippage_guard_skips" in data
+        slippage_reasons_restore = raw_slip_reasons if has_split_realism_state else true_reasons
+        slippage_samples_restore = (
+            raw_slip_samples
+            if has_split_realism_state
+            else {
+                k: v for k, v in raw_slip_samples.items()
+                if self._slippage_guard_bucket(str(k)) == "slippage"
+            }
+        )
+        self._true_slippage_guard_skips = data.get(
+            "_true_slippage_guard_skips",
+            sum(int(v) for v in true_reasons.values()),
+        )
+        self._missing_book_guard_skips = data.get(
+            "_missing_book_guard_skips",
+            sum(int(v) for v in missing_reasons.values()),
+        )
+        self._visible_depth_guard_skips = data.get(
+            "_visible_depth_guard_skips",
+            sum(int(v) for v in visible_reasons.values()),
+        )
         self._book_age_guard_skips = data.get("_book_age_guard_skips", 0)
         self._depth_shrink_count = data.get("_depth_shrink_count", 0)
         self._depth_shrink_usd = data.get("_depth_shrink_usd", 0.0)
         self._slippage_guard_reason_counts = defaultdict(
             int,
-            data.get("_slippage_guard_reason_counts", {}),
+            slippage_reasons_restore,
+        )
+        self._missing_book_guard_reason_counts = defaultdict(
+            int,
+            data.get("_missing_book_guard_reason_counts", missing_reasons),
+        )
+        self._visible_depth_guard_reason_counts = defaultdict(
+            int,
+            data.get("_visible_depth_guard_reason_counts", visible_reasons),
         )
         self._book_age_guard_reason_counts = defaultdict(
             int,
             data.get("_book_age_guard_reason_counts", {}),
         )
         self._slippage_guard_reason_samples = dict(
-            data.get("_slippage_guard_reason_samples", {})
+            slippage_samples_restore
+        )
+        self._missing_book_guard_reason_samples = dict(
+            data.get(
+                "_missing_book_guard_reason_samples",
+                {
+                    k: v for k, v in raw_slip_samples.items()
+                    if self._slippage_guard_bucket(str(k)) == "missing_book"
+                },
+            )
+        )
+        self._visible_depth_guard_reason_samples = dict(
+            data.get(
+                "_visible_depth_guard_reason_samples",
+                {
+                    k: v for k, v in raw_slip_samples.items()
+                    if self._slippage_guard_bucket(str(k)) == "visible_depth"
+                },
+            )
         )
         self._book_age_guard_reason_samples = dict(
             data.get("_book_age_guard_reason_samples", {})
         )
         self._depth_shrink_samples = dict(data.get("_depth_shrink_samples", {}))
         self._last_realism_diag_snapshot = (
-            int(self._slippage_guard_skips),
+            int(self._true_slippage_guard_skips),
+            int(self._missing_book_guard_skips),
+            int(self._visible_depth_guard_skips),
             int(self._book_age_guard_skips),
             int(self._depth_shrink_count),
         )

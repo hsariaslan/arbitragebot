@@ -85,6 +85,7 @@ class SymbolTick:
     sell_exchange: str
     spread_pct: float
     fee_pct: float
+    trade_size_usd: float = 0.0
 
 
 @dataclass(slots=True)
@@ -279,6 +280,8 @@ class SymbolOptimizer:
         book_age_guard_enabled: bool = True,
         max_book_age_seconds: float = 2.0,
         event_driven_max_book_age_seconds: float = 15.0,
+        depth_aware_trade_size_shrink_enabled: bool = True,
+        min_depth_shrink_ratio: float = 0.5,
     ) -> None:
         self._fetchers = fetchers
         self._monitor = monitor
@@ -376,6 +379,10 @@ class SymbolOptimizer:
             self._max_book_age_seconds,
             float(event_driven_max_book_age_seconds),
         )
+        self._depth_aware_trade_size_shrink_enabled = bool(
+            depth_aware_trade_size_shrink_enabled
+        )
+        self._min_depth_shrink_ratio = max(0.0, min(1.0, float(min_depth_shrink_ratio)))
         self._book_age_score_skips: int = 0
 
         # Net profit awareness: block rotations when in deficit
@@ -417,6 +424,7 @@ class SymbolOptimizer:
         self._agg_sum_net: dict[str, float] = defaultdict(float)
         self._agg_prof_count: dict[str, int] = defaultdict(int)
         self._agg_prof_sum: dict[str, float] = defaultdict(float)
+        self._agg_prof_profit_sum: dict[str, float] = defaultdict(float)
         # Monotonic max-deque: (timestamp, best_net_pct) pairs in
         # monotonically decreasing order by value. Front is always the
         # current max in the time window. Replaces the previous
@@ -461,6 +469,7 @@ class SymbolOptimizer:
         # per config when the candidate is at the threshold-but-unstable
         # boundary; without this the tight loop fires both logs every tick).
         self._last_fast_track_log: float = 0.0
+        self._last_candidate_rejected_log: float = 0.0
         # Throttle for the "trading float overflow blocked" log — when
         # the custody hub is unreachable (e.g. disabled in a Lean config),
         # this condition holds indefinitely and the log otherwise fires
@@ -597,6 +606,29 @@ class SymbolOptimizer:
         limit = self._book_age_limit(exchange)
         return limit <= 0 or book_age <= limit
 
+    def _visible_depth_safe_size_from_slips(
+        self,
+        requested_size: float,
+        buy_slip,
+        sell_slip,
+    ) -> float:
+        if requested_size <= 0:
+            return 0.0
+        buffer = max(1.0, self._order_book_depth_buffer_multiplier)
+        available = min(
+            max(0.0, float(getattr(buy_slip, "total_depth_usd", 0.0) or 0.0)),
+            max(0.0, float(getattr(sell_slip, "total_depth_usd", 0.0) or 0.0)),
+        )
+        if available <= 0:
+            return 0.0
+        max_size = available / buffer
+        if max_size >= requested_size:
+            return requested_size
+        min_trade = max(5.0, self._total_capital * 0.003)
+        if max_size < min_trade or max_size < requested_size * self._min_depth_shrink_ratio:
+            return 0.0
+        return round(max(0.0, min(requested_size, max_size)), 2)
+
     def update_profit_state(self, net_profit: float, session_hourly_rate: float, grace_active: bool = False) -> None:
         """Called by dashboard to update net profit awareness for rotation gating."""
         was_ok = self._rotation_budget_ok
@@ -609,7 +641,7 @@ class SymbolOptimizer:
         if was_ok and not self._rotation_budget_ok:
             logger.info(
                 f"[Optimizer] Rotation gate CLOSED: net_profit=${net_profit:.2f} "
-                f"(using ext-only fees)"
+                f"(using all transfer fees)"
             )
         elif not was_ok and self._rotation_budget_ok and not grace_active:
             logger.info(
@@ -982,6 +1014,7 @@ class SymbolOptimizer:
             best_sell = ""
             best_spread = 0.0
             best_fee = 0.0
+            best_trade_size = self._trade_amount
 
             for i, (ex_buy, _, ask_i, _bids_i, asks_i, _recv_i, buy_book_age) in enumerate(exchange_prices):
                 # Outer-leg block check: cheap set lookup using the
@@ -1016,16 +1049,42 @@ class SymbolOptimizer:
                         sell_fee = 0.001
                     fee_pct = (buy_fee + sell_fee) * 100
 
-                    # Deduct estimated slippage from depth data
-                    buy_slip = compute_buy_slippage(asks_i, self._trade_amount)
-                    sell_slip = compute_sell_slippage(bids_j, self._trade_amount)
+                    # Deduct estimated slippage from depth data. If the full
+                    # configured size does not fit visible depth, retry at the
+                    # largest visible-depth-safe size before rejecting.
+                    slippage_probe_size = self._trade_amount
+                    buy_slip = compute_buy_slippage(asks_i, slippage_probe_size)
+                    sell_slip = compute_sell_slippage(bids_j, slippage_probe_size)
                     slip_policy = self._evaluate_slippage_policy(
                         buy_slip,
                         sell_slip,
                         bool(asks_i),
                         bool(bids_j),
-                        self._trade_amount,
+                        slippage_probe_size,
                     )
+                    if (
+                        not slip_policy.ok
+                        and self._depth_aware_trade_size_shrink_enabled
+                        and "depth_insufficient" in (slip_policy.reason or "")
+                    ):
+                        shrunken_probe = self._visible_depth_safe_size_from_slips(
+                            slippage_probe_size,
+                            buy_slip,
+                            sell_slip,
+                        )
+                        if 0 < shrunken_probe < slippage_probe_size:
+                            buy_slip = compute_buy_slippage(asks_i, shrunken_probe)
+                            sell_slip = compute_sell_slippage(bids_j, shrunken_probe)
+                            retry_policy = self._evaluate_slippage_policy(
+                                buy_slip,
+                                sell_slip,
+                                bool(asks_i),
+                                bool(bids_j),
+                                shrunken_probe,
+                            )
+                            if retry_policy.ok:
+                                slippage_probe_size = shrunken_probe
+                                slip_policy = retry_policy
                     if not slip_policy.ok:
                         continue
                     slippage_pct = slip_policy.adjusted_total_pct
@@ -1042,6 +1101,7 @@ class SymbolOptimizer:
                         best_sell = ex_sell
                         best_spread = spread_pct
                         best_fee = fee_pct
+                        best_trade_size = slippage_probe_size
 
             # Apply momentum factor: penalize symbols with declining 24h price
             if self._momentum_filter_enabled and best_net > float("-inf"):
@@ -1065,6 +1125,7 @@ class SymbolOptimizer:
                     sell_exchange=best_sell,
                     spread_pct=best_spread,
                     fee_pct=best_fee,
+                    trade_size_usd=best_trade_size,
                 )
                 self._ticks[symbol].append(tick)
                 # Incremental aggregate maintenance — see __init__ note
@@ -1073,6 +1134,7 @@ class SymbolOptimizer:
                 if best_net > 0:
                     self._agg_prof_count[symbol] += 1
                     self._agg_prof_sum[symbol] += best_net
+                    self._agg_prof_profit_sum[symbol] += best_trade_size * (best_net / 100)
                 # Monotonic max-deque maintenance: pop trailing entries
                 # whose value is <= new value (they're dominated and can
                 # never be the max while the new value is in the window).
@@ -1107,6 +1169,9 @@ class SymbolOptimizer:
                 if v > 0:
                     self._agg_prof_count[sym] -= 1
                     self._agg_prof_sum[sym] -= v
+                    self._agg_prof_profit_sum[sym] -= (
+                        (evicted.trade_size_usd or self._trade_amount) * (v / 100)
+                    )
             # Prune monotonic max-deque to the same time cutoff. O(1)
             # amortized — each entry is popleft'd at most once. The
             # front of the deque is the current max in the window.
@@ -1418,6 +1483,7 @@ class SymbolOptimizer:
             sum_net = self._agg_sum_net.get(sym, 0.0)
             profitable_count = self._agg_prof_count.get(sym, 0)
             sum_profitable_net = self._agg_prof_sum.get(sym, 0.0)
+            sum_profitable_profit = self._agg_prof_profit_sum.get(sym, 0.0)
 
             # O(1) read from monotonic max-deque (front is always the
             # current max in the time window). Replaces the previous
@@ -1437,7 +1503,11 @@ class SymbolOptimizer:
 
             # est hourly profit = profitable ticks/hour × profit per tick
             ticks_per_hour = frequency * 3600
-            profit_per_tick = self._trade_amount * (avg_profitable_net / 100)
+            profit_per_tick = (
+                sum_profitable_profit / profitable_count
+                if profitable_count > 0
+                else 0.0
+            )
             est_hourly = ticks_per_hour * profit_per_tick
 
             all_scores.append(
@@ -1490,7 +1560,12 @@ class SymbolOptimizer:
                         s.focus_tier = "weak"
                     # Recompute est_hourly_profit with multiplied trade amount
                     ticks_per_hour = s.frequency * 3600
-                    profit_per_tick = (self._trade_amount * s.trade_multiplier) * (s.avg_profitable_net / 100)
+                    base_profit_per_tick = (
+                        self._agg_prof_profit_sum.get(s.symbol, 0.0) / s.profitable_ticks
+                        if s.profitable_ticks > 0
+                        else 0.0
+                    )
+                    profit_per_tick = base_profit_per_tick * max(0.0, s.trade_multiplier)
                     s.est_hourly_profit = ticks_per_hour * profit_per_tick
 
         self._track_candidate_transitions()
@@ -1518,7 +1593,9 @@ class SymbolOptimizer:
         if tick.best_net_pct > 0:
             stats.total_profitable_ticks += 1
             stats.total_profitable_net_sum += tick.best_net_pct
-            stats.est_total_profit += self._trade_amount * (tick.best_net_pct / 100)
+            stats.est_total_profit += (
+                (tick.trade_size_usd or self._trade_amount) * (tick.best_net_pct / 100)
+            )
             stats.current_profitable_streak += 1
             stats.current_unprofitable_streak = 0
             if stats.current_profitable_streak > stats.longest_profitable_streak:
@@ -1721,10 +1798,15 @@ class SymbolOptimizer:
             tradeable_symbols.append(sym)
 
         if rejected_declining:
-            logger.info(
-                f"[Candidate] REJECTED at activation (unstable): "
-                + ", ".join(rejected_declining)
-            )
+            should_log_rejection = True
+            if from_fast_track:
+                should_log_rejection = now - self._last_candidate_rejected_log >= 30.0
+            if should_log_rejection:
+                self._last_candidate_rejected_log = now
+                logger.info(
+                    f"[Candidate] REJECTED at activation (unstable): "
+                    + ", ".join(rejected_declining)
+                )
 
         if tradeable_symbols:
             # Activate tradeable symbols (cap at max_active)

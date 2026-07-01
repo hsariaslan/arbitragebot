@@ -2342,10 +2342,10 @@ class DashboardServer:
                     if exec_mode and exec_mode != "simulation":
                         logger.warning(
                             f"[Config] Forcing execution_mode=simulation "
-                            f"({len(registry.all_configs())} configs > 1; only super-primary "
-                            f"can use {exec_mode})"
+                            f"({len(registry.all_configs())} configs > 1; "
+                            f"demo/live spot execution requires single-config mode)"
                         )
-                    # Allow setting it — orchestrator force-locks at component build
+                        exec_mode = "simulation"
                 if exec_mode is not None:
                     registry.update_shared("execution_mode", exec_mode)
                 if hedge_mode is not None:
@@ -5082,13 +5082,10 @@ class DashboardServer:
             session_hourly_rate = 0.0
         else:
             session_hourly_rate = net_profit / (elapsed_s / 3600)
-        # For optimizer gating: use external-only fees (internal rebalances are cheap)
-        external_fees = self._balance.total_external_transfer_fees
-        net_profit_gating = trading_pnl - external_fees + credited_cashback
         grace_seconds = getattr(self._monitor, "_net_pnl_gate_grace_seconds", 1800)
         grace_active = elapsed_s < grace_seconds
         if self._optimizer:
-            self._optimizer.update_profit_state(net_profit_gating, session_hourly_rate, grace_active)
+            self._optimizer.update_profit_state(net_profit, session_hourly_rate, grace_active)
 
         # Balances per exchange (include ALL held crypto, not just active symbols)
         balances: dict[str, Any] = {}
@@ -5223,12 +5220,19 @@ class DashboardServer:
                 "trades_per_minute": round(trades_per_min, 2),
                 "low_profit_skips": self._monitor._low_profit_skips,
                 "slippage_guard_skips": self._monitor._slippage_guard_skips,
+                "true_slippage_guard_skips": self._monitor._true_slippage_guard_skips,
+                "missing_book_guard_skips": self._monitor._missing_book_guard_skips,
+                "visible_depth_guard_skips": self._monitor._visible_depth_guard_skips,
                 "book_age_guard_skips": self._monitor._book_age_guard_skips,
                 "depth_shrink_count": self._monitor._depth_shrink_count,
                 "depth_shrink_usd": round(self._monitor._depth_shrink_usd, 2),
                 "slippage_guard_reasons": dict(self._monitor._slippage_guard_reason_counts),
+                "missing_book_guard_reasons": dict(self._monitor._missing_book_guard_reason_counts),
+                "visible_depth_guard_reasons": dict(self._monitor._visible_depth_guard_reason_counts),
                 "book_age_guard_reasons": dict(self._monitor._book_age_guard_reason_counts),
                 "slippage_guard_samples": dict(self._monitor._slippage_guard_reason_samples),
+                "missing_book_guard_samples": dict(self._monitor._missing_book_guard_reason_samples),
+                "visible_depth_guard_samples": dict(self._monitor._visible_depth_guard_reason_samples),
                 "book_age_guard_samples": dict(self._monitor._book_age_guard_reason_samples),
                 "depth_shrink_samples": dict(self._monitor._depth_shrink_samples),
                 "avg_trade_size": round(avg_trade_size, 2),
@@ -5437,12 +5441,11 @@ class DashboardServer:
             # at multi-config scale. Now every config maintains its own
             # rotation budget state correctly.
             try:
-                bundle_external_fees = (
-                    bundle.balance.total_external_transfer_fees
+                bundle_transfer_fees = (
+                    bundle.balance.total_transfer_fees
                     if bundle.balance else 0.0
                 )
-                # Same external-only-fees gating semantics as the legacy path
-                bundle_net_for_gating = trading_pnl - bundle_external_fees + credited_cashback
+                bundle_net_for_gating = trading_pnl - bundle_transfer_fees + credited_cashback
                 bundle_start_t = float(getattr(bundle.monitor, "_start_time", 0.0) or 0.0)
                 bundle_elapsed = (time.time() - bundle_start_t) if bundle_start_t > 0 else 0.0
                 bundle_grace_s = float(getattr(bundle.monitor, "_net_pnl_gate_grace_seconds", 1800))

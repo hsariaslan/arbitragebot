@@ -1110,6 +1110,10 @@ class ConfigFactory:
             event_driven_max_book_age_seconds=float(
                 s.get("event_driven_max_book_age_seconds", 15.0)
             ),
+            depth_aware_trade_size_shrink_enabled=bool(
+                s.get("depth_aware_trade_size_shrink_enabled", True)
+            ),
+            min_depth_shrink_ratio=float(s.get("min_depth_shrink_ratio", 0.5)),
         )
         if "trading_score_threshold" in s:
             optimizer._trading_threshold = float(s["trading_score_threshold"])
