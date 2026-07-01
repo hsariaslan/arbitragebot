@@ -139,6 +139,9 @@ class BinanceFuturesExecutor(ExecutionEngine):
         self._account_info_backoff_until: float = 0.0
         self._account_info_backoff_reason: str = ""
         self._account_info_backoff_logged: bool = False
+        self._account_info_cache: dict = {}
+        self._account_info_cache_ts: float = 0.0
+        self._account_info_ttl_seconds: float = 10.0
 
     # ── Internal helpers ──────────────────────────────────────────────
 
@@ -196,6 +199,10 @@ class BinanceFuturesExecutor(ExecutionEngine):
             self._account_info_backoff_until = 0.0
             self._account_info_backoff_reason = ""
             self._account_info_backoff_logged = False
+
+    def _clear_account_info_cache(self) -> None:
+        self._account_info_cache = {}
+        self._account_info_cache_ts = 0.0
 
     async def _signed_request(
         self,
@@ -774,6 +781,13 @@ class BinanceFuturesExecutor(ExecutionEngine):
 
     async def get_account_info(self) -> dict:
         """Return wallet/margin balance summary."""
+        now = time.time()
+        if (
+            self._account_info_cache
+            and now - self._account_info_cache_ts <= self._account_info_ttl_seconds
+        ):
+            return dict(self._account_info_cache)
+
         status, data = await self._signed_request("GET", _ACCOUNT_INFO_PATH, {})
         if status != 200:
             if data.get("error") != "account_info_backoff":
@@ -787,7 +801,7 @@ class BinanceFuturesExecutor(ExecutionEngine):
             ),
             {},
         )
-        return {
+        parsed = {
             "total_wallet_balance": _number_with_fallback(
                 data.get("totalWalletBalance"),
                 usdt_asset.get("walletBalance"),
@@ -809,6 +823,9 @@ class BinanceFuturesExecutor(ExecutionEngine):
                 usdt_asset.get("maxWithdrawAmount"),
             ),
         }
+        self._account_info_cache = dict(parsed)
+        self._account_info_cache_ts = now
+        return parsed
 
     async def get_balance(self, asset: str = "USDT") -> float:
         """Return available balance for an asset (default USDT)."""
@@ -908,6 +925,7 @@ class BinanceFuturesExecutor(ExecutionEngine):
             },
         )
         if status == 200 and ("tranId" in data or "data" in data):
+            self._clear_account_info_cache()
             return {"success": True, "direction": "spot_to_futures", "asset": asset, **data}
         logger.warning(
             f"[BinanceFutures] spot→futures transfer failed: "
@@ -934,6 +952,7 @@ class BinanceFuturesExecutor(ExecutionEngine):
             },
         )
         if status == 200 and ("tranId" in data or "data" in data):
+            self._clear_account_info_cache()
             return {"success": True, "direction": "futures_to_spot", **data}
         logger.warning(
             f"[BinanceFutures] futures→spot transfer failed: "

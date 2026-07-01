@@ -224,6 +224,11 @@ async def main() -> None:
     all_exchanges = [f.exchange_name for f in fetchers]
     exchange_info = ExchangeInfoManager(exchanges=all_exchanges)
     await exchange_info.fetch_all()
+    for fetcher in fetchers:
+        if isinstance(fetcher, BitfinexFetcher):
+            fetcher.restrict_to_supported_symbols(
+                exchange_info.supported_symbols(fetcher.exchange_name)
+            )
     await exchange_info.validate_withdrawal_fees(transfer_fee_manager)
 
     # ── SHARED: FundingMonitor (used for scoring + super-primary hedge) ─
@@ -412,10 +417,22 @@ async def main() -> None:
     )
     if legacy_state and "demo_fetcher" in legacy_state:
         demo_fetcher.from_state_dict(legacy_state["demo_fetcher"])
-    if demo_fetcher.enabled:
+    demo_fetcher_active = (
+        demo_fetcher.enabled
+        and any(
+            registry.effective_execution_mode(cfg.id) in ("demo", "demo_only")
+            for cfg in registry.iter_configs()
+        )
+    )
+    if demo_fetcher_active:
         dashboard.set_demo_fetcher(demo_fetcher)
     else:
-        logger.info("[DemoCompare] Disabled (no API keys configured in .env)")
+        reason = (
+            "no API keys configured in .env"
+            if not demo_fetcher.enabled
+            else "execution_mode=simulation"
+        )
+        logger.info(f"[DemoCompare] Disabled ({reason})")
 
     # ── Demo executor reconciliation (super-primary only) ─────────────
     if default_bundle.demo_executor:
@@ -442,14 +459,14 @@ async def main() -> None:
                 default_bundle.balance,
                 default_bundle.monitor,
                 default_bundle.optimizer,
-                demo_fetcher if demo_fetcher.enabled else None,
+                demo_fetcher if demo_fetcher_active else None,
                 fee_manager=default_bundle.fee_manager,
                 hedge_manager=default_bundle.hedge_manager,
             )
         except Exception as e:
             logger.warning(f"[State] legacy save during shutdown failed: {e}")
         state_mgr.stop()
-        if demo_fetcher.enabled:
+        if demo_fetcher_active:
             demo_fetcher.stop()
         for fetcher in fetchers:
             fetcher.stop()
@@ -486,11 +503,11 @@ async def main() -> None:
         default_bundle.balance,
         default_bundle.monitor,
         default_bundle.optimizer,
-        demo_fetcher if demo_fetcher.enabled else None,
+        demo_fetcher if demo_fetcher_active else None,
         fee_manager=default_bundle.fee_manager,
         hedge_manager=default_bundle.hedge_manager,
     )))
-    if demo_fetcher.enabled:
+    if demo_fetcher_active:
         tasks.append(asyncio.create_task(demo_fetcher.run()))
 
     try:
@@ -503,7 +520,7 @@ async def main() -> None:
                 default_bundle.balance,
                 default_bundle.monitor,
                 default_bundle.optimizer,
-                demo_fetcher if demo_fetcher.enabled else None,
+                demo_fetcher if demo_fetcher_active else None,
                 fee_manager=default_bundle.fee_manager,
                 hedge_manager=default_bundle.hedge_manager,
             )

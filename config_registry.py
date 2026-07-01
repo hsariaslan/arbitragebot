@@ -544,8 +544,15 @@ class ConfigRegistry:
 
     # ----- effective values (force-locks) -----------------------------
     def effective_execution_mode(self, config_id: str) -> str:
-        """Super-primary inherits shared.execution_mode; everyone else is
-        force-locked to simulation."""
+        """Spot execution is simulation-only when multiple configs exist.
+
+        A shared demo/live spot executor cannot safely mirror 30 independent
+        simulated portfolios, so multi-config sessions force all configs to
+        simulation. Single-config sessions may still use the shared execution
+        mode on the super-primary.
+        """
+        if len(self.all_configs()) > 1:
+            return "simulation"
         if config_id == self.super_primary_id:
             return str(self.shared.get("execution_mode", "simulation"))
         return "simulation"

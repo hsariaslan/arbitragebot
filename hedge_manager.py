@@ -1337,9 +1337,34 @@ class HedgeManager:
             if simulated:
                 while spot_value < required_spot_usd and buy_attempt < max_buy_attempts:
                     buy_attempt += 1
-                    buy_usd = max(0.0, required_spot_usd - spot_value) * 1.001
+                    remaining_usd = max(0.0, required_spot_usd - spot_value)
+                    available_usdt = max(0.0, float(self._balance.usdt.get("Binance", 0.0)))
+                    if available_usdt <= 0:
+                        self._last_spot_bnb_buy_error = (
+                            f"sim_binance_spot_usdt=${available_usdt:.2f} "
+                            f"remaining=${remaining_usd:.2f}"
+                        )
+                        self._last_spot_bnb_buy_ts = now
+                        logger.info(
+                            f"[Hedge] SIM_SPOT_BNB_BUY_SKIPPED attempt={buy_attempt}: "
+                            f"{self._last_spot_bnb_buy_error}"
+                        )
+                        break
+                    buy_usd = remaining_usd * 1.001
                     if 0 < buy_usd < amounts["spot_buy_min_usd"]:
                         buy_usd = amounts["spot_buy_min_usd"]
+                    buy_usd = min(buy_usd, available_usdt)
+                    if buy_usd < amounts["spot_buy_min_usd"]:
+                        self._last_spot_bnb_buy_error = (
+                            f"sim_binance_spot_usdt=${available_usdt:.2f} "
+                            f"below_buy_min=${amounts['spot_buy_min_usd']:.2f}"
+                        )
+                        self._last_spot_bnb_buy_ts = now
+                        logger.info(
+                            f"[Hedge] SIM_SPOT_BNB_BUY_SKIPPED attempt={buy_attempt}: "
+                            f"{self._last_spot_bnb_buy_error}"
+                        )
+                        break
                     result = self._balance.buy_spot_bnb_with_usdt(buy_usd, price)
                     if result.get("success"):
                         bought_qty = float(result.get("net_qty", 0.0) or 0.0)
@@ -1385,6 +1410,7 @@ class HedgeManager:
                             f"binance_spot_usdt=${available_usdt:.2f} "
                             f"below_buy_min=${amounts['spot_buy_min_usd']:.2f}"
                         )
+                        self._last_spot_bnb_buy_ts = now
                         logger.warning(
                             f"[Hedge] SPOT_BNB_BUY_SKIPPED attempt={buy_attempt}: "
                             f"{self._last_spot_bnb_buy_error}"
