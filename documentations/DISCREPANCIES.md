@@ -41,10 +41,10 @@ This document catalogs every known way the simulation can diverge from real exch
 | **Sim assumes** | Any price value from the WebSocket feed is exact and tradeable |
 | **Reality** | Exchanges enforce price tick sizes (e.g., 0.01 USDT increments for BTC). Limit orders must conform; market orders fill at the orderbook's actual prices which are already tick-aligned. |
 | **Impact** | Minimal for market orders (our primary strategy). Matters for limit orders and precise PnL tracking. |
-| **Detection** | Log when WebSocket price doesn't align with tick size. |
-| **Fix** | Round prices in spread calculations via `ExchangeInfoManager.round_price()`. |
-| **Files** | `exchange_info.py`, `monitor.py` |
-| **How it works** | When building `exchange_prices` in `_tick()`, bid and ask are converted to `Decimal` and rounded to the exchange's `tick_size` via `round_price()` (ROUND_DOWN). This corrects float imprecision from WebSocket data (e.g., `81.00000000001` → `81.00`) before spread calculations. No behavioral change for market orders (orderbook prices are already tick-aligned), but ensures PnL tracking uses consistent precision. See `monitor.py:474-486`. |
+| **Detection** | Skip and log `quote_book_mismatch` when ticker top and order-book top diverge materially. |
+| **Fix** | Do not round live market quotes in spread calculations. Market-order simulation prices fills from order-book VWAP; tick rounding is reserved for explicit limit-order requests. |
+| **Files** | `exchange_info.py`, `monitor.py`, `slippage.py`, `executor.py` |
+| **How it works** | `monitor.py` keeps raw WebSocket bid/ask values and rejects internally inconsistent quote/book snapshots before scoring or execution. `slippage.py` walks the executable book and returns VWAP, which the simulator uses as the fill price plus configured safety buffer. `ExchangeInfoManager.round_price()` remains available for executors that must place tick-aligned limit prices. |
 
 ### D-04: Fee Rate Mismatch
 

@@ -10,6 +10,15 @@ Do not add current-version or release-history notes to `CLAUDE.md`. Keep runtime
 
 ## Version History
 
+### v0.35.1-beta — Bitfinex Market-Price Realism Fix
+
+- Fixed Bitfinex pair-info precision parsing so margin/risk fields like `0.5/0.25` no longer become `tick_size=0.1`.
+- Stopped rounding live market quotes in monitor spread and execution paths; static tick rounding is reserved for explicit limit-order placement.
+- Added quote/book mismatch guards before scoring and execution to reject incoherent snapshots such as a rounded Bitfinex ticker quote far away from the executable book.
+- Changed simulated market fills to use order-book VWAP plus the configured safety buffer, instead of applying slippage to a potentially bad ticker top.
+- Updated optimizer scoring to skip quote/book mismatches so bad market-data snapshots cannot promote or activate symbols.
+- Updated D-03 discrepancy documentation and added regression tests for Bitfinex precision parsing and quote/book consistency.
+
 ### v0.35.0-beta — Profitability Gating & Market-Data Reliability
 
 - Fixed Bitfinex exchange-info parsing for the real row-array API response and added normal user-agent headers, so supported-symbol filtering now loads the actual Bitfinex symbol set instead of leaving all configured symbols subscribed.
