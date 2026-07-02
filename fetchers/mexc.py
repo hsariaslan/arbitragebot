@@ -540,6 +540,7 @@ class _MEXCDepthSubFetcher:
         self._symbols = symbols
         self._last_data_time: float = 0.0
         self._connect_count: int = 0
+        self._connected_at: float = 0.0
 
     async def run(self) -> None:
         from config import RECONNECT_INITIAL_DELAY, RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY
@@ -563,6 +564,9 @@ class _MEXCDepthSubFetcher:
         kwargs = self._parent._ws_connect_kwargs()
 
         async with websockets.connect(url, **kwargs) as ws:
+            self._connected_at = time.time()
+            self._last_data_time = 0.0
+            self._parent._ws_connected = True
             self._connect_count += 1
             if self._connect_count == 1:
                 logger.info(
@@ -642,7 +646,9 @@ class _MEXCDepthSubFetcher:
                     bids=bids or None,
                     asks=asks or None,
                 )
+                self._parent._last_data_received = now
                 self._last_data_time = now
+                self._parent._message_count += 1
 
             except Exception as e:
                 logger.debug(f"[{self._parent.exchange_name}] Depth parse error: {e}")
@@ -658,14 +664,22 @@ class _MEXCDepthSubFetcher:
     async def _staleness_watchdog(self, ws: Any) -> None:
         while self._parent._running:
             await asyncio.sleep(5.0)
-            if self._last_data_time > 0:
-                stale = time.time() - self._last_data_time
-                if stale >= self._parent.STALENESS_RECONNECT_SECONDS:
-                    if self._connect_count <= 1:
-                        logger.warning(
-                            f"[{self._parent.exchange_name}] Depth sub-connection stale "
-                            f"({stale:.0f}s), reconnecting"
-                        )
-                    self._last_data_time = 0.0
-                    await ws.close()
-                    return
+            ref_time = self._last_data_time or self._connected_at
+            if ref_time <= 0:
+                continue
+            stale = time.time() - ref_time
+            if stale < self._parent.STALENESS_RECONNECT_SECONDS:
+                continue
+            if self._last_data_time <= 0:
+                logger.warning(
+                    f"[{self._parent.exchange_name}] Depth sub-connection received "
+                    f"no initial depth data for {stale:.0f}s, reconnecting"
+                )
+            elif self._connect_count <= 1:
+                logger.warning(
+                    f"[{self._parent.exchange_name}] Depth sub-connection stale "
+                    f"({stale:.0f}s), reconnecting"
+                )
+            self._last_data_time = 0.0
+            await ws.close()
+            return

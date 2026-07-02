@@ -39,6 +39,26 @@ _ASK_SIZE = 3
 _LAST_PRICE = 6
 _VOLUME = 7
 
+_BITFINEX_SYMBOL_OVERRIDES = {
+    # Bitfinex keeps several historical pair ids that do not match the
+    # common exchange symbol. These must be exact or subscriptions are rejected.
+    "ALGOUSDT": "tALGUSD",
+    "ATOMUSDT": "tATOUST",
+    "BCHUSDT": "tBCHN:USD",
+    "DASHUSDT": "tDSHUSD",
+    "IOTAUSDT": "tIOTUSD",
+}
+_BITFINEX_SYMBOL_REVERSE = {
+    value: key for key, value in _BITFINEX_SYMBOL_OVERRIDES.items()
+}
+_BITFINEX_BASE_REVERSE = {
+    "ALG": "ALGO",
+    "ATO": "ATOM",
+    "BCHN": "BCH",
+    "DSH": "DASH",
+    "IOT": "IOTA",
+}
+
 
 class BitfinexFetcher(BaseFetcher):
     """Bitfinex Spot WebSocket fetcher using the ticker channel.
@@ -74,7 +94,12 @@ class BitfinexFetcher(BaseFetcher):
         Bitfinex uses UST for USDT. Legacy pairs with 3-char base use
         concatenated format (tBTCUST, 6 chars). Two-char and longer bases
         require a colon separator (tOP:UST, tLINK:UST, tDOGE:UST).
+        Some historical Bitfinex pairs use renamed bases or USD quotes; these
+        are handled by exact overrides above.
         """
+        override = _BITFINEX_SYMBOL_OVERRIDES.get(symbol)
+        if override:
+            return override
         if symbol.endswith("USDT"):
             base = symbol[:-4]
             if len(base) == 3:
@@ -85,18 +110,23 @@ class BitfinexFetcher(BaseFetcher):
     @staticmethod
     def _from_bitfinex_symbol(bfx_symbol: str) -> str:
         """Convert tBTCUST or tLINK:UST -> BTCUSDT."""
+        override = _BITFINEX_SYMBOL_REVERSE.get(bfx_symbol)
+        if override:
+            return override
         if not bfx_symbol.startswith("t"):
             return bfx_symbol
         inner = bfx_symbol[1:]
         # Colon-separated: tLINK:UST -> LINKUSDT
         if ":" in inner:
             base, quote = inner.split(":", 1)
-            if quote == "UST":
+            base = _BITFINEX_BASE_REVERSE.get(base, base)
+            if quote in {"UST", "USD"}:
                 return f"{base}USDT"
             return f"{base}{quote}"
         # Legacy: tBTCUST -> BTCUSDT (last 3 chars = UST)
-        if inner.endswith("UST") and len(inner) >= 6:
+        if (inner.endswith("UST") or inner.endswith("USD")) and len(inner) >= 6:
             base = inner[:-3]
+            base = _BITFINEX_BASE_REVERSE.get(base, base)
             return f"{base}USDT"
         return bfx_symbol
 
@@ -130,6 +160,11 @@ class BitfinexFetcher(BaseFetcher):
             logger.info(
                 f"[{self.exchange_name}] Filtered {len(skipped)} unsupported "
                 f"symbols before subscription; streaming {len(filtered)}/{len(requested)}"
+            )
+        else:
+            logger.info(
+                f"[{self.exchange_name}] Supported-symbol filter kept all "
+                f"{len(filtered)} configured symbols"
             )
 
     async def _on_connect(self, ws: Any) -> None:

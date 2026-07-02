@@ -951,13 +951,29 @@ class SymbolOptimizer:
                         if bid_f <= 0 or ask_f <= 0:
                             continue
                         book_age = now - ps.book_received_at if ps.book_received_at > 0 else -1.0
+                        try:
+                            bid_qty_f = float(ps.bid_qty) if ps.bid_qty else 0.0
+                            ask_qty_f = float(ps.ask_qty) if ps.ask_qty else 0.0
+                        except (ValueError, TypeError):
+                            bid_qty_f = 0.0
+                            ask_qty_f = 0.0
+                        bids = ps.bids
+                        asks = ps.asks
+                        if not bids and bid_qty_f > 0:
+                            bids = [(str(bid_f), str(bid_qty_f))]
+                            if book_age < 0 and ps.received_at > 0:
+                                book_age = now - ps.received_at
+                        if not asks and ask_qty_f > 0:
+                            asks = [(str(ask_f), str(ask_qty_f))]
+                            if book_age < 0 and ps.received_at > 0:
+                                book_age = now - ps.received_at
                         exchange_prices.append(
                             (
                                 fetcher.exchange_name,
                                 bid_f,
                                 ask_f,
-                                ps.bids,
-                                ps.asks,
+                                bids,
+                                asks,
                                 ps.received_at,
                                 book_age,
                             )

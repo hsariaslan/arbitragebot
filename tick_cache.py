@@ -138,6 +138,15 @@ def build_sweep_prices(
                 ask_qty_f = 0.0
             bids_f = _parse_levels(ps.bids) if ps.bids else None
             asks_f = _parse_levels(ps.asks) if ps.asks else None
+            book_received_at = ps.book_received_at
+            if bids_f is None and bid_qty_f > 0:
+                bids_f = [(bid_f, bid_qty_f)]
+                if book_received_at <= 0:
+                    book_received_at = ps.received_at
+            if asks_f is None and ask_qty_f > 0:
+                asks_f = [(ask_f, ask_qty_f)]
+                if book_received_at <= 0:
+                    book_received_at = ps.received_at
             entries.append(
                 (
                     fetcher.exchange_name,
@@ -148,7 +157,7 @@ def build_sweep_prices(
                     bids_f,
                     asks_f,
                     ps.received_at,
-                    ps.book_received_at,
+                    book_received_at,
                 )
             )
         if entries:

@@ -50,6 +50,16 @@ _API_URLS = {
     BITFINEX_EXCHANGE_NAME: "https://api-pub.bitfinex.com/v2/conf/pub:info:pair",
 }
 
+_BITFINEX_PAIR_LIST_URL = "https://api-pub.bitfinex.com/v2/conf/pub:list:pair:exchange"
+_BITFINEX_BASE_ALIASES = {
+    # Bitfinex historical pair symbols differ from common spot symbols.
+    "ALGO": "ALG",
+    "ATOM": "ATO",
+    "BCH": "BCHN",
+    "DASH": "DSH",
+    "IOTA": "IOT",
+}
+
 # Persist cache here as fallback if API calls fail
 _CACHE_PATH = Path("state/exchange_info.json")
 
@@ -104,6 +114,27 @@ def _decimal_places(step: Decimal) -> int:
     return max(0, -exponent)
 
 
+def _bitfinex_pair_candidates(symbol: str) -> list[str]:
+    """Return Bitfinex pair ids that can represent our USDT symbol."""
+    if not symbol.endswith("USDT"):
+        return [symbol.upper()]
+    base = symbol[:-4].upper()
+    aliases = [base]
+    alias = _BITFINEX_BASE_ALIASES.get(base)
+    if alias and alias not in aliases:
+        aliases.insert(0, alias)
+
+    candidates: list[str] = []
+    for b in aliases:
+        # Prefer UST pairs when listed, but accept USD pairs as Bitfinex
+        # equivalents because the project models Bitfinex USD/UST quotes as
+        # USDT-priced spot liquidity.
+        for pair in (f"{b}UST", f"{b}:UST", f"{b}USD", f"{b}:USD"):
+            if pair not in candidates:
+                candidates.append(pair)
+    return candidates
+
+
 class ExchangeInfoManager:
     """Fetches and caches trading rules from all active exchanges."""
 
@@ -127,7 +158,12 @@ class ExchangeInfoManager:
                      len(self._exchanges))
 
         timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        headers = {
+            # Bitfinex rejects some default Python clients with 403. A normal
+            # UA keeps the public endpoints available without auth.
+            "User-Agent": "Mozilla/5.0 (compatible; coirnabot/1.0)",
+        }
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             tasks = []
             task_exchanges: list[str] = []
             for ex in self._exchanges:
@@ -710,61 +746,109 @@ class ExchangeInfoManager:
 
         if not data or not isinstance(data, list) or not data[0]:
             logger.warning("[ExchangeInfo] Bitfinex: unexpected response format")
-            return 0
+            return await self._fetch_bitfinex_pair_list_fallback(session)
 
-        # Build map from Bitfinex pair to our symbol format
-        # Bitfinex: "BTCUST" (without t prefix) in pair info
-        target_map: dict[str, str] = {}
-        for sym in SYMBOLS:
-            base = sym.replace("USDT", "")
-            target_map[f"{base}UST".upper()] = sym
-            target_map[f"{base}:UST".upper()] = sym
-
-        pair_info = data[0]  # First (only) element is the pair info dict
-        count = 0
-
+        pair_info = data[0]
+        pair_rows: dict[str, list] = {}
         if isinstance(pair_info, dict):
-            for bfx_pair, info in pair_info.items():
-                symbol = target_map.get(bfx_pair.upper())
-                if not symbol:
-                    continue
+            pair_rows = {
+                str(pair).upper(): info
+                for pair, info in pair_info.items()
+                if isinstance(info, list)
+            }
+        elif isinstance(pair_info, list):
+            # Real Bitfinex response shape is:
+            # [[["BTCUST", [..info..]], ["ETHUST", [..info..]], ...]]
+            for row in pair_info:
+                if (
+                    isinstance(row, list)
+                    and len(row) >= 2
+                    and isinstance(row[0], str)
+                    and isinstance(row[1], list)
+                ):
+                    pair_rows[row[0].upper()] = row[1]
 
-                if not isinstance(info, list) or len(info) < 4:
-                    continue
+        if not pair_rows:
+            logger.warning("[ExchangeInfo] Bitfinex: no pair rows parsed")
+            return await self._fetch_bitfinex_pair_list_fallback(session)
 
-                # info = [placeholder, min_order_size, max_order_size, ?, ?, price_precision, ...]
-                # Indices may vary. Use safe defaults.
-                try:
-                    min_qty = Decimal(str(info[1])) if len(info) > 1 else Decimal("0")
-                except (InvalidOperation, IndexError):
-                    min_qty = Decimal("0")
-
-                # Bitfinex uses 5 significant digits typically
-                price_prec = 5
-                if len(info) > 5:
-                    try:
-                        price_prec = int(info[5])
-                    except (ValueError, TypeError):
-                        price_prec = 5
-
-                # Conservative defaults — Bitfinex doesn't expose lot_step/tick_size directly
-                lot_step = Decimal("0.00000001")  # 8 decimals (standard crypto precision)
-                tick_size = Decimal(10) ** Decimal(-price_prec)
-
-                rules = SymbolRules(
-                    symbol=symbol,
-                    exchange=BITFINEX_EXCHANGE_NAME,
-                    lot_size_step=lot_step,
-                    min_qty=abs(min_qty),
-                    tick_size=tick_size,
-                    min_notional=Decimal("0.1"),  # Bitfinex has very low minimums
-                    base_precision=8,
-                    quote_precision=price_prec,
-                )
-                self._rules[f"{BITFINEX_EXCHANGE_NAME}:{symbol}"] = rules
-                count += 1
+        count = self._load_bitfinex_rules_from_pairs(pair_rows)
+        if count <= 0:
+            logger.warning("[ExchangeInfo] Bitfinex: no configured symbols matched pair info")
+            return await self._fetch_bitfinex_pair_list_fallback(session)
 
         logger.info("[ExchangeInfo] Bitfinex: loaded %d/%d symbols", count, len(SYMBOLS))
+        return count
+
+    async def _fetch_bitfinex_pair_list_fallback(self, session: aiohttp.ClientSession) -> int:
+        """Fallback to Bitfinex's pair-list endpoint when pair-info parsing fails."""
+        try:
+            async with session.get(_BITFINEX_PAIR_LIST_URL) as resp:
+                data = await resp.json()
+        except Exception as exc:
+            logger.warning("[ExchangeInfo] Bitfinex pair-list fallback failed: %s", exc)
+            return 0
+        if not data or not isinstance(data, list) or not isinstance(data[0], list):
+            logger.warning("[ExchangeInfo] Bitfinex pair-list fallback unexpected response")
+            return 0
+        pair_rows = {
+            str(pair).upper(): []
+            for pair in data[0]
+            if isinstance(pair, str)
+        }
+        count = self._load_bitfinex_rules_from_pairs(pair_rows)
+        logger.info(
+            "[ExchangeInfo] Bitfinex pair-list fallback: loaded %d/%d symbols",
+            count,
+            len(SYMBOLS),
+        )
+        return count
+
+    def _load_bitfinex_rules_from_pairs(self, pair_rows: dict[str, list]) -> int:
+        """Create Bitfinex SymbolRules for configured symbols present in pair_rows."""
+        count = 0
+        for symbol in SYMBOLS:
+            selected_pair = next(
+                (pair for pair in _bitfinex_pair_candidates(symbol) if pair in pair_rows),
+                "",
+            )
+            if not selected_pair:
+                continue
+            info = pair_rows.get(selected_pair, [])
+
+            min_qty = Decimal("0")
+            # Current Bitfinex pair-info rows expose minimum order size at
+            # index 3. Keep older index 1 as fallback for cached/legacy shapes.
+            for idx in (3, 1):
+                if len(info) > idx and info[idx] not in (None, ""):
+                    try:
+                        min_qty = abs(Decimal(str(info[idx])))
+                        break
+                    except (InvalidOperation, TypeError, ValueError):
+                        pass
+
+            price_prec = 5
+            for idx in (5, 8, 9):
+                if len(info) > idx and info[idx] not in (None, ""):
+                    try:
+                        price_prec = max(1, int(float(info[idx])))
+                        break
+                    except (ValueError, TypeError):
+                        pass
+
+            lot_step = Decimal("0.00000001")
+            tick_size = Decimal("1").scaleb(-price_prec)
+            self._rules[f"{BITFINEX_EXCHANGE_NAME}:{symbol}"] = SymbolRules(
+                symbol=symbol,
+                exchange=BITFINEX_EXCHANGE_NAME,
+                lot_size_step=lot_step,
+                min_qty=min_qty,
+                tick_size=tick_size,
+                min_notional=Decimal("0.1"),
+                base_precision=8,
+                quote_precision=price_prec,
+            )
+            count += 1
         return count
 
     # ─── Cache Persistence ───────────────────────────────────────
