@@ -156,6 +156,65 @@ def compute_sell_slippage(
     return _walk_book(bids, trade_size_usd, is_buy=False)
 
 
+def top_book_price(levels: list[tuple[str, str]] | None) -> float:
+    """Return the first order-book level price, or 0 when unavailable."""
+    if not levels:
+        return 0.0
+    try:
+        return float(levels[0][0])
+    except (IndexError, TypeError, ValueError):
+        return 0.0
+
+
+def quote_book_mismatch_reason(
+    symbol: str,
+    buy_exchange: str,
+    sell_exchange: str,
+    buy_quote_ask: float,
+    sell_quote_bid: float,
+    buy_book_asks: list[tuple[str, str]] | None,
+    sell_book_bids: list[tuple[str, str]] | None,
+    max_mismatch_pct: float = 0.25,
+) -> str:
+    """Return a diagnostic reason when ticker top and book top diverge.
+
+    Market-order simulation must price fills from executable book levels.
+    If the ticker quote used for spread scoring is materially different from
+    the same side's book top, the snapshot is internally inconsistent and can
+    create fake arbitrage. This intentionally ignores missing books; strict
+    slippage policy handles those separately.
+    """
+    limit = max(0.0, float(max_mismatch_pct))
+
+    def _check(side: str, exchange: str, quote: float, book_price: float) -> str:
+        if book_price <= 0:
+            return ""
+        if quote <= 0:
+            return (
+                f"quote_book_mismatch {side}={exchange} "
+                f"quote=${quote:.8f} book=${book_price:.8f} "
+                f"diff=invalid max={limit:.4f}%"
+            )
+        diff_pct = abs(float(quote) - book_price) / book_price * 100.0
+        if diff_pct > limit:
+            return (
+                f"quote_book_mismatch {side}={exchange} "
+                f"quote=${float(quote):.8f} book=${book_price:.8f} "
+                f"diff={diff_pct:.4f}% max={limit:.4f}%"
+            )
+        return ""
+
+    buy_reason = _check("buy", buy_exchange, buy_quote_ask, top_book_price(buy_book_asks))
+    if buy_reason:
+        return f"{buy_reason} symbol={symbol} route={buy_exchange}->{sell_exchange}"
+
+    sell_reason = _check("sell", sell_exchange, sell_quote_bid, top_book_price(sell_book_bids))
+    if sell_reason:
+        return f"{sell_reason} symbol={symbol} route={buy_exchange}->{sell_exchange}"
+
+    return ""
+
+
 def evaluate_slippage_policy(
     buy_slip: SlippageResult,
     sell_slip: SlippageResult,

@@ -827,14 +827,23 @@ class ExchangeInfoManager:
                     except (InvalidOperation, TypeError, ValueError):
                         pass
 
+            # Bitfinex pair-info does not expose a fixed decimal tick size.
+            # Older code treated fields 8/9 as precision, but live rows contain
+            # values like 0.5/0.25 for XLM and 0.3/0.15 for ADA. Coercing those
+            # to int produced quote_precision=1, flooring sub-dollar prices to
+            # 0.1 and creating fake arbitrage. Keep a fine fallback rule for
+            # validation helpers; live market quotes are no longer rounded by
+            # these static rules.
             price_prec = 5
-            for idx in (5, 8, 9):
+            for idx in (5,):
                 if len(info) > idx and info[idx] not in (None, ""):
                     try:
-                        price_prec = max(1, int(float(info[idx])))
-                        break
+                        candidate = float(info[idx])
                     except (ValueError, TypeError):
-                        pass
+                        continue
+                    if candidate.is_integer() and candidate >= 2:
+                        price_prec = int(candidate)
+                        break
 
             lot_step = Decimal("0.00000001")
             tick_size = Decimal("1").scaleb(-price_prec)

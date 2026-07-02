@@ -22,6 +22,7 @@ from slippage import (
     compute_buy_slippage,
     compute_sell_slippage,
     evaluate_slippage_policy,
+    quote_book_mismatch_reason,
 )
 from config import (
     ACTIVE_EXCHANGES,
@@ -2216,15 +2217,9 @@ class ArbitrageMonitor:
                             continue
                         self._fresh_samples[ex] += 1
                     book_age = now - book_recv_at if book_recv_at and book_recv_at > 0 else -1.0
-                    # D-03: Round prices to tick size (corrects float imprecision)
-                    if self._exchange_info:
-                        from decimal import Decimal
-                        bid_f = float(self._exchange_info.round_price(
-                            ex, symbol, Decimal(str(bid_f))
-                        ))
-                        ask_f = float(self._exchange_info.round_price(
-                            ex, symbol, Decimal(str(ask_f))
-                        ))
+                    # Do not round live market quotes here. Market-order
+                    # simulation must use executable top-of-book prices; static
+                    # tick rules are only safe for explicit limit-order requests.
                     bid_depth = bid_f * bid_qty_f if bid_qty_f > 0 else float("inf")
                     ask_depth = ask_f * ask_qty_f if ask_qty_f > 0 else float("inf")
                     exchange_prices.append((ex, bid_f, ask_f, bid_depth, ask_depth, bids_f, asks_f, book_age))
@@ -2257,16 +2252,8 @@ class ArbitrageMonitor:
                         continue
                     if bid_f <= 0 or ask_f <= 0:
                         continue
-                    if self._exchange_info:
-                        from decimal import Decimal
-                        bid_rounded = self._exchange_info.round_price(
-                            fetcher.exchange_name, symbol, Decimal(str(bid_f))
-                        )
-                        ask_rounded = self._exchange_info.round_price(
-                            fetcher.exchange_name, symbol, Decimal(str(ask_f))
-                        )
-                        bid_f = float(bid_rounded)
-                        ask_f = float(ask_rounded)
+                    # Keep raw live quotes. Rounding here can create fake
+                    # spreads when exchange rule precision is incomplete.
                     try:
                         bid_qty_f = float(ps.bid_qty) if ps.bid_qty else 0.0
                         ask_qty_f = float(ps.ask_qty) if ps.ask_qty else 0.0
@@ -2338,6 +2325,25 @@ class ArbitrageMonitor:
                     )
                     if not age_ok:
                         self._record_book_age_skip(symbol, ex_buy, ex_sell, age_reason)
+                        continue
+
+                    mismatch_reason = quote_book_mismatch_reason(
+                        symbol,
+                        ex_buy,
+                        ex_sell,
+                        ask_i,
+                        bid_j,
+                        asks_i,
+                        bids_j,
+                    )
+                    if mismatch_reason:
+                        self._record_slippage_guard_skip(
+                            symbol,
+                            ex_buy,
+                            ex_sell,
+                            mismatch_reason,
+                            min_depth,
+                        )
                         continue
 
                     spread_pct = (bid_j - ask_i) / ask_i * 100
@@ -2736,6 +2742,25 @@ class ArbitrageMonitor:
 
                         # Execute the trade or count the skip
                         if can_trade:
+                            mismatch_reason = quote_book_mismatch_reason(
+                                sym,
+                                buy_ex,
+                                sell_ex,
+                                ask_p,
+                                bid_p,
+                                best_buy_asks,
+                                best_sell_bids,
+                            )
+                            if mismatch_reason:
+                                self._record_slippage_guard_skip(
+                                    sym,
+                                    buy_ex,
+                                    sell_ex,
+                                    mismatch_reason,
+                                    trade_size,
+                                )
+                                self._balance.skipped_trades += 1
+                                continue
                             buy_slip_actual = compute_buy_slippage(best_buy_asks, trade_size)
                             sell_slip_actual = compute_sell_slippage(best_sell_bids, trade_size)
                             slip_policy_actual = self._evaluate_slippage_policy(
@@ -2802,12 +2827,28 @@ class ArbitrageMonitor:
                             buy_fee_model = str(buy_fee_info["fee_model"])
                             sell_fee_model = str(sell_fee_info["fee_model"])
                             actual_slippage = slip_policy_actual.adjusted_total_pct
-                            exec_buy_price = ask_p * (
-                                1.0 + slip_policy_actual.adjusted_buy_pct / 100.0
+                            raw_buy_slippage = max(0.0, float(buy_slip_actual.slippage_pct))
+                            raw_sell_slippage = max(0.0, float(sell_slip_actual.slippage_pct))
+                            buy_effective_price = (
+                                buy_slip_actual.effective_price
+                                if buy_slip_actual.effective_price > 0
+                                else ask_p
                             )
-                            exec_sell_price = bid_p * (
-                                1.0 - slip_policy_actual.adjusted_sell_pct / 100.0
+                            sell_effective_price = (
+                                sell_slip_actual.effective_price
+                                if sell_slip_actual.effective_price > 0
+                                else bid_p
                             )
+                            buy_safety_pct = max(
+                                0.0,
+                                slip_policy_actual.adjusted_buy_pct - raw_buy_slippage,
+                            )
+                            sell_safety_pct = max(
+                                0.0,
+                                slip_policy_actual.adjusted_sell_pct - raw_sell_slippage,
+                            )
+                            exec_buy_price = buy_effective_price * (1.0 + buy_safety_pct / 100.0)
+                            exec_sell_price = sell_effective_price * (1.0 - sell_safety_pct / 100.0)
                             if exec_buy_price <= 0 or exec_sell_price <= 0:
                                 self._low_profit_skips += 1
                                 self._balance.skipped_trades += 1

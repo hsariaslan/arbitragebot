@@ -45,6 +45,7 @@ from slippage import (
     compute_buy_slippage,
     compute_sell_slippage,
     evaluate_slippage_policy,
+    quote_book_mismatch_reason,
 )
 
 if TYPE_CHECKING:
@@ -1049,6 +1050,16 @@ class SymbolOptimizer:
                         or not self._book_age_ok(ex_sell, sell_book_age)
                     ):
                         self._book_age_score_skips += 1
+                        continue
+                    if quote_book_mismatch_reason(
+                        symbol,
+                        ex_buy,
+                        ex_sell,
+                        ask_i,
+                        bid_j,
+                        asks_i,
+                        bids_j,
+                    ):
                         continue
                     spread_pct = (bid_j - ask_i) / ask_i * 100
                     if self._fee_manager:
