@@ -364,7 +364,7 @@ SCORE_STABILITY_FACTOR: float = 0.5     # Reject if current < peak × this
 PROMOTION_THRESHOLD: float = 0.0001      # Min score to enter watchlist
 DEMOTION_THRESHOLD: float = 0.0          # Score below which demotion timer starts
 DEMOTION_PERIOD_SECONDS: int = 1800       # How long below threshold before demotion
-MIN_NET_PROFIT_PCT: float = 0.01         # Min net% to execute a trade (filter marginal)
+MIN_NET_PROFIT_PCT: float = 0.06         # Min immediate net% to execute a trade after taker fees/slippage
 REBALANCE_COOLDOWN_SECONDS: float = 10   # Seconds between rebalances per exchange/direction
 REBALANCE_ROI_HORIZON: int = 1800        # Max seconds to recoup rebalance cost
 ADAPTIVE_MODE: bool = True               # Enable adaptive trade sizing and smart rebalancing
@@ -404,7 +404,7 @@ TRADING_FLOAT_OVERFLOW_MULTIPLIER: float = 1.5  # Overflow→custody when float 
 # Simulation realism (configurable via settings page)
 SPREAD_PERSISTENCE_TICKS: int = 1           # Consecutive ticks spread must persist before executing (0=instant)
 EVENT_DRIVEN_SELLER_PENALTY_PCT: float = 0.02  # Scoring penalty % when event-driven exchange is seller
-ONE_LEG_FAILURE_RATE: float = 0.02          # Probability of simulated one-legged failure per trade (0=disabled)
+ONE_LEG_FAILURE_RATE: float = 0.0           # Probability of simulated one-legged failure per trade (0=disabled)
 ONE_LEG_UNWIND_SLIPPAGE_MULT: float = 1.5   # Slippage multiplier for emergency unwind trades
 MAX_POSITION_MULTIPLIER: float = 3.0        # Max accumulated crypto per symbol per buyer exchange (× trade_amount, 0=unlimited). Lowered from 5.0 in v0.27 (S20 showed 76% pos_cap skip rate at 2.0).
 

@@ -1079,12 +1079,15 @@ class BalanceTracker:
         symbol: str,
         trade_amount: float,
         prices: dict[str, float],
-        max_external_fee_usd: float = 0.10,
+        max_external_fee_usd: float | None = 0.10,
     ) -> dict:
         """Dry-run whether a missed trade can be fixed as a cheap refill.
 
         Used by weak-regime gating: allow balance refills that are local or
         near-free, but keep expensive cross-exchange rotation suppressed.
+        The cap is applied to the total planned refill fee, including internal
+        taker costs, so "refill-only" cannot quietly burn fees before a config
+        has proven a positive edge.
         The actual rebalance still runs normal cooldown/ROI/hourly-cap checks.
         """
         sell_price = prices.get(symbol, 0.0)
@@ -1113,14 +1116,35 @@ class BalanceTracker:
                 "reason": ";".join(str(p.get("reason", "blocked")) for p in blocked),
                 "plan": plan,
             }
+        planned_fee = sum(
+            max(0.0, float(p.get("fee_usd", 0.0) or 0.0))
+            for p in plan
+        )
+        fee_cap = (
+            max(0.0, float(max_external_fee_usd))
+            if max_external_fee_usd is not None
+            else float("inf")
+        )
+        if planned_fee > fee_cap:
+            return {
+                "allowed": False,
+                "reason": f"refill_fee>${fee_cap:.2f}",
+                "plan": plan,
+                "fee_usd": planned_fee,
+            }
         types = ",".join(str(p.get("type", "unknown")) for p in plan)
-        return {"allowed": True, "reason": f"cheap_refill:{types}", "plan": plan}
+        return {
+            "allowed": True,
+            "reason": f"cheap_refill:{types}",
+            "plan": plan,
+            "fee_usd": planned_fee,
+        }
 
     def _preview_usdt_refill(
         self,
         exchange: str,
         prices: dict[str, float],
-        max_external_fee_usd: float,
+        max_external_fee_usd: float | None,
     ) -> dict:
         rebal = self.compute_rebalance_amount(exchange) if self._adaptive_mode else self._rebalance_amount
         buf = self._rebalance_buffer
@@ -1155,7 +1179,8 @@ class BalanceTracker:
             external_cost = self._get_withdrawal_fee(external_source)
 
         if external_source and external_cost <= internal_cost:
-            if external_cost <= max_external_fee_usd:
+            fee_cap = float("inf") if max_external_fee_usd is None else max_external_fee_usd
+            if external_cost <= fee_cap:
                 return {
                     "allowed": True,
                     "type": "external_usdt",
@@ -1165,7 +1190,7 @@ class BalanceTracker:
                 }
             return {
                 "allowed": False,
-                "reason": f"external_usdt_fee>${max_external_fee_usd:.2f}",
+                "reason": f"external_usdt_fee>${fee_cap:.2f}",
                 "type": "external_usdt",
                 "fee_usd": external_cost,
             }
@@ -1193,7 +1218,7 @@ class BalanceTracker:
         exchange: str,
         symbol: str,
         price: float,
-        max_external_fee_usd: float,
+        max_external_fee_usd: float | None,
     ) -> dict:
         rebal = self.compute_rebalance_amount(exchange, symbol) if self._adaptive_mode else self._rebalance_amount
         crypto_sources = []
@@ -1218,7 +1243,8 @@ class BalanceTracker:
             best_source = min(crypto_sources, key=lambda ex: self._get_withdrawal_fee(ex))
             external_cost = self._get_withdrawal_fee(best_source)
             if external_cost < internal_buy_cost:
-                if external_cost <= max_external_fee_usd:
+                fee_cap = float("inf") if max_external_fee_usd is None else max_external_fee_usd
+                if external_cost <= fee_cap:
                     return {
                         "allowed": True,
                         "type": "external_crypto",
@@ -1228,7 +1254,7 @@ class BalanceTracker:
                     }
                 return {
                     "allowed": False,
-                    "reason": f"external_crypto_fee>${max_external_fee_usd:.2f}",
+                    "reason": f"external_crypto_fee>${fee_cap:.2f}",
                     "type": "external_crypto",
                     "fee_usd": external_cost,
                 }
@@ -1248,7 +1274,8 @@ class BalanceTracker:
         if eligible:
             best_source = min(eligible, key=lambda ex: self._get_withdrawal_fee(ex))
             external_cost = self._get_withdrawal_fee(best_source)
-            if external_cost <= max_external_fee_usd:
+            fee_cap = float("inf") if max_external_fee_usd is None else max_external_fee_usd
+            if external_cost <= fee_cap:
                 return {
                     "allowed": True,
                     "type": "external_usdt_buy",
@@ -1258,7 +1285,7 @@ class BalanceTracker:
                 }
             return {
                 "allowed": False,
-                "reason": f"external_usdt_buy_fee>${max_external_fee_usd:.2f}",
+                "reason": f"external_usdt_buy_fee>${fee_cap:.2f}",
                 "type": "external_usdt_buy",
                 "fee_usd": external_cost,
             }
@@ -2434,6 +2461,64 @@ class BalanceTracker:
             bnb_price,
             mutate=True,
         )
+
+    def apply_execution_loss(
+        self,
+        amount_usd: float,
+        preferred_exchange: str = "",
+        context: str = "",
+    ) -> float:
+        """Debit a realized execution loss from simulated cash balances.
+
+        This is used for one-legged failure drills where reported P&L is
+        reduced by an unwind cost. Debiting the wallet keeps portfolio value
+        aligned with the adjusted P&L instead of creating a display-only loss.
+        """
+        remaining = max(0.0, float(amount_usd))
+        if remaining <= 0:
+            return 0.0
+
+        ordered: list[str] = []
+        if preferred_exchange and preferred_exchange in self.usdt:
+            ordered.append(preferred_exchange)
+        ordered.extend(
+            ex for ex, _ in sorted(
+                self.usdt.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            if ex not in ordered
+        )
+
+        debited = 0.0
+        for exchange in ordered:
+            if remaining <= 1e-12:
+                break
+            available = max(0.0, float(self.usdt.get(exchange, 0.0)))
+            if available <= 0:
+                continue
+            take = min(available, remaining)
+            self.usdt[exchange] -= take
+            remaining -= take
+            debited += take
+
+        if remaining > 1e-9:
+            fallback = preferred_exchange if preferred_exchange in self.usdt else (ordered[0] if ordered else "")
+            if fallback:
+                self.usdt[fallback] = float(self.usdt.get(fallback, 0.0)) - remaining
+                debited += remaining
+                logger.warning(
+                    f"[Balance] EXECUTION_LOSS_OVERDRAFT {context}: "
+                    f"debited remaining ${remaining:.4f} from {fallback}"
+                )
+                remaining = 0.0
+
+        logger.info(
+            f"[Balance] EXECUTION_LOSS_DEBIT {context}: "
+            f"amount=${amount_usd:.4f} debited=${debited:.4f} "
+            f"preferred={preferred_exchange or 'auto'}"
+        )
+        return debited
 
     def get_portfolio_value(
         self,

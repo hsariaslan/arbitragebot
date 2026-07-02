@@ -139,7 +139,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [promotionThreshold, setPromotionThreshold] = useState(currentSettings.promotion_threshold ?? 0.0001);
   const [demotionThreshold, setDemotionThreshold] = useState(currentSettings.demotion_threshold ?? 0.0);
   const [demotionPeriod, setDemotionPeriod] = useState(currentSettings.demotion_period ?? 600);
-  const [minNetProfitPct, setMinNetProfitPct] = useState(currentSettings.min_net_profit_pct ?? 0.02);
+  const [minNetProfitPct, setMinNetProfitPct] = useState(currentSettings.min_net_profit_pct ?? 0.06);
   const [rebalanceCooldown, setRebalanceCooldown] = useState(currentSettings.rebalance_cooldown ?? 30);
   const [minMissesBeforeRebalance, setMinMissesBeforeRebalance] = useState(currentSettings.min_misses_before_rebalance ?? 15);
   const [rebalanceRoiHorizon, setRebalanceRoiHorizon] = useState(currentSettings.rebalance_roi_horizon ?? 1800);
@@ -167,7 +167,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
   const [ipWhitelist, setIpWhitelist] = useState((currentSettings.ip_whitelist ?? []).join(', '));
   const [spreadPersistenceTicks, setSpreadPersistenceTicks] = useState(currentSettings.spread_persistence_ticks ?? 1);
   const [evdSellerPenalty, setEvdSellerPenalty] = useState(currentSettings.event_driven_seller_penalty_pct ?? 0.05);
-  const [oneLegFailureRate, setOneLegFailureRate] = useState(currentSettings.one_leg_failure_rate ?? 0.02);
+  const [oneLegFailureRate, setOneLegFailureRate] = useState(currentSettings.one_leg_failure_rate ?? 0);
   const [oneLegUnwindSlippageMult, setOneLegUnwindSlippageMult] = useState(currentSettings.one_leg_unwind_slippage_mult ?? 1.5);
   const [maxPositionMultiplier, setMaxPositionMultiplier] = useState(currentSettings.max_position_multiplier ?? 5.0);
   // Funding-aware scoring (Phase A)
@@ -324,7 +324,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setPromotionThreshold(currentSettings.promotion_threshold ?? 0.0001);
       setDemotionThreshold(currentSettings.demotion_threshold ?? 0.0);
       setDemotionPeriod(currentSettings.demotion_period ?? 600);
-      setMinNetProfitPct(currentSettings.min_net_profit_pct ?? 0.02);
+      setMinNetProfitPct(currentSettings.min_net_profit_pct ?? 0.06);
       setRebalanceCooldown(currentSettings.rebalance_cooldown ?? 30);
       setMinMissesBeforeRebalance(currentSettings.min_misses_before_rebalance ?? 15);
       setRebalanceRoiHorizon(currentSettings.rebalance_roi_horizon ?? 1800);
@@ -349,7 +349,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
       setExecutionMode(currentSettings.execution_mode ?? 'simulation');
       setSpreadPersistenceTicks(currentSettings.spread_persistence_ticks ?? 1);
       setEvdSellerPenalty(currentSettings.event_driven_seller_penalty_pct ?? 0.05);
-      setOneLegFailureRate(currentSettings.one_leg_failure_rate ?? 0.02);
+      setOneLegFailureRate(currentSettings.one_leg_failure_rate ?? 0);
       setOneLegUnwindSlippageMult(currentSettings.one_leg_unwind_slippage_mult ?? 1.5);
       setMaxPositionMultiplier(currentSettings.max_position_multiplier ?? 5.0);
       setDiversificationFloorEnabled(currentSettings.diversification_floor_enabled ?? true);

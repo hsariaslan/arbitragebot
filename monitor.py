@@ -28,6 +28,7 @@ from config import (
     ACTIVE_SYMBOLS,
     MAX_DATA_AGE_SECONDS,
     MONITOR_INTERVAL_SECONDS,
+    ONE_LEG_FAILURE_RATE,
     TRADE_AMOUNT_USD,
 )
 
@@ -106,6 +107,8 @@ class SimulatedTrade:
     sim_slippage_pct: float = 0.0
     sim_buy_slippage_pct: float = 0.0
     sim_sell_slippage_pct: float = 0.0
+    normal_profit_usd: float = 0.0
+    one_leg_unwind_cost_usd: float = 0.0
     # Demo execution results (Phase 2: populated when execution_mode=demo)
     demo_buy_price: float = 0.0
     demo_sell_price: float = 0.0
@@ -334,7 +337,7 @@ class ArbitrageMonitor:
         self._event_driven_exchanges: set[str] = {
             f.exchange_name for f in fetchers if f.IS_EVENT_DRIVEN
         }
-        self._one_leg_failure_rate: float = 0.02
+        self._one_leg_failure_rate: float = ONE_LEG_FAILURE_RATE
         self._one_leg_unwind_slippage_mult: float = 1.5
         self._one_leg_sim_count: int = 0
         self._one_leg_sim_cost: float = 0.0
@@ -727,12 +730,20 @@ class ArbitrageMonitor:
         base = self._trade_amount * symbol_mult * net_mult * self._anomaly.trade_size_multiplier
         probe = min(max_by_usdt, max_by_crypto, base)
 
+        cap_limited = False
         if self._max_position_multiplier > 0 and buy_price > 0:
             cap = self._trade_amount * self._max_position_multiplier
             crypto_qty_buy = self._balance.crypto.get(buy_ex, {}).get(symbol, 0.0)
             crypto_val_buy = crypto_qty_buy * buy_price if crypto_qty_buy > 0 else 0.0
             remaining_cap = max(0.0, cap - crypto_val_buy)
+            cap_limited = remaining_cap < min_trade
             probe = min(probe, remaining_cap)
+
+        # Position cap is not fixable by a rebalance. If this buyer already
+        # holds the max allowed inventory, do not let the route win the symbol
+        # and then fail later with trade_size=0.
+        if cap_limited:
+            return 0.0
 
         # If current balances cannot support even the min trade, keep the
         # configured amount for scoring so the route can still trigger the
@@ -901,6 +912,18 @@ class ArbitrageMonitor:
             hedge_summary=hedge_summary,
         )
 
+    def _hedge_accounting_components(self) -> tuple[float, float, float]:
+        """Return (funding, execution_fees, net) for hedge accounting."""
+        if self._hedge_manager is None:
+            return 0.0, 0.0, 0.0
+        try:
+            hedge_state = self._hedge_manager.get_debug_state()
+            funding = float(hedge_state.get("cumulative_funding_usd", 0.0) or 0.0)
+            fees = float(hedge_state.get("cumulative_execution_fees_usd", 0.0) or 0.0)
+            return funding, fees, funding - fees
+        except Exception:
+            return 0.0, 0.0, 0.0
+
     def get_net_profit_stats(self) -> dict:
         """Compute rolling hourly net profit stats."""
         now = time.time()
@@ -918,7 +941,8 @@ class ArbitrageMonitor:
         pending_cashback = (
             self._fee_manager._total_pending_cashback if self._fee_manager else 0.0
         )
-        net_profit = trading_pnl - transfer_fees + credited_cashback
+        hedge_funding, hedge_fees, hedge_net = self._hedge_accounting_components()
+        net_profit = trading_pnl - transfer_fees + credited_cashback + hedge_net
 
         # Rolling 1-hour window — `self._trades` is now bounded at 5000,
         # so the scan is O(min(5000, N)) instead of O(N) growing forever.
@@ -958,6 +982,9 @@ class ArbitrageMonitor:
             "transfer_fees": round(transfer_fees, 4),
             "credited_cashback": round(credited_cashback, 4),
             "pending_cashback": round(pending_cashback, 4),
+            "hedge_funding": round(hedge_funding, 4),
+            "hedge_execution_fees": round(hedge_fees, 4),
+            "hedge_net": round(hedge_net, 4),
             "is_profitable": net_profit > 0,
             "referrer_earnings_total": round(referrer_earnings, 4),
         }
@@ -1068,10 +1095,25 @@ class ArbitrageMonitor:
                 if not preview.get("allowed"):
                     return False, f"regime_weak_refill_only ({preview.get('reason', 'blocked')})"
 
-        # Quiet-period gate: when no trade has fired for the configured
-        # pause window, suppress rebalance attempts. Transfer fees during
-        # quiet windows aren't matched by trade volume — pure cost.
+        # Quiet-period gate: after a long no-trade window, suppress expensive
+        # rotation but still allow bounded refill-only moves. Without this, a
+        # quiet config can stay inventory-starved forever because the trade
+        # that would end quiet mode never gets a chance to refill.
         if self.in_quiet_period():
+            if symbol and trade_amount is not None and prices is not None:
+                preview = self._balance.preview_refill_rebalance(
+                    buy_ex,
+                    sell_ex,
+                    symbol,
+                    trade_amount,
+                    prices,
+                    max_external_fee_usd=0.02,
+                )
+                if preview.get("allowed"):
+                    return True, ""
+                return False, (
+                    f"quiet_period_refill_only ({preview.get('reason', 'blocked')})"
+                )
             return False, (
                 f"quiet_period (no trades for "
                 f"{self._quiet_period_pause_minutes:.0f}m)"
@@ -2231,9 +2273,19 @@ class ArbitrageMonitor:
                     except (ValueError, TypeError):
                         bid_qty_f = 0.0
                         ask_qty_f = 0.0
+                    bids = ps.bids
+                    asks = ps.asks
+                    if not bids and bid_qty_f > 0:
+                        bids = [(str(bid_f), str(bid_qty_f))]
+                        if book_age < 0 and ps.received_at > 0:
+                            book_age = now - ps.received_at
+                    if not asks and ask_qty_f > 0:
+                        asks = [(str(ask_f), str(ask_qty_f))]
+                        if book_age < 0 and ps.received_at > 0:
+                            book_age = now - ps.received_at
                     bid_depth = bid_f * bid_qty_f if bid_qty_f > 0 else float("inf")
                     ask_depth = ask_f * ask_qty_f if ask_qty_f > 0 else float("inf")
-                    exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, bid_depth, ask_depth, ps.bids, ps.asks, book_age))
+                    exchange_prices.append((fetcher.exchange_name, bid_f, ask_f, bid_depth, ask_depth, bids, asks, book_age))
 
             if len(exchange_prices) < 2:
                 continue
@@ -2308,6 +2360,9 @@ class ArbitrageMonitor:
                         ask_i,
                         bid_j,
                     )
+                    if slippage_probe_size <= 0:
+                        self._position_cap_skips += 1
+                        continue
 
                     # Compute slippage estimate using the side-effect-free
                     # candidate size, not always the configured base amount.
@@ -2379,6 +2434,8 @@ class ArbitrageMonitor:
                         best_raw_sell_ex = ex_sell
 
                     net_pct = spread_pct - fee_pct - slippage_pct
+                    if net_pct <= 0:
+                        continue
                     profit_usd = slippage_probe_size * (net_pct / 100)
 
                     if scoring_net > best_scoring_net:
@@ -2895,6 +2952,8 @@ class ArbitrageMonitor:
 
                         # One-legged failure simulation
                         one_leg_flag = False
+                        normal_profit = actual_profit
+                        one_leg_unwind_cost = 0.0
                         if self._one_leg_failure_rate > 0 and random.random() < self._one_leg_failure_rate:
                             failed_leg = random.choice(["buy", "sell"])
                             unwind_fee = buy_fee_rate if failed_leg == "buy" else sell_fee_rate
@@ -2904,10 +2963,22 @@ class ArbitrageMonitor:
                             self._one_leg_sim_count += 1
                             self._one_leg_sim_cost += unwind_cost
                             one_leg_flag = True
+                            one_leg_unwind_cost = unwind_cost
+                            debited = (
+                                self._balance.apply_execution_loss(
+                                    unwind_cost,
+                                    preferred_exchange=sell_ex,
+                                    context=f"ONE_LEG_SIM {sym} {buy_ex}->{sell_ex}",
+                                )
+                                if self._balance
+                                else 0.0
+                            )
                             logger.info(
                                 f"[Trade] ONE_LEG_SIM #{self._cumulative_trade_count + 1} {sym} "
                                 f"{buy_ex}->{sell_ex}: failed_leg={failed_leg} "
+                                f"normal_profit=${normal_profit:.4f} "
                                 f"unwind_cost=${unwind_cost:.4f} "
+                                f"wallet_debit=${debited:.4f} "
                                 f"adjusted_profit=${actual_profit:.4f}"
                             )
 
@@ -2933,6 +3004,8 @@ class ArbitrageMonitor:
                             sim_slippage_pct=actual_slippage,
                             sim_buy_slippage_pct=buy_slip_actual.slippage_pct,
                             sim_sell_slippage_pct=sell_slip_actual.slippage_pct,
+                            normal_profit_usd=normal_profit,
+                            one_leg_unwind_cost_usd=one_leg_unwind_cost,
                             one_leg_simulated=one_leg_flag,
                         )
                         self._trades.append(trade)
@@ -3174,7 +3247,9 @@ class ArbitrageMonitor:
             trading_pnl = self._cumulative_pnl
             xfer_fees = self._balance.total_transfer_fees
             ext_fees = self._balance.total_external_transfer_fees
-            net = trading_pnl - xfer_fees + credited_cb
+            hedge_funding, hedge_fees, hedge_net = self._hedge_accounting_components()
+            spot_net = trading_pnl - xfer_fees + credited_cb
+            net = spot_net + hedge_net
             hourly = net / hours if hours > 0 else 0.0
             ref_earn = (
                 self._fee_manager._total_referrer_earnings
@@ -3188,6 +3263,9 @@ class ArbitrageMonitor:
                 f"pnl=${trading_pnl:.2f}, xfer_fees=${xfer_fees:.2f}, "
                 f"cashback=${credited_cb + pending_cb:.2f} "
                 f"(credited=${credited_cb:.2f} pending=${pending_cb:.2f}), "
+                f"spot_net=${spot_net:.2f}, "
+                f"hedge_net=${hedge_net:+.2f} "
+                f"(funding=${hedge_funding:+.2f} fut_fees=${hedge_fees:.2f}), "
                 f"net=${net:.2f}, $/hr=${hourly:.2f}, "
                 f"ref_earn=${ref_earn:.2f}, "
                 f"sz0={size_zero_total}, rebal_blocked={rebal_blocked_total}, "
@@ -3403,6 +3481,7 @@ class ArbitrageMonitor:
         total_trades = self._cumulative_trade_count
         trading_pnl = self._cumulative_pnl
         transfer_fees = self._balance.total_transfer_fees if self._balance else 0.0
+        hedge_funding, hedge_fees, hedge_net = self._hedge_accounting_components()
 
         lines: list[str] = []
         lines.append(f"\n=== REPORT ({minutes:.1f}min, {self._tick_count} ticks) ===")
@@ -3415,8 +3494,14 @@ class ArbitrageMonitor:
         lines.append(
             f"  P&L: ${trading_pnl:+.4f} trading, "
             f"${-transfer_fees:+.4f} fees, "
-            f"${trading_pnl - transfer_fees:+.4f} net"
+            f"${hedge_net:+.4f} hedge, "
+            f"${trading_pnl - transfer_fees + hedge_net:+.4f} net"
         )
+        if hedge_funding or hedge_fees:
+            lines.append(
+                f"  Hedge: ${hedge_funding:+.4f} funding, "
+                f"${-hedge_fees:+.4f} futures fees"
+            )
         if self._low_profit_skips > 0:
             lines.append(f"  Low-profit skips: {self._low_profit_skips}")
 

@@ -202,6 +202,8 @@ class HedgeManager:
         self._reserve_status: dict = self._make_reserve_status("unknown")
         self._last_bnb_reserve_status_log_ts: float = 0.0
         self._last_bnb_reserve_status_signature: str = ""
+        self._last_spot_bnb_skip_log_ts: float = 0.0
+        self._last_spot_bnb_skip_signature: str = ""
         self._sync_balance_bnb_reserve_floor()
 
         # Per-symbol shadow state
@@ -853,6 +855,30 @@ class HedgeManager:
             f"spot_buy_err={status_payload.get('last_spot_buy_error', '') or '-'}"
         )
 
+    def _log_spot_bnb_buy_skip(
+        self,
+        now: float,
+        label: str,
+        buy_attempt: int,
+        reason: str,
+        *,
+        warning: bool = False,
+    ) -> None:
+        """Log repeated spot-BNB buy skips on change or every five minutes."""
+        signature = f"{label}|{reason}"
+        if (
+            signature == self._last_spot_bnb_skip_signature
+            and now - self._last_spot_bnb_skip_log_ts < 300.0
+        ):
+            return
+        self._last_spot_bnb_skip_signature = signature
+        self._last_spot_bnb_skip_log_ts = now
+        message = f"[Hedge] {label} attempt={buy_attempt}: {reason}"
+        if warning:
+            logger.warning(message)
+        else:
+            logger.info(message)
+
     # ── Sizing primitives ─────────────────────────────────────────────
 
     def compute_target_hedge_qty(self, spot_symbol: str) -> float:
@@ -1345,9 +1371,11 @@ class HedgeManager:
                             f"remaining=${remaining_usd:.2f}"
                         )
                         self._last_spot_bnb_buy_ts = now
-                        logger.info(
-                            f"[Hedge] SIM_SPOT_BNB_BUY_SKIPPED attempt={buy_attempt}: "
-                            f"{self._last_spot_bnb_buy_error}"
+                        self._log_spot_bnb_buy_skip(
+                            now,
+                            "SIM_SPOT_BNB_BUY_SKIPPED",
+                            buy_attempt,
+                            self._last_spot_bnb_buy_error,
                         )
                         break
                     buy_usd = remaining_usd * 1.001
@@ -1360,9 +1388,11 @@ class HedgeManager:
                             f"below_buy_min=${amounts['spot_buy_min_usd']:.2f}"
                         )
                         self._last_spot_bnb_buy_ts = now
-                        logger.info(
-                            f"[Hedge] SIM_SPOT_BNB_BUY_SKIPPED attempt={buy_attempt}: "
-                            f"{self._last_spot_bnb_buy_error}"
+                        self._log_spot_bnb_buy_skip(
+                            now,
+                            "SIM_SPOT_BNB_BUY_SKIPPED",
+                            buy_attempt,
+                            self._last_spot_bnb_buy_error,
                         )
                         break
                     result = self._balance.buy_spot_bnb_with_usdt(buy_usd, price)
@@ -1411,9 +1441,12 @@ class HedgeManager:
                             f"below_buy_min=${amounts['spot_buy_min_usd']:.2f}"
                         )
                         self._last_spot_bnb_buy_ts = now
-                        logger.warning(
-                            f"[Hedge] SPOT_BNB_BUY_SKIPPED attempt={buy_attempt}: "
-                            f"{self._last_spot_bnb_buy_error}"
+                        self._log_spot_bnb_buy_skip(
+                            now,
+                            "SPOT_BNB_BUY_SKIPPED",
+                            buy_attempt,
+                            self._last_spot_bnb_buy_error,
+                            warning=True,
                         )
                         break
 
@@ -2011,6 +2044,8 @@ class HedgeManager:
             "_bnb_fee_reserve_status": dict(self._bnb_fee_reserve_status),
             "_last_bnb_reserve_status_log_ts": self._last_bnb_reserve_status_log_ts,
             "_last_bnb_reserve_status_signature": self._last_bnb_reserve_status_signature,
+            "_last_spot_bnb_skip_log_ts": self._last_spot_bnb_skip_log_ts,
+            "_last_spot_bnb_skip_signature": self._last_spot_bnb_skip_signature,
             "_close_failure_backoff": {
                 sym: {
                     "retry_at": retry_at,
@@ -2049,6 +2084,12 @@ class HedgeManager:
         )
         self._last_bnb_reserve_status_signature = str(
             data.get("_last_bnb_reserve_status_signature", "")
+        )
+        self._last_spot_bnb_skip_log_ts = float(
+            data.get("_last_spot_bnb_skip_log_ts", 0.0)
+        )
+        self._last_spot_bnb_skip_signature = str(
+            data.get("_last_spot_bnb_skip_signature", "")
         )
         self._close_failure_backoff = {}
         now = time.time()
