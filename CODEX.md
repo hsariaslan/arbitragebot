@@ -10,6 +10,20 @@ Do not add current-version or release-history notes to `CLAUDE.md`. Keep runtime
 
 ## Version History
 
+### v0.35.0-beta — Profitability Gating & Market-Data Reliability
+
+- Fixed Bitfinex exchange-info parsing for the real row-array API response and added normal user-agent headers, so supported-symbol filtering now loads the actual Bitfinex symbol set instead of leaving all configured symbols subscribed.
+- Added Bitfinex historical pair overrides for `ALGOUSDT`, `ATOMUSDT`, and `BCHUSDT`, while filtering unsupported Bitfinex pairs such as `GRTUSDT` and `BNBUSDT` before websocket subscription.
+- Hardened MEXC depth liveness so depth sub-connections reconnect when no initial depth arrives, and depth updates now count toward fetcher liveness.
+- Added conservative top-of-book fallback from fresh best bid/ask quantities when full multi-level depth is absent, without inventing hidden liquidity.
+- Changed quiet-period rebalance behavior to allow bounded refill-only recovery while still blocking expensive rotation during dead windows.
+- Capped total refill-preview cost, including internal taker fees, before allowing refill-only rebalances.
+- Disabled one-leg failure drills by default and made one-leg unwind costs debit simulated wallets when drills are enabled.
+- Added all-in hedge accounting to net-profit/session reporting by including hedge funding minus futures execution fees.
+- Prevented position-capped or immediate-net-negative routes from winning symbol selection and blocking better executable routes.
+- Raised realistic per-config minimum immediate net thresholds in `settings.json` and `arbitragebot-configs.json` to avoid trades that cannot amortize maintenance/rebalance costs.
+- Throttled repeated Binance spot BNB buy-skip logs while preserving state-change diagnostics.
+
 ### v0.34.2-beta — Realism Guard & Simulation Noise Fixes
 
 - Fixed Bybit order-book depth handling to merge v5 snapshots and deltas instead of treating deltas as full books.

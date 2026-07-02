@@ -1678,3 +1678,160 @@ Implemented after the log audit as `v0.34.2-beta`:
 #### Working Tree State
 
 The audit notes were written first, then the follow-up fixes above were implemented and prepared for release as `v0.34.2-beta`.
+
+### Session #33 - 2026-07-02 Log Audit (`v0.34.2-beta`)
+
+#### Scope
+
+Analyzed `logs/bot-logs-2026-07-02-02-22-44.log` after the `v0.34.2-beta` realism fixes. The goal was to verify whether the July 1/2 simulation run was healthier and to identify remaining issues before any next code/config change.
+
+#### Log Window
+
+- Log span: `2026-07-01 02:45:22` through `2026-07-02 02:22:29`.
+- Runtime version: `v0.34.2-beta`.
+- Config count: 30.
+- Execution mode: simulation.
+- DemoCompare: configured for Binance, OKX, and Bybit, but correctly disabled because `execution_mode=simulation`.
+- No disk-full signal: no `No space left on device`.
+- No Binance Futures account-info rate-limit issue in this run: no `account-info`, `Way too many`, or `rate-limit` lines.
+- No traceback/crash signal: 11 `[ERROR]` lines, all transient websocket/opening-handshake errors.
+
+#### Aggregate Result
+
+The run is more honest than the earlier unrealistic runs, but still not profitable.
+
+- Latest parsed full session summaries: 12 configs.
+- Total latest-summary trades: 95.
+- Gross simulated P&L: `$1.55`.
+- Transfer fees: `$6.88`.
+- Credited cashback: `$0.43`.
+- Pending cashback: `$0.07`.
+- Latest net: `$-4.89`.
+- Positive net configs: 0.
+- Trade concentration: 94 of 95 trade events were `GRTUSDT`; 1 was `XMRUSDT`.
+- Logged transfer count by capacity telemetry: 200 transfers.
+- Rotations completed: 0.
+
+Latest summary winners were still negative:
+
+| Config | Trades | Gross P&L | Fees | Credited cashback | Net |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Group 1 / +Gate.io | 27 | `$0.49` | `$0.77` | `$0.12` | `$-0.16` |
+| Group 1 / +KuCoin | 23 | `$0.42` | `$0.74` | `$0.11` | `$-0.20` |
+| Group 1 / Aggressive | 7 | `$0.11` | `$0.40` | `$0.04` | `$-0.25` |
+| Group 2 / Medium-Aggressive | 4 | `$0.08` | `$0.43` | `$0.03` | `$-0.32` |
+| Group 1 / All 8 Exchanges | 28 | `$0.40` | `$1.59` | `$0.10` | `$-1.09` |
+
+#### What Improved
+
+- Portfolio inflation/hedge display issue did not reappear.
+- DemoCompare no longer pollutes forced simulation output.
+- Binance Futures account-info spam/rate-limit issue did not appear.
+- Rotation gate text now says it is using all transfer fees.
+- The realism diagnostics are much more useful: slippage, visible depth, missing books, and book age are split.
+- BNB reserve logic eventually reached healthy status after skipped buys.
+
+#### Issues Found
+
+1. Bitfinex supported-symbol filtering still failed in the actual run.
+
+   The fetcher still started with `63` symbols and logged `318` invalid subscription warnings across `28` unsupported symbols. Examples include `GRTUSDT`, `PENDLEUSDT`, `DYDXUSDT`, `BNBUSDT`, `SNXUSDT`, `APEUSDT`, and others. The log has no useful `ExchangeInfo`/filtered-symbol startup confirmation before the fetchers start. This means the previous Bitfinex filtering fix either did not execute early enough, did not receive supported-symbol data, or is not wired into the fetcher start path. This also makes Bitfinex-based consolidation/scoring assumptions unreliable.
+
+2. MEXC depth data is still unstable.
+
+   There were `495` logged `MEXC Depth sub-connection reconnected` lines, with the lifetime reconnect counter reaching `2480` by the end. Realism diagnostics repeatedly show `buy_book_missing_age MEXC` and `sell_book_missing_age MEXC` as top book-age causes. This points to either a continuing MEXC depth-stream stability issue or a depth timestamp propagation issue under the live multi-connection run.
+
+3. Trade density is too low after realistic filtering.
+
+   Across roughly 23.6 hours and 30 configs, only `95` trade events executed. The log has `782` `NO tradeable symbols` warnings and `28` `All symbols demoted` events. This is a better failure mode than fake profit, but it means the current strategy/config set is not finding enough real edge.
+
+4. The strategy remains net-negative after transfer costs.
+
+   Latest parsed configs produced only `$1.55` gross P&L while transfer fees consumed `$6.88`. Even with `$0.43` credited cashback, the aggregate latest net was `$-4.89`. Rotation suppression and consolidation suppression both occurred `2702` times, which confirms the new gate is blocking fee-worsening behavior, but the existing balances still paid too much transfer cost relative to trade edge.
+
+5. Rebalance/inventory recovery is still blocked too often.
+
+   There were `662` logged `[Rebalance] BLOCKED` events, and latest session counters summed to `19001` rebalance blocks. Many examples are quiet-period blocks after no trades. The guard prevents churn, but it also leaves configs stuck when they need inventory recovery. This is still an inventory-starvation/regime-gate balance problem.
+
+6. Realism guards dominate the run.
+
+   Latest summary counters across parsed configs:
+
+   - `book_age`: `2,093,957`
+   - `slip_guard`: `266,101`
+   - `visible_depth`: `29,744`
+   - `missing_book`: `0`
+   - `depth_shrink`: only `2`
+
+   Missing-book itself is fixed, but stale/missing-age books and slippage are now the dominant reject reasons. The low `depth_shrink` count also means the size-shrink rescue almost never activates, even when visible depth is close to required size.
+
+7. One-leg simulation still adds measurement noise.
+
+   There were `4` `ONE_LEG_SIM` events. Each produced a negative adjusted trade despite a positive pre-trade net percentage. This is useful as a failure drill, but it makes normal profitability measurement harder unless explicitly separated from normal trade statistics.
+
+8. Positive pre-trade net can still become negative realized trade profit under one-leg simulation.
+
+   Examples:
+
+   - `GRTUSDT OKX->Bitget`: `net=+0.0409%`, adjusted profit `$-0.0080`.
+   - `GRTUSDT Binance->Bitget`: `net=+0.0404%`, adjusted profit `$-0.0193`.
+   - `GRTUSDT Bybit->Bitget`: `net=+0.0744%`, adjusted profit `$-0.0122`.
+
+   These were tied to one-leg simulation, not ordinary fully-filled paths, but the reports should make that distinction clearer.
+
+9. BNB auto-reserve still has noisy skip behavior before recovery.
+
+   The log contains `178` `SIM_SPOT_BNB_BUY_SKIPPED` entries and `21` simulated BNB buys. The repeated skip pattern was usually local Binance spot USDT being below the buy minimum. Later the reserve became healthy, but the repeated skip logging should be cooled down or grouped by state so it remains diagnostic without being noisy.
+
+10. Capacity is still borderline on the current VPS.
+
+   Capacity telemetry:
+
+   - `334` capacity warnings.
+   - Latest sweep: average `1423ms`, p95 `1712ms`, budget `1500ms`.
+   - Worst average sweep: `2124ms`.
+   - Worst p95: `3537ms`.
+   - Latest heap: `1424MB`.
+   - Latest tick objects: about `2.11M`.
+
+   The 1 vCPU / 2 GB VPS can run this, but it is close to the edge for 30 configs plus strict depth/book-age processing.
+
+11. Exchange connectivity errors are transient but still present.
+
+   The 11 error lines were OKX close-frame errors, KuCoin close-frame errors, one Bitget close-frame error, and generic opening-handshake failures. They did not crash the bot, but they can feed directly into stale-book skips.
+
+12. OKX withdrawal-fee validation still lacks auth in this run.
+
+   Startup logs show: `OKX: Request header OK-ACCESS-KEY can not be empty.` This is not fatal because configured fees are still used, but it means live fee validation for OKX was not available from the current environment.
+
+#### Interpretation
+
+The realism work is not too strict in the sense of creating fake failures. It is revealing that, after slippage, visible-depth, stale-book, transfer-fee, and one-leg risk are accounted for, the current configs do not have enough durable edge. The highest priority is not to loosen every guard. The priority is to fix broken market-data assumptions first, then tune configs based on routes that survive real depth and fee checks.
+
+#### Recommended Next Fixes
+
+1. Fix Bitfinex symbol filtering at the fetcher start boundary and log before/after symbol counts per exchange.
+2. Audit MEXC depth timestamp propagation and reconnect behavior under split depth connections.
+3. Separate one-leg drill metrics from normal trade profitability metrics.
+4. Add a BNB reserve skip cooldown/state-change log so repeated `below_buy_min` does not spam.
+5. Revisit rebalance quiet-period logic so inventory recovery can happen when a config is stuck, without reopening fee churn.
+6. Tune configs around the only families that traded: Group 1 exchange-ablation variants and smaller Group 2 sizes.
+7. Keep the current realism guards until the broken market-data paths are fixed; otherwise the bot will go back to accepting fake edge.
+
+#### Working Tree State
+
+The initial audit only documented the log findings. Follow-up fixes were then implemented and prepared for `v0.35.0-beta`.
+
+#### Follow-Up Fixes Implemented
+
+- Fixed Bitfinex exchange-info parsing for the real API row-array response and added a normal user-agent header for public Bitfinex metadata requests.
+- Added Bitfinex historical symbol overrides for `ALGOUSDT`, `ATOMUSDT`, and `BCHUSDT`, while unsupported Bitfinex pairs are filtered before subscription.
+- Fixed MEXC depth liveness so split depth connections reconnect when no initial depth arrives and depth updates refresh fetcher liveness.
+- Added conservative top-of-book fallback from fresh best bid/ask quantities when full depth is missing, so visible top-level liquidity can still be evaluated without assuming hidden depth.
+- Changed quiet-period rebalance gating to allow cheap refill-only recovery while keeping expensive rotation suppressed.
+- Capped total refill-preview fees, including internal taker fees, so pre-profit or weak-regime refill paths cannot quietly burn costs.
+- Disabled one-leg failure drills by default and made drill unwind costs debit simulated wallets when enabled.
+- Added all-in hedge accounting to session/net-profit stats by including hedge funding minus futures execution fees.
+- Prevented position-capped and immediate-net-negative routes from winning symbol selection and blocking better executable routes.
+- Raised realistic per-config minimum immediate net thresholds in local `settings.json` and ignored `arbitragebot-configs.json`.
+- Throttled repeated Binance spot BNB buy-skip logs while preserving state-change diagnostics.
