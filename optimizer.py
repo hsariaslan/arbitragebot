@@ -17,6 +17,7 @@ switching cost (sell old crypto + buy new crypto fees) by a safety margin.
 
 import asyncio
 import logging
+import math
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -63,6 +64,7 @@ TRADING_SCORE_THRESHOLD = 0.01     # trading + rebalance gate (minimum to trade/
 STRONG_SCORE_THRESHOLD = 0.1       # strong tier (higher multiplier, more exchanges)
 VERY_STRONG_SCORE_THRESHOLD = 0.3  # very strong tier (highest multiplier, most exchanges)
 FEE_THRESHOLD_MULTIPLIER = 0.5     # activation threshold scales with pair fee excess over cheapest
+TARGET_SCORE_WINDOW_SAMPLES = 600  # cap retained per-symbol score samples per config
 
 
 @dataclass(slots=True)
@@ -70,14 +72,10 @@ class SymbolTick:
     """Single observation of best cross-exchange opportunity for a symbol.
 
     `slots=True` is critical here: at 48 configs × 60 symbols ×
-    `scoring_window` (1800) ticks, the bot accumulates ~5 million live
-    instances at steady state. Without slots, each instance carries a
-    full `__dict__` (~224B overhead just for the dict header) —
-    that's ~1.1 GB of dict overhead alone. With slots: ~80B/instance
-    total. ~75% memory reduction. The Python GC also tracks fewer
-    container objects, cutting gen2 collection time proportionally.
-    Observed in the 19:45-20:01 trace: per_cfg time grew 25× as the
-    deques filled, dominated by gen2 GC pauses during tick_once.
+    retained samples, the bot can hold millions of live observations at
+    steady state. Without slots, each instance carries a full `__dict__`
+    (~224B overhead just for the dict header). With slots: ~80B/instance
+    total. ~75% memory reduction.
     """
 
     timestamp: float
@@ -675,6 +673,7 @@ class SymbolOptimizer:
                 logger.info(
                     f"[Optimizer] Starting: top {self._min_active_symbols} symbols from "
                     f"{len(self._all_symbols)}, window={self._scoring_window}s, "
+                    f"sample={self._score_sample_interval_seconds():.1f}s, "
                     f"eval_interval={self._evaluation_interval}s, "
                     f"auto_rotate={self._auto_rotate}"
                 )
@@ -699,7 +698,7 @@ class SymbolOptimizer:
                 # Standard early-exit: half a scoring window of observation.
                 # Prevents inflated scores from thin windows (e.g., 100% freq
                 # from 60 ticks vs real 55% from 1800 ticks).
-                min_ticks_std = self._scoring_window // 2
+                min_ticks_std = self._samples_for_seconds(self._scoring_window / 2)
                 min_time_std = float(self._scoring_window // 2)
 
                 # Fast-track (S29 follow-up): trajectory-aware exit. Per-tier
@@ -757,8 +756,10 @@ class SymbolOptimizer:
                         if not all(x >= self._strong_threshold for x in recent):
                             return False, "", required
 
-                    # Total ticks gate: at least as many ticks as seconds
-                    if s.total_ticks < required:
+                    # Total sample gate: at least as many retained samples as
+                    # expected for the required observation time.
+                    required_samples = self._samples_for_seconds(required)
+                    if s.total_ticks < required_samples:
                         return False, "", required
                     return True, f"fast_track_{tier_kind}_{trajectory}", required
 
@@ -896,6 +897,71 @@ class SymbolOptimizer:
             await asyncio.sleep(1.0)
 
     # ── Scoring ──────────────────────────────────────────────────────────
+
+    def _score_sample_interval_seconds(self) -> float:
+        """Return the retained-score sample cadence for the current window."""
+        window = max(1.0, float(self._scoring_window))
+        return max(1.0, window / float(TARGET_SCORE_WINDOW_SAMPLES))
+
+    def _samples_for_seconds(self, seconds: float) -> int:
+        interval = self._score_sample_interval_seconds()
+        return max(1, int(math.ceil(max(0.0, float(seconds)) / interval)))
+
+    def _samples_per_hour(self) -> float:
+        return 3600.0 / self._score_sample_interval_seconds()
+
+    def _max_score_samples(self) -> int:
+        return self._samples_for_seconds(self._scoring_window) + 5
+
+    def _decrement_tick_aggregates(self, symbol: str, tick: SymbolTick) -> None:
+        """Mirror aggregate updates when a retained sample leaves the window."""
+        v = tick.best_net_pct
+        self._agg_total[symbol] = max(0, self._agg_total.get(symbol, 0) - 1)
+        self._agg_sum_net[symbol] -= v
+        if v > 0:
+            self._agg_prof_count[symbol] = max(0, self._agg_prof_count.get(symbol, 0) - 1)
+            self._agg_prof_sum[symbol] -= v
+            self._agg_prof_profit_sum[symbol] -= tick.trade_size_usd * (v / 100)
+
+    def _prune_score_window(self, symbol: str, cutoff: float) -> None:
+        dq = self._ticks[symbol]
+        while dq and dq[0].timestamp < cutoff:
+            self._decrement_tick_aggregates(symbol, dq.popleft())
+        while len(dq) > self._max_score_samples():
+            self._decrement_tick_aggregates(symbol, dq.popleft())
+
+        mq = self._best_net_dq.get(symbol)
+        if mq is None:
+            return
+        if not dq:
+            mq.clear()
+            return
+        oldest_kept = max(cutoff, dq[0].timestamp)
+        while mq and mq[0][0] < oldest_kept:
+            mq.popleft()
+
+    def _append_score_tick(self, symbol: str, tick: SymbolTick) -> bool:
+        """Append a retained score sample, rate-limited to bound heap usage."""
+        dq = self._ticks[symbol]
+        if dq and tick.timestamp - dq[-1].timestamp < self._score_sample_interval_seconds():
+            return False
+
+        dq.append(tick)
+        best_net = tick.best_net_pct
+        self._agg_total[symbol] += 1
+        self._agg_sum_net[symbol] += best_net
+        if best_net > 0:
+            self._agg_prof_count[symbol] += 1
+            self._agg_prof_sum[symbol] += best_net
+            self._agg_prof_profit_sum[symbol] += tick.trade_size_usd * (best_net / 100)
+
+        mq = self._best_net_dq[symbol]
+        while mq and mq[-1][1] <= best_net:
+            mq.pop()
+        mq.append((tick.timestamp, best_net))
+        self._update_historical_stats(symbol, tick)
+        self._prune_score_window(symbol, tick.timestamp - self._scoring_window)
+        return True
 
     def _score_tick(self) -> None:
         """Compute best net spread for each symbol, append to rolling window."""
@@ -1154,26 +1220,10 @@ class SymbolOptimizer:
                     fee_pct=best_fee,
                     trade_size_usd=best_trade_size,
                 )
-                self._ticks[symbol].append(tick)
-                # Incremental aggregate maintenance — see __init__ note
-                self._agg_total[symbol] += 1
-                self._agg_sum_net[symbol] += best_net
-                if best_net > 0:
-                    self._agg_prof_count[symbol] += 1
-                    self._agg_prof_sum[symbol] += best_net
-                    self._agg_prof_profit_sum[symbol] += best_trade_size * (best_net / 100)
-                # Monotonic max-deque maintenance: pop trailing entries
-                # whose value is <= new value (they're dominated and can
-                # never be the max while the new value is in the window).
-                # Then append new (timestamp, value). Amortized O(1).
-                mq = self._best_net_dq[symbol]
-                while mq and mq[-1][1] <= best_net:
-                    mq.pop()
-                mq.append((now, best_net))
-                self._update_historical_stats(symbol, tick)
+                retained = self._append_score_tick(symbol, tick)
 
                 # During discovery: track exchange profitability + direction
-                if self._discovery_mode and best_net > 0:
+                if self._discovery_mode and retained and best_net > 0:
                     self._exchange_profit_ticks[best_buy] += 1
                     self._exchange_profit_ticks[best_sell] += 1
                     self._exchange_profit_sum[best_buy] += best_net
@@ -1187,25 +1237,8 @@ class SymbolOptimizer:
 
         # Prune old ticks + maintain incremental aggregates + max-deque.
         cutoff = now - self._scoring_window
-        for sym, dq in self._ticks.items():
-            while dq and dq[0].timestamp < cutoff:
-                evicted = dq.popleft()
-                v = evicted.best_net_pct
-                self._agg_total[sym] -= 1
-                self._agg_sum_net[sym] -= v
-                if v > 0:
-                    self._agg_prof_count[sym] -= 1
-                    self._agg_prof_sum[sym] -= v
-                    self._agg_prof_profit_sum[sym] -= (
-                        (evicted.trade_size_usd or self._trade_amount) * (v / 100)
-                    )
-            # Prune monotonic max-deque to the same time cutoff. O(1)
-            # amortized — each entry is popleft'd at most once. The
-            # front of the deque is the current max in the window.
-            mq = self._best_net_dq.get(sym)
-            if mq is not None:
-                while mq and mq[0][0] < cutoff:
-                    mq.popleft()
+        for sym in self._ticks:
+            self._prune_score_window(sym, cutoff)
 
         self._compute_scores()
 
@@ -1529,7 +1562,7 @@ class SymbolOptimizer:
             score = avg_profitable_net * frequency
 
             # est hourly profit = profitable ticks/hour × profit per tick
-            ticks_per_hour = frequency * 3600
+            ticks_per_hour = frequency * self._samples_per_hour()
             profit_per_tick = (
                 sum_profitable_profit / profitable_count
                 if profitable_count > 0
@@ -1586,7 +1619,7 @@ class SymbolOptimizer:
                         s.trade_multiplier = 1.0 if s.symbol in active_set else 0.0
                         s.focus_tier = "weak"
                     # Recompute est_hourly_profit with multiplied trade amount
-                    ticks_per_hour = s.frequency * 3600
+                    ticks_per_hour = s.frequency * self._samples_per_hour()
                     base_profit_per_tick = (
                         self._agg_prof_profit_sum.get(s.symbol, 0.0) / s.profitable_ticks
                         if s.profitable_ticks > 0
@@ -1621,7 +1654,7 @@ class SymbolOptimizer:
             stats.total_profitable_ticks += 1
             stats.total_profitable_net_sum += tick.best_net_pct
             stats.est_total_profit += (
-                (tick.trade_size_usd or self._trade_amount) * (tick.best_net_pct / 100)
+                tick.trade_size_usd * (tick.best_net_pct / 100)
             )
             stats.current_profitable_streak += 1
             stats.current_unprofitable_streak = 0
@@ -1757,11 +1790,11 @@ class SymbolOptimizer:
             # Use a longer window (60s) for symbols involving event-driven exchanges
             # (e.g., Bitfinex updates every 10-20s, so a 15s window misses updates).
             ticks = self._ticks.get(sym, [])
-            if len(ticks) >= 15:
+            if len(ticks) >= self._samples_for_seconds(15.0):
                 # Determine if this symbol's profitable ticks involve event-driven exchanges
                 involves_evd = False
                 if evd_exchanges:
-                    recent_sample = list(ticks)[-30:]
+                    recent_sample = list(ticks)[-self._samples_for_seconds(90.0):]
                     profitable_ticks_sample = [
                         t for t in recent_sample if t.best_net_pct > 0
                     ]
@@ -1771,7 +1804,7 @@ class SymbolOptimizer:
                             for t in profitable_ticks_sample
                         )
                 recent_window = 60.0 if involves_evd else 15.0
-                min_recent_ticks = 5 if involves_evd else 10
+                min_recent_ticks = self._samples_for_seconds(recent_window)
                 recent_cutoff = now - recent_window
                 recent_ticks = [t for t in ticks if t.timestamp >= recent_cutoff]
                 if len(recent_ticks) >= min_recent_ticks:
@@ -3369,7 +3402,7 @@ class SymbolOptimizer:
                 if s.symbol not in active_set
                 and s.symbol not in cooldown_set_now
                 and s.score >= self._get_activation_threshold(s.symbol)
-                and s.total_ticks >= 30
+                and s.total_ticks >= self._samples_for_seconds(30.0)
                 and s.est_hourly_profit > expansion_cost * self._safety_multiplier
             ],
             key=lambda s: s.score * (1.0 if self._is_symbol_on_bitfinex(s.symbol) else 0.7),
@@ -4474,9 +4507,10 @@ class SymbolOptimizer:
                         reasons.append(
                             f"Tier-confirmation: {strong_count}/{n_check} recent samples at strong tier"
                         )
-            if s.total_ticks < required:
+            required_samples = self._samples_for_seconds(required)
+            if s.total_ticks < required_samples:
                 reasons.append(
-                    f"Observation: {s.total_ticks}/{int(required)} ticks accumulated"
+                    f"Observation: {s.total_ticks}/{required_samples} samples accumulated"
                 )
 
         # Score breakdown
@@ -4763,6 +4797,7 @@ class SymbolOptimizer:
         self._agg_sum_net.clear()
         self._agg_prof_count.clear()
         self._agg_prof_sum.clear()
+        self._agg_prof_profit_sum.clear()
         self._best_net_dq.clear()
         self._scores.clear()
         self._rotations.clear()
@@ -4789,7 +4824,9 @@ class SymbolOptimizer:
         else:
             logger.info(
                 f"[Optimizer] Reset: top {self._min_active_symbols} symbols, "
-                f"window={self._scoring_window}s, auto_rotate={self._auto_rotate}"
+                f"window={self._scoring_window}s, "
+                f"sample={self._score_sample_interval_seconds():.1f}s, "
+                f"auto_rotate={self._auto_rotate}"
             )
 
     # ── State persistence ────────────────────────────────────────────────
