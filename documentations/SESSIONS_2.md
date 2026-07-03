@@ -1835,3 +1835,268 @@ The initial audit only documented the log findings. Follow-up fixes were then im
 - Prevented position-capped and immediate-net-negative routes from winning symbol selection and blocking better executable routes.
 - Raised realistic per-config minimum immediate net thresholds in local `settings.json` and ignored `arbitragebot-configs.json`.
 - Throttled repeated Binance spot BNB buy-skip logs while preserving state-change diagnostics.
+
+### Session #34 - 2026-07-03 Log Audit (`v0.35.1-beta`, uncommitted fixes)
+
+#### Scope
+
+Analyzed `logs/bot-logs-2026-07-03-03-18-10.log` after the `v0.35.1-beta` fixes. The user reported that the bot was performing really badly and asked for investigation plus fixes.
+
+This session focused on separating real market economics from implementation bugs:
+
+- whether the poor P&L was caused by realistic fees/slippage or simulator bugs,
+- whether transfer/rebalance logic was wasting money on marginal routes,
+- whether hedge fees were being over-counted or over-triggered,
+- whether market-data freshness and VPS capacity were degrading execution quality,
+- whether balance snapshots were still misleading after the previous hedge/portfolio fixes.
+
+#### Log Window
+
+- Log file: `logs/bot-logs-2026-07-03-03-18-10.log`.
+- Log span observed in capacity/session lines: `2026-07-02 19:50` through `2026-07-03 03:17`.
+- Runtime version: `0.35.1-beta`.
+- Config count: 30.
+- Execution mode: simulation.
+- Latest capacity telemetry: 30 configs, 726 trades, 3160 transfers, 48 rotations.
+- No disk-full signal observed.
+
+#### Aggregate Result
+
+The run was genuinely bad after all realistic costs were included.
+
+Latest parsed session summaries across 30 configs:
+
+- Trades: `723`.
+- Gross spot trading P&L: `+$46.32`.
+- Transfer fees: `$38.81`.
+- Cashback: `$4.98`.
+- Spot net: `+$10.52`.
+- Hedge net: `-$110.35`.
+- Total net: `-$99.81`.
+
+This means the spot arbitrage side was only barely positive after transfer fees and cashback, while simulated hedge execution fees dominated the final loss.
+
+Best latest configs:
+
+| Config | Trades | Gross P&L | Transfer fees | Hedge net | Total net |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Group 2 / Medium-Aggressive (`$80`, `4%`) | 220 | `$5.58` | `$2.34` | `$-2.30` | `$+1.12` |
+| Group 1 / Conservative | 26 | `$0.61` | `$0.67` | `$-0.61` | `$-0.62` |
+| Group 2 / Small (`$40`, `2%`) | 33 | `$1.43` | `$0.92` | `$-1.32` | `$-0.72` |
+| Group 1 / Neutral | 6 | `$0.10` | `$0.18` | `$-0.75` | `$-0.82` |
+| Group 2 / Tiny (`$20`, `1%`) | 3 | `$0.08` | `$0.35` | `$-0.56` | `$-0.83` |
+
+Worst latest configs:
+
+| Config | Trades | Gross P&L | Transfer fees | Hedge net | Total net |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Group 4 / Conservative (`3 active`) | 8 | `$0.83` | `$1.82` | `$-6.22` | `$-7.12` |
+| Group 5 / Aggressive (`Rapid Shifts`) | 34 | `$4.43` | `$3.44` | `$-8.30` | `$-6.90` |
+| Group 5 / Loose Inventory Drift | 13 | `$1.69` | `$1.64` | `$-7.06` | `$-6.88` |
+| Group 5 / Neutral | 15 | `$2.66` | `$1.79` | `$-7.41` | `$-6.36` |
+| Group 5 / No Boosts | 12 | `$2.28` | `$1.57` | `$-6.87` | `$-6.00` |
+
+#### Key Log Findings
+
+1. Most opportunities were too small after executable costs.
+
+   There were `627` `REALIZED_NET_SKIP` lines. Top skipped routes:
+
+   | Route | Count | Avg realized net | Avg min required |
+   | --- | ---: | ---: | ---: |
+   | `ZECUSDT OKX->MEXC` | 117 | `+0.0400%` | `0.1406%` |
+   | `PENDLEUSDT Binance->Bybit` | 115 | `+0.0841%` | `0.0900%` |
+   | `ZROUSDT Bitfinex->OKX` | 76 | `+0.0283%` | `0.0806%` |
+   | `WIFUSDT MEXC->OKX` | 66 | `+0.0889%` | `0.0900%` |
+   | `SNXUSDT Bybit->MEXC` | 40 | `+0.0297%` | `0.0804%` |
+
+   These are not fake deficits. The routes are mostly thin positive edges that are below the bot's configured executable-profit floor once fees/slippage/rounding are applied.
+
+2. Below-threshold routes were still able to trigger rebalance pressure.
+
+   Code inspection found that the `elif net > 0` branch in `monitor.py` counted positive-but-below-threshold opportunities as miss streaks and could eventually call `try_rebalance()`. This means the bot could move inventory for routes it would intentionally skip as too small.
+
+   This matched the log pattern: many `REALIZED_NET_SKIP` lines plus high transfer/rebalance activity.
+
+3. Transfer/rebalance churn remained high.
+
+   Capacity telemetry reached `3160` transfers. The log also had many rebalance-block and consolidation/rotation suppression lines. The guards prevented some damage, but the stale miss-streak path still created unnecessary rebalance pressure.
+
+4. Hedge fees dominated the loss.
+
+   Latest parsed aggregate hedge net was `-$110.35`, while spot net was only `+$10.52`.
+
+   The log contained `934` `WOULD_OPEN`, `WOULD_ADJUST`, and `WOULD_CLOSE` hedge events. Code inspection showed `_adjust()` charged futures taker fees for every adjustment whose percentage drift exceeded the threshold, even if the delta notional was tiny. This made small inventory drift expensive in simulation and would also be undesirable in live mode.
+
+5. Optimizer score storage was too heavy for the VPS.
+
+   Capacity/heap logs showed:
+
+   - Start: heap `91MB`, `52,847` GC objects, `0` `SymbolTick`.
+   - End: heap `1452MB`, about `2,640,675` GC objects.
+   - End: `2,568,039` live `SymbolTick` objects.
+   - End capacity: sweep average `925ms`, p95 `1452ms`.
+   - Worst observed p95: above `2s`.
+
+   Root cause: each config retained one score sample per sweep per symbol for the full scoring window. Slots reduced object size, but 30 configs × symbols × long windows still accumulated millions of objects.
+
+6. MEXC depth stream subscription was wrong.
+
+   The log had `1624` `Depth sub-connection received no initial depth data` warnings for MEXC.
+
+   Code inspection found the bot subscribed to:
+
+   - `spot@public.depth.v3.api.pb@100ms@{symbol}`
+
+   MEXC's official partial-depth protobuf stream is:
+
+   - `spot@public.limit.depth.v3.api.pb@<symbol>@<level>`
+   - supported levels: `5`, `10`, `20`
+
+   Reference checked: `https://www.mexc.com/api-docs/spot-v3/websocket-market-streams/partial-book-depth-streams`.
+
+   This explains why MEXC depth sub-connections repeatedly received no initial depth data.
+
+7. Balance snapshot totals were still misleading.
+
+   The 5-minute snapshot code summed only spot exchange USDT + spot crypto as `total`. It excluded:
+
+   - Binance Futures USDT reserve,
+   - Binance spot BNB reserve,
+   - Binance Futures BNB reserve,
+   - in-transit funds already handled by `BalanceTracker.get_portfolio_value()`.
+
+   The actual `BalanceTracker.get_portfolio_value()` path already includes these. The snapshot log was using the wrong total basis, making normal futures allocation look like portfolio drift.
+
+8. Optimizer aggregate profit could be distorted for zero-size samples.
+
+   Positive score samples with `trade_size_usd=0` were added as zero expected dollars, but the old eviction path subtracted using `(evicted.trade_size_usd or self._trade_amount)`. For zero-size samples, this incorrectly subtracted the default trade amount and could distort estimated hourly profit.
+
+9. Book-age and visible-depth guards dominated many configs.
+
+   Representative session summaries had very large guard counters:
+
+   - `book_age` in the tens or hundreds of thousands per config.
+   - `visible_depth` often in the tens of thousands.
+   - `slip_guard` often thousands to tens of thousands.
+
+   Some of this should improve after fixing the MEXC depth channel and reducing optimizer heap pressure. Some remains real: many altcoin books are too thin for the configured trade sizes.
+
+10. Current VPS remains borderline.
+
+   The 1 vCPU / 2 GB VPS can run the bot, but this log shows it near the edge once 30 configs, depth guards, and long optimizer windows are active. The optimizer sampling fix is expected to reduce heap and sweep time materially without reducing the scoring time horizon.
+
+#### Interpretation
+
+The bad performance was not a single fake-P&L bug. It was a combination of:
+
+- real low edge density in the market,
+- hedge execution fees exceeding spot net gains,
+- transfer/rebalance pressure from routes below the executable threshold,
+- MEXC depth data not actually subscribing to the correct stream,
+- optimizer memory pressure degrading sweep cadence and book freshness,
+- misleading balance snapshot totals.
+
+The right response was not to loosen realism. The right response was to remove waste and broken assumptions while keeping realistic execution gates intact.
+
+#### Fixes Implemented
+
+Implemented in the working tree after the log audit:
+
+1. Bounded optimizer score samples.
+
+   - Added sample-rate helpers in `optimizer.py`.
+   - Retains about `600` score samples per symbol per config per scoring window instead of one sample per sweep.
+   - Keeps the same time horizon but reduces heap pressure.
+   - Scales discovery/expansion/recent-frequency gates by retained sample cadence.
+   - Scales estimated hourly profit by retained samples per hour.
+
+2. Fixed optimizer aggregate eviction.
+
+   - Eviction now subtracts `tick.trade_size_usd * net_pct`.
+   - Zero-size samples no longer subtract the default trade amount.
+   - Reset now clears `_agg_prof_profit_sum` with the other rolling aggregates.
+
+3. Blocked rebalancing for below-threshold routes.
+
+   - Added `_clear_rebalance_streak()` in `monitor.py`.
+   - The positive-but-below-threshold branch now increments `low_profit` only and clears stale rebalance pressure.
+   - `REALIZED_NET_SKIP` now clears stale rebalance pressure too.
+   - Position-cap and depth-size-zero skips no longer build rebalance streaks.
+   - Rebalance attempts now require a genuine balance shortage path.
+
+4. Fixed balance snapshot accounting.
+
+   - Snapshot now uses `BalanceTracker.get_portfolio_value()` for total portfolio value.
+   - Snapshot now logs `spot=$... total=$...`.
+   - Binance Futures USDT and BNB reserves are included.
+   - Hedge simulation accounting now subtracts futures execution fees when calculating accounting drift.
+
+5. Added hedge adjustment notional floor.
+
+   - Added `_hedge_adjust_floor_usd()` and `_should_adjust_hedge()` in `hedge_manager.py`.
+   - Hedge adjustments require both percentage drift and meaningful dollar delta.
+   - Floor is `max(dust_threshold_usd, total_capital * 0.001)`.
+   - Tiny drift accumulates funding only instead of paying another futures taker fee.
+   - Startup hedge log now includes `adjust_floor`.
+
+6. Fixed MEXC depth subscription channel.
+
+   - Added `_depth_channel()` in `fetchers/mexc.py`.
+   - Switched to `spot@public.limit.depth.v3.api.pb@{symbol}@20`.
+   - Added a regression test for the official channel string.
+
+7. Added focused tests.
+
+   - `tests/test_optimizer_sampling.py`
+     - sample cadence,
+     - rate-limited retained samples,
+     - zero-size aggregate eviction.
+   - `tests/test_rebalance_and_hedge_guards.py`
+     - stale rebalance streak cleanup,
+     - hedge dust-delta suppression,
+     - meaningful hedge delta allowed.
+   - Extended `tests/test_market_pricing_guards.py` with the MEXC depth channel assertion.
+
+#### Verification
+
+Commands run after the fixes:
+
+- `.venv/bin/python -m py_compile optimizer.py monitor.py hedge_manager.py fetchers/mexc.py tests/test_optimizer_sampling.py tests/test_rebalance_and_hedge_guards.py tests/test_market_pricing_guards.py`
+- `.venv/bin/python -m unittest discover -s tests -p 'test_*.py'`
+- `git diff --check`
+
+Result:
+
+- Python compile passed.
+- Unit tests passed: `10 tests`.
+- Diff whitespace check passed.
+
+#### Working Tree State
+
+Uncommitted files after Session #34:
+
+- `fetchers/mexc.py`
+- `hedge_manager.py`
+- `monitor.py`
+- `optimizer.py`
+- `tests/test_market_pricing_guards.py`
+- `tests/test_optimizer_sampling.py`
+- `tests/test_rebalance_and_hedge_guards.py`
+
+No commit was made in this session.
+
+No config import is needed for these fixes because no `settings.json` or ignored `arbitragebot-configs.json` config values were changed.
+
+#### Next Run Expectations
+
+The next run should show:
+
+- far fewer MEXC `no initial depth data` reconnect warnings,
+- lower heap and fewer live `SymbolTick` objects,
+- lower optimizer sweep time/p95,
+- fewer rebalances caused by routes that are below executable threshold,
+- lower hedge-fee churn from tiny hedge adjustments,
+- balance snapshots that distinguish spot value from total portfolio value including Binance Futures reserves.
+
+Profitability is not guaranteed by these fixes. The log showed real market-edge scarcity. These changes remove avoidable waste and broken data/accounting paths, but the next run still needs to prove that enough routes survive realistic fees, slippage, depth, book-age, transfer, and hedge-cost filters.
