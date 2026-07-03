@@ -236,6 +236,7 @@ class HedgeManager:
             f"[Hedge] HedgeManager initialized: enabled={self._enabled} "
             f"mode={self._execution_mode} dust=${self._dust_threshold_usd:.0f} "
             f"eval_interval={self._evaluation_interval:.0f}s "
+            f"adjust_floor=${self._hedge_adjust_floor_usd():.2f} "
             f"margin_buffer={self._margin_buffer_pct*100:.0f}% "
             f"leverage={self._leverage}x "
             f"futures_taker_fee={self._effective_futures_fee_rate()*100:.4f}% "
@@ -951,6 +952,27 @@ class HedgeManager:
             rate = (self._funding_monitor.get_funding_rate(spot_symbol) or 0.0) * 100
             interval_h = self._funding_monitor.get_funding_interval_hours(spot_symbol)
             return (False, f"funding_skip({rate:+.4f}%/{interval_h}h)")
+        return (True, "ok")
+
+    def _hedge_adjust_floor_usd(self) -> float:
+        """Minimum delta notional worth paying a futures adjustment fee for."""
+        return max(self._dust_threshold_usd, self._total_capital * 0.001)
+
+    def _should_adjust_hedge(
+        self,
+        current_qty: float,
+        target_qty: float,
+        price: float,
+    ) -> tuple[bool, str]:
+        if current_qty <= 0 or price <= 0:
+            return (False, "no_current_hedge")
+        drift_pct = abs(target_qty - current_qty) / max(current_qty, 1e-12)
+        if drift_pct < self._adjust_threshold_pct:
+            return (False, f"drift({drift_pct:.2%}<{self._adjust_threshold_pct:.2%})")
+        delta_notional = abs(target_qty - current_qty) * price
+        floor = self._hedge_adjust_floor_usd()
+        if delta_notional < floor:
+            return (False, f"delta_dust(${delta_notional:.2f}<${floor:.2f})")
         return (True, "ok")
 
     # ── Shadow position lifecycle ─────────────────────────────────────
@@ -1837,13 +1859,22 @@ class HedgeManager:
                         continue
                     await self._open(sym, target_qty, price, now)
                 else:
-                    # Already hedged. Adjust if drift exceeds threshold.
-                    drift_pct = abs(target_qty - current_qty) / max(current_qty, 1e-12)
-                    if drift_pct >= self._adjust_threshold_pct:
+                    # Already hedged. Adjust only when drift is meaningful
+                    # enough to justify another futures taker fee.
+                    adjust_ok, adjust_reason = self._should_adjust_hedge(
+                        current_qty,
+                        target_qty,
+                        price,
+                    )
+                    if adjust_ok:
                         await self._adjust(sym, target_qty, price, now)
                     else:
-                        # No adjustment needed — just accumulate funding
                         self._accumulate_funding(sym, now)
+                        if adjust_reason.startswith("delta_dust"):
+                            logger.debug(
+                                f"[Hedge] ADJUST_SUPPRESSED {sym}: {adjust_reason} "
+                                f"current={current_qty:.6f} target={target_qty:.6f}"
+                            )
 
         # 2) For shadows of symbols with no active role and no held inventory:
         # close them. Dust-sized held positions close via should_hedge().

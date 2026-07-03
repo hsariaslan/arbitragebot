@@ -1206,6 +1206,11 @@ class ArbitrageMonitor:
             return max(5, base // 2)
         return base
 
+    def _clear_rebalance_streak(self, miss_key: str) -> None:
+        """Drop stale rebalance pressure for routes that should not be rebalanced."""
+        self._miss_streak.pop(miss_key, None)
+        self._rebalance_empty_backoff.pop(miss_key, None)
+
     def _compute_trade_size(
         self, buy_ex: str, sell_ex: str, symbol: str,
         net_pct: float, sell_price: float,
@@ -2534,6 +2539,8 @@ class ArbitrageMonitor:
                         continue
 
                     can_trade = True
+                    miss_key = f"{sym}:{buy_ex}:{sell_ex}"
+                    rebalanceable_miss = True
 
                     # Compute trade size (adaptive or static)
                     if self._adaptive_mode:
@@ -2552,11 +2559,13 @@ class ArbitrageMonitor:
                         if crypto_val >= cap:
                             self._position_cap_skips += 1
                             trade_size = 0  # will be caught by trade_size <= 0 check below
+                            rebalanceable_miss = False
                         elif crypto_val + trade_size > cap:
                             trade_size = max(0, cap - crypto_val)
                             if trade_size < min_trade:
                                 self._position_cap_skips += 1
                                 trade_size = 0
+                                rebalanceable_miss = False
 
                     age_ok, age_reason = self._book_age_guard_ok(
                         sym,
@@ -2571,6 +2580,7 @@ class ArbitrageMonitor:
                             self._balance.skipped_trades += 1
                         continue
 
+                    pre_depth_trade_size = trade_size
                     trade_size = self._shrink_trade_size_for_depth(
                         sym,
                         buy_ex,
@@ -2579,21 +2589,27 @@ class ArbitrageMonitor:
                         best_buy_asks,
                         best_sell_bids,
                     )
+                    if pre_depth_trade_size > 0 and trade_size <= 0:
+                        rebalanceable_miss = False
 
                     if self._balance and self._balance.initialized:
                         # Track miss-streak for rebalancing (even when trade_size is 0)
                         if trade_size <= 0:
                             self._interval_size_skips += 1
-                            miss_key = f"{sym}:{buy_ex}:{sell_ex}"
-                            streak = self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
+                            if rebalanceable_miss:
+                                streak = self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
+                            else:
+                                self._clear_rebalance_streak(miss_key)
+                                streak = 0
                             if streak == 1 or streak % 120 == 0:
                                 sym_score = self._optimizer.get_symbol_score(sym) if self._optimizer else None
                                 mult = sym_score.trade_multiplier if sym_score else 1.0
                                 score_val = sym_score.score if sym_score else 0.0
+                                rebal_part = "" if rebalanceable_miss else " rebalance=blocked"
                                 logger.info(
                                     f"[Monitor] SKIP {sym} {buy_ex}->{sell_ex}: "
                                     f"trade_size=0 (net={net:.4f}% mult={mult:.1f} "
-                                    f"score={score_val:.4f} streak={streak})"
+                                    f"score={score_val:.4f} streak={streak}{rebal_part})"
                                 )
                             can_trade = False
                         else:
@@ -2602,7 +2618,6 @@ class ArbitrageMonitor:
                             )
                             if not has_usdt or not has_crypto:
                                 self._interval_balance_skips += 1
-                                miss_key = f"{sym}:{buy_ex}:{sell_ex}"
                                 streak = self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
                                 if streak == 1 or streak % 120 == 0:
                                     logger.info(
@@ -2613,8 +2628,11 @@ class ArbitrageMonitor:
                                 can_trade = False
 
                         # Try rebalancing when miss-streak is high enough
-                        miss_key = f"{sym}:{buy_ex}:{sell_ex}"
-                        if not can_trade and self._miss_streak.get(miss_key, 0) >= self._get_miss_threshold(buy_ex, sell_ex):
+                        if (
+                            not can_trade
+                            and rebalanceable_miss
+                            and self._miss_streak.get(miss_key, 0) >= self._get_miss_threshold(buy_ex, sell_ex)
+                        ):
                             # Check backoff from previous EMPTY results
                             backoff_entry = self._rebalance_empty_backoff.get(miss_key)
                             if backoff_entry and time.time() < backoff_entry[0]:
@@ -2902,6 +2920,7 @@ class ArbitrageMonitor:
                             if net_adjusted <= 0 or net_adjusted < pair_min_net:
                                 self._low_profit_skips += 1
                                 self._balance.skipped_trades += 1
+                                self._clear_rebalance_streak(miss_key)
                                 logger.info(
                                     f"[Trade] REALIZED_NET_SKIP {sym} {buy_ex}->{sell_ex}: "
                                     f"net={net_adjusted:+.4f}% min={pair_min_net:.4f}% "
@@ -3102,67 +3121,13 @@ class ArbitrageMonitor:
                             ), f"demo_trade_{sym}")
 
                 elif net > 0:
-                    # Positive but below threshold — still track miss-streak
-                    # so rebalancing can trigger for generally-profitable symbols
+                    # Positive but below executable threshold. Count it, but
+                    # do not rebalance for it: moving inventory for a route
+                    # we will intentionally skip is transfer-fee churn.
                     self._low_profit_skips += 1
                     if self._balance and self._balance.initialized:
                         miss_key = f"{sym}:{buy_ex}:{sell_ex}"
-                        self._miss_streak[miss_key] = self._miss_streak.get(miss_key, 0) + 1
-
-                        if self._miss_streak.get(miss_key, 0) >= self._get_miss_threshold(buy_ex, sell_ex):
-                            # Check backoff from previous EMPTY results
-                            backoff_entry = self._rebalance_empty_backoff.get(miss_key)
-                            if backoff_entry and time.time() < backoff_entry[0]:
-                                pass  # Skip — still in backoff cooldown
-                            else:
-                                score_ok = self._optimizer and self._optimizer.should_allow_rebalance(sym)
-                                if score_ok:
-                                    prices = self._get_current_prices()
-                                    rebal_ok, rebal_reason = self._should_rebalance(
-                                        buy_ex, sell_ex, sym, self._trade_amount, prices
-                                    )
-                                else:
-                                    rebal_ok = False
-                                    prices = None
-                                    sym_score_obj = self._optimizer.get_symbol_score(sym) if self._optimizer else None
-                                    score_val = sym_score_obj.score if sym_score_obj else 0.0
-                                    rebal_reason = f"score_gate (score={score_val:.4f} < 0.01)"
-
-                                if score_ok and rebal_ok:
-                                    if prices is None:
-                                        prices = self._get_current_prices()
-                                    rebal_transfers = self._balance.try_rebalance(
-                                        buy_ex,
-                                        sell_ex,
-                                        sym,
-                                        self._trade_amount,
-                                        prices,
-                                        max_external_fee_usd=self._rebalance_external_fee_cap(),
-                                    )
-                                    if rebal_transfers:
-                                        self._miss_streak[miss_key] = 0
-                                        self._rebalance_empty_backoff.pop(miss_key, None)
-                                    else:
-                                        # Exponential backoff: 30s → 60s → 120s → 240s, cap 300s
-                                        prev_backoff = backoff_entry[1] if backoff_entry else 15.0
-                                        next_backoff = min(prev_backoff * 2, 300.0)
-                                        self._rebalance_empty_backoff[miss_key] = (
-                                            time.time() + next_backoff, next_backoff
-                                        )
-                                        streak = self._miss_streak.get(miss_key, 0)
-                                        logger.info(
-                                            f"[Rebalance] EMPTY {sym} {buy_ex}->{sell_ex} "
-                                            f"streak={streak}: no transfers, backoff={next_backoff:.0f}s"
-                                        )
-                                else:
-                                    streak = self._miss_streak.get(miss_key, 0)
-                                    self._rebalance_block_log_count[miss_key] += 1
-                                    rbl_count = self._rebalance_block_log_count[miss_key]
-                                    if rbl_count == 1 or rbl_count % 30 == 0:
-                                        logger.info(
-                                            f"[Rebalance] BLOCKED {sym} {buy_ex}->{sell_ex} "
-                                            f"streak={streak}: {rebal_reason}"
-                                        )
+                        self._clear_rebalance_streak(miss_key)
 
                 # Periodically update estimated profit on balance + record config
                 if self._tick_count % 60 == 0 and self._balance and self._trades:
@@ -3219,18 +3184,36 @@ class ArbitrageMonitor:
         # 5-minute periodic snapshots: balance + session P&L
         if self._tick_count % 300 == 0 and self._tick_count > 0 and self._balance and self._balance.initialized:
             prices = self._get_current_prices()
+            prices_per_exchange = self._get_per_exchange_prices()
+            bnb_price = self._get_bnb_price(prices)
             parts = []
-            total = 0.0
+            spot_total = 0.0
             for ex in sorted(self._balance._exchanges):
                 ex_usdt = self._balance.usdt.get(ex, 0.0)
                 ex_crypto = sum(
-                    qty * prices.get(sym, 0.0)
+                    qty * ((prices_per_exchange.get(ex, {}) or {}).get(sym) or prices.get(sym, 0.0))
                     for sym, qty in self._balance.crypto.get(ex, {}).items()
                     if qty > 0
                 )
+                ex_bnb = 0.0
+                if ex == "Binance" and bnb_price > 0:
+                    ex_bnb = float(getattr(self._balance, "binance_spot_bnb", 0.0) or 0.0) * bnb_price
                 ex_total = ex_usdt + ex_crypto
-                total += ex_total
+                ex_total += ex_bnb
+                spot_total += ex_total
                 parts.append(f"{ex}=${ex_total:.0f}")
+            futures_total = float(getattr(self._balance, "binance_futures_usdt", 0.0) or 0.0)
+            if bnb_price > 0:
+                futures_total += (
+                    float(getattr(self._balance, "binance_futures_bnb", 0.0) or 0.0)
+                    * bnb_price
+                )
+            if futures_total > 0:
+                parts.append(f"BinanceFutures=${futures_total:.0f}")
+            total = self._balance.get_portfolio_value(
+                prices,
+                prices_per_exchange=prices_per_exchange,
+            )
             ext_fees_snap = self._balance.total_external_transfer_fees
             total_fees_snap = self._balance.total_transfer_fees
             credited_cb = (
@@ -3251,7 +3234,11 @@ class ArbitrageMonitor:
                     )
                     hedge_funding = float(hedge_state.get("cumulative_funding_usd", 0.0))
                     hedge_fees = float(hedge_state.get("cumulative_execution_fees_usd", 0.0))
-                    hedged_total = total + hedge_pnl
+                    hedged_total = self._balance.get_portfolio_value(
+                        prices,
+                        hedge_pnl_usd=hedge_pnl,
+                        prices_per_exchange=prices_per_exchange,
+                    )
                     hedge_extra = (
                         f" | hedged=${hedged_total:.0f} "
                         f"(hedge_pnl=${hedge_pnl:+.2f}, fees=${hedge_fees:.2f})"
@@ -3266,6 +3253,7 @@ class ArbitrageMonitor:
                             - total_fees_snap
                             + credited_cb
                             + hedge_funding
+                            - hedge_fees
                         )
                         hedge_extra += (
                             f" accounting=${accounting_total:.0f} "
@@ -3274,7 +3262,8 @@ class ArbitrageMonitor:
                 except Exception:
                     hedge_extra = ""
             logger.info(
-                f"[Balance] Snapshot: {' '.join(parts)} | total=${total:.0f} "
+                f"[Balance] Snapshot: {' '.join(parts)} | spot=${spot_total:.0f} "
+                f"total=${total:.0f} "
                 f"| fees: ${total_fees_snap:.2f} (ext=${ext_fees_snap:.2f})"
                 f"{hedge_extra}"
             )
