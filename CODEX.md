@@ -10,6 +10,19 @@ Do not add current-version or release-history notes to `CLAUDE.md`. Keep runtime
 
 ## Version History
 
+### v0.35.2-beta — Low-Edge Rebalance, Hedge Churn & MEXC Depth Fixes
+
+- Fixed MEXC spot depth subscriptions to use the official partial-depth protobuf channel format: `spot@public.limit.depth.v3.api.pb@{symbol}@20`.
+- Bounded optimizer score sample retention to reduce long-run heap growth and sweep latency while preserving the scoring time horizon.
+- Made optimizer discovery, expansion, recent-frequency checks, and estimated hourly profit sample-cadence aware.
+- Fixed rolling aggregate eviction so zero-size score samples no longer subtract the default trade amount from expected profit.
+- Stopped positive-but-below-threshold routes and realized-net skips from building stale rebalance pressure.
+- Prevented position-cap and depth-size-zero skips from triggering inventory rebalances.
+- Fixed balance snapshot totals to include Binance Futures reserve, Binance spot/futures BNB reserves, in-transit funds, and hedge P&L through `BalanceTracker.get_portfolio_value()`.
+- Added a hedge adjustment notional floor so tiny hedge drift does not repeatedly pay simulated or live futures taker fees.
+- Documented Session #34 with the July 3 poor-performance audit, root causes, implemented fixes, and verification results.
+- Added regression tests for optimizer sampling, rebalance-streak cleanup, hedge dust-delta suppression, and MEXC depth channel formatting.
+
 ### v0.35.1-beta — Bitfinex Market-Price Realism Fix
 
 - Fixed Bitfinex pair-info precision parsing so margin/risk fields like `0.5/0.25` no longer become `tick_size=0.1`.
