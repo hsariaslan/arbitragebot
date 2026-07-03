@@ -6,6 +6,7 @@ os.environ.setdefault("DASHBOARD_PASSWORD", "test")
 
 from config import BITFINEX_EXCHANGE_NAME
 from exchange_info import ExchangeInfoManager
+from fetchers.mexc import _depth_channel
 from slippage import quote_book_mismatch_reason
 
 
@@ -57,6 +58,12 @@ class MarketPricingGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(reason, "")
+
+    def test_mexc_depth_channel_uses_official_partial_depth_format(self) -> None:
+        self.assertEqual(
+            _depth_channel("BTCUSDT"),
+            "spot@public.limit.depth.v3.api.pb@BTCUSDT@20",
+        )
 
 
 if __name__ == "__main__":

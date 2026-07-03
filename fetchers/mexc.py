@@ -35,6 +35,11 @@ from config import CSV_SNAPSHOTS_ENABLED, MEXC_EXCHANGE_NAME, MEXC_WS_URL
 from fetchers.base import BaseFetcher, PriceState
 
 logger = logging.getLogger(__name__)
+MEXC_DEPTH_LEVEL = 20
+
+
+def _depth_channel(symbol: str) -> str:
+    return f"spot@public.limit.depth.v3.api.pb@{symbol}@{MEXC_DEPTH_LEVEL}"
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +132,7 @@ def _decode_repeated(data: bytes, field_number: int) -> list[bytes]:
 def _parse_depth_pb(data: bytes) -> tuple[str, list[tuple[str, str]], list[tuple[str, str]], int] | None:
     """Parse a PushDataV3ApiWrapper containing publicLimitDepths.
 
-    MEXC depth channel: spot@public.depth.v3.api.pb@100ms@{symbol}
+    MEXC depth channel: spot@public.limit.depth.v3.api.pb@{symbol}@20
     Wrapper field 316 = PublicLimitDepthsV3Api (embedded message)
     PublicLimitDepthsV3Api:
         repeated PublicLimitDepthV3ApiItem asks (field 1)
@@ -581,7 +586,7 @@ class _MEXCDepthSubFetcher:
 
             # Subscribe to depth channel
             params = [
-                f"spot@public.depth.v3.api.pb@100ms@{s}"
+                _depth_channel(s)
                 for s in self._symbols
             ]
             await ws.send(json.dumps({"method": "SUBSCRIPTION", "params": params}))
