@@ -29,24 +29,44 @@ type SettingsSubTab = 'config-groups' | 'general' | 'transfers';
 function ExecutionModeSection({
   registry,
   configsLite,
-  onSendMessage,
+  onSendWithCallback,
 }: {
   registry: RegistryView;
   configsLite?: ConfigLite[];
-  onSendMessage: (msg: object) => void;
+  onSendWithCallback: (msg: object, callback: (data: any) => void) => void;
 }) {
   const toast = useToast();
+  const [saving, setSaving] = useState(false);
   const sharedExec = registry.shared.execution_mode;
   const sharedHedge = registry.shared.hedge_execution_mode;
   const superPrimary = configsLite?.find((l) => l.is_super_primary);
 
   const save = (execMode?: string, hedgeMode?: string) => {
-    onSendMessage({
+    setSaving(true);
+    onSendWithCallback({
       type: 'save_shared_execution_mode',
       execution_mode: execMode ?? sharedExec,
       hedge_execution_mode: hedgeMode ?? sharedHedge,
+    }, (data: any) => {
+      setSaving(false);
+      if (data?.type === 'config_ack' && data?.ok) {
+        const spotChange = execMode !== undefined;
+        const requested = spotChange
+          ? (data.execution_mode ?? execMode ?? sharedExec)
+          : (data.hedge_execution_mode ?? hedgeMode ?? sharedHedge);
+        const effective = spotChange
+          ? (data.effective_execution_mode ?? requested)
+          : (data.effective_hedge_execution_mode ?? requested);
+        const suffix = requested === effective ? '' : ` (effective: ${effective})`;
+        const label = spotChange ? 'Spot execution mode' : 'Hedge execution mode';
+        const demoNote = spotChange && requested === 'demo' && !data.demo_executor_ready
+          ? ' Demo orders need demo/testnet API keys and a restart.'
+          : '';
+        toast.show(`${label} updated to ${requested}${suffix}.${demoNote}`, 'success', 5000);
+      } else {
+        toast.show(data?.error || 'Execution mode update failed', 'error', 5000);
+      }
     });
-    toast.show('Execution mode updated', 'success');
   };
 
   return (
@@ -68,17 +88,17 @@ function ExecutionModeSection({
           <label className="flex items-center text-xs text-slate-500 mb-1">
             <span>Spot execution mode</span>
             <span className="ml-1.5 text-slate-600 font-mono text-[10px]">(execution_mode)</span>
-            <Tooltip text="Spot trade execution mode for the super-primary config. simulation = no real orders. demo = real demo/testnet orders alongside simulation. demo_only = only demo orders (skips simulation). live = real mainnet orders (post-validation only). Multi-config force-locks others to simulation. Config key: shared.execution_mode" />
+            <Tooltip text="Spot trade execution mode for the super-primary config. simulation = no real orders. demo = real demo/testnet orders alongside simulation. demo_only = only demo orders (skips simulation). Multi-config force-locks others to simulation. Config key: shared.execution_mode" />
           </label>
           <select
             value={sharedExec}
+            disabled={saving}
             onChange={(e) => save(e.target.value, undefined)}
             className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
           >
             <option value="simulation">simulation</option>
             <option value="demo">demo (sim + demo orders)</option>
             <option value="demo_only">demo_only (skip sim)</option>
-            <option value="live">live (real mainnet)</option>
           </select>
           <p className="text-xs text-slate-500 mt-1 italic">
             Currently active for super-primary:{' '}
@@ -93,6 +113,7 @@ function ExecutionModeSection({
           </label>
           <select
             value={sharedHedge}
+            disabled={saving}
             onChange={(e) => save(undefined, e.target.value)}
             className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
           >
@@ -562,7 +583,7 @@ export default function SettingsPage({ currentSettings, onSave, onApply, onSendM
         <ExecutionModeSection
           registry={registry}
           configsLite={configsLite}
-          onSendMessage={onSendMessage}
+          onSendWithCallback={onSendWithCallback}
         />
       )}
 

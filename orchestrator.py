@@ -1284,6 +1284,15 @@ class ConfigFactory:
                         f"[State] Failed to restore config {config.id[:8]}…: {e}"
                     )
 
+        # Restored balance state carries the execution mode from the previous
+        # run. Re-apply the currently effective mode after restore so a runtime
+        # switch to demo/demo_only cannot be undone by stale state.
+        balance._execution_mode = (
+            effective_exec
+            if effective_exec in ("demo", "demo_only") and demo_executor
+            else "simulation"
+        )
+
         return ComponentBundle(
             config_id=config.id,
             group_id=config.group_id,

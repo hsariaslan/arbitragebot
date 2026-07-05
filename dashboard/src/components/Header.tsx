@@ -55,6 +55,12 @@ function PnlText({ value, prefix = '$' }: { value: number; prefix?: string }) {
   return <span className={`font-mono font-medium ${color}`}>{sign}{prefix}{value.toFixed(2)}</span>;
 }
 
+function fmtOptionalUsd(value?: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'n/a';
+  const sign = value >= 0 ? '' : '-';
+  return `${sign}$${Math.abs(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   `px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
     isActive
@@ -438,7 +444,10 @@ function PrimaryStatsBar({ lite, onSelect }: { lite: ConfigLite; onSelect: () =>
       {/* Portfolio | P&L */}
       <div className="flex items-center gap-1.5">
         <span className="text-slate-500">Portfolio:</span>
-        <span className="text-white font-mono font-medium">
+        <span
+          className="text-white font-mono font-medium"
+          title={`Total equity. Spot ${fmtOptionalUsd(lite.spot_value)} + Futures reserve ${fmtOptionalUsd(lite.futures_reserve_value)} + Hedge P&L ${fmtOptionalUsd(lite.hedge_pnl_value)}`}
+        >
           ${lite.portfolio_value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
         </span>
         <span className="text-slate-600">|</span>

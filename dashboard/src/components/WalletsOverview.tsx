@@ -200,8 +200,11 @@ export default function WalletsOverview({
                     </div>
                   </td>
                   <td className="px-3 py-2 text-right font-mono">
-                    ${fmt(l.portfolio_value)}
-                    <span className="text-slate-600 text-xs ml-1">/ ${fmt(l.initial_capital, 0)}</span>
+                    <div>${fmt(l.portfolio_value)}</div>
+                    <div className="text-[10px] text-slate-500">
+                      spot ${fmt(l.spot_value ?? 0, 0)} · fut ${fmt(l.futures_reserve_value ?? 0, 0)}
+                      <span className="text-slate-600 ml-1">/ ${fmt(l.initial_capital, 0)}</span>
+                    </div>
                   </td>
                   <td className={`px-3 py-2 text-right font-mono ${pnlColor(l.net_pnl)}`}>
                     {sign(l.net_pnl)}${fmt(l.net_pnl)}

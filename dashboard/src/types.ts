@@ -901,6 +901,9 @@ export interface ConfigLite {
   execution_mode: string;
   hedge_mode: string;
   portfolio_value: number;
+  spot_value?: number;
+  futures_reserve_value?: number;
+  hedge_pnl_value?: number;
   initial_capital: number;
   net_pnl: number;
   hourly_rate: number;

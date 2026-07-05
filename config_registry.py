@@ -544,15 +544,13 @@ class ConfigRegistry:
 
     # ----- effective values (force-locks) -----------------------------
     def effective_execution_mode(self, config_id: str) -> str:
-        """Spot execution is simulation-only when multiple configs exist.
+        """Return the spot execution mode for a config.
 
-        A shared demo/live spot executor cannot safely mirror 30 independent
-        simulated portfolios, so multi-config sessions force all configs to
-        simulation. Single-config sessions may still use the shared execution
-        mode on the super-primary.
+        Only the super-primary may use the shared non-simulation mode. Other
+        configs stay simulation-only, so multi-config sessions can compare
+        strategies without trying to mirror many simulated portfolios into one
+        real/demo exchange account.
         """
-        if len(self.all_configs()) > 1:
-            return "simulation"
         if config_id == self.super_primary_id:
             return str(self.shared.get("execution_mode", "simulation"))
         return "simulation"

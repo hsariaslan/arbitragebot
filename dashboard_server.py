@@ -775,6 +775,49 @@ class DashboardServer:
     def set_demo_fetcher(self, demo_fetcher: "DemoPortfolioFetcher") -> None:
         """Attach the demo portfolio fetcher for comparison data."""
         self._demo_fetcher = demo_fetcher
+        self._sync_demo_fetcher_target()
+
+    def _bind_dashboard_bundle(self, bundle: Any) -> None:
+        """Repoint the dashboard's legacy selected-config references."""
+        self._monitor = bundle.monitor
+        self._optimizer = bundle.optimizer
+        self._balance = bundle.balance
+        self._fee_manager = bundle.fee_manager
+        self._selected_config_id = bundle.config_id
+
+    def _sync_selected_bundle_refs(self, preferred_config_id: str | None = None) -> Any | None:
+        """Refresh selected-config references after orchestrator rebuilds."""
+        orch = getattr(self, "_orchestrator", None)
+        if not orch:
+            return None
+
+        cid = preferred_config_id or getattr(self, "_selected_config_id", None)
+        registry = getattr(self, "_registry", None)
+        if not cid and registry and registry.default_config:
+            cid = registry.default_config.id
+        if not cid:
+            return None
+
+        bundle = orch.get_bundle(cid)
+        if bundle is None:
+            return None
+        self._bind_dashboard_bundle(bundle)
+        return bundle
+
+    def _get_super_primary_bundle(self) -> Any | None:
+        registry = getattr(self, "_registry", None)
+        orch = getattr(self, "_orchestrator", None)
+        if not registry or not orch or not registry.super_primary_id:
+            return None
+        return orch.get_bundle(registry.super_primary_id)
+
+    def _sync_demo_fetcher_target(self) -> Any | None:
+        """Keep demo comparison pointed at the current super-primary bundle."""
+        demo_fetcher = getattr(self, "_demo_fetcher", None)
+        bundle = self._get_super_primary_bundle()
+        if demo_fetcher and bundle and hasattr(demo_fetcher, "set_tracking_targets"):
+            demo_fetcher.set_tracking_targets(bundle.balance, bundle.fee_manager)
+        return bundle
 
     async def _check_origin(self, connection: Any, request: Any) -> None:
         """Validate Origin header for CSRF protection (process_request callback)."""
@@ -1930,6 +1973,7 @@ class DashboardServer:
                                 f"[Config] Selected config was in removed "
                                 f"group; falling back to '{fallback_cfg.name}'"
                             )
+                self._sync_demo_fetcher_target()
                 logger.info(
                     f"[Config] Removed group '{group_name}' "
                     f"({len(cascade_ids)} config(s): "
@@ -1954,6 +1998,8 @@ class DashboardServer:
                 if g:
                     for c in g.configs:
                         await orch.request_restart(c.id)
+                self._sync_selected_bundle_refs()
+                self._sync_demo_fetcher_target()
                 await _ack()
 
             elif msg_type == "config_reorder_groups":
@@ -2026,6 +2072,7 @@ class DashboardServer:
                                 f"[Config] Selected config was removed; "
                                 f"falling back to '{fallback_cfg.name}'"
                             )
+                self._sync_demo_fetcher_target()
                 logger.info(
                     f"[Config] Removed config '{cfg_name}' from group '{grp_name}' "
                     f"(id={cid[:8]}…)"
@@ -2120,7 +2167,17 @@ class DashboardServer:
                 # Reconcile rebuilds both old + new super-primary with new
                 # effective execution mode + hedge mode
                 await orch.reconcile_components()
-                await _ack()
+                self._sync_selected_bundle_refs()
+                new_sp_bundle = self._sync_demo_fetcher_target()
+                await _ack({
+                    "super_primary_config_id": cid,
+                    "execution_mode": (
+                        new_sp_bundle.execution_mode if new_sp_bundle else None
+                    ),
+                    "hedge_execution_mode": (
+                        new_sp_bundle.hedge_mode if new_sp_bundle else None
+                    ),
+                })
 
             elif msg_type == "config_apply_settings":
                 cid = msg.get("config_id")
@@ -2179,12 +2236,8 @@ class DashboardServer:
                 # If this was the selected config, repoint to the new bundle —
                 # the OLD bundle's components are torn down and stale.
                 if getattr(self, "_selected_config_id", None) == cid:
-                    new_bundle = orch.get_bundle(cid)
-                    if new_bundle is not None:
-                        self._monitor = new_bundle.monitor
-                        self._optimizer = new_bundle.optimizer
-                        self._balance = new_bundle.balance
-                        self._fee_manager = new_bundle.fee_manager
+                    self._sync_selected_bundle_refs(cid)
+                self._sync_demo_fetcher_target()
                 await _ack()
 
             elif msg_type == "config_restart_all":
@@ -2198,12 +2251,8 @@ class DashboardServer:
                 # references are stale. Repoint to the new bundle.
                 cur_sel = getattr(self, "_selected_config_id", None)
                 if cur_sel:
-                    new_bundle = orch.get_bundle(cur_sel)
-                    if new_bundle is not None:
-                        self._monitor = new_bundle.monitor
-                        self._optimizer = new_bundle.optimizer
-                        self._balance = new_bundle.balance
-                        self._fee_manager = new_bundle.fee_manager
+                    self._sync_selected_bundle_refs(cur_sel)
+                self._sync_demo_fetcher_target()
                 await _ack({"restarted": n})
 
             elif msg_type == "config_anomaly_resume":
@@ -2320,6 +2369,15 @@ class DashboardServer:
                 orch._registry = new_registry
                 save_registry(new_registry)
                 await orch.reconcile_components()
+                cur_sel = getattr(self, "_selected_config_id", None)
+                if not cur_sel or new_registry.find_config(cur_sel) is None:
+                    fallback_cfg = new_registry.default_config
+                    self._sync_selected_bundle_refs(
+                        fallback_cfg.id if fallback_cfg else None
+                    )
+                else:
+                    self._sync_selected_bundle_refs(cur_sel)
+                self._sync_demo_fetcher_target()
                 self._log_all_configs_settings("config_import")
                 logger.info(
                     f"[Config] Imported registry: "
@@ -2337,15 +2395,16 @@ class DashboardServer:
             elif msg_type == "save_shared_execution_mode":
                 exec_mode = msg.get("execution_mode")
                 hedge_mode = msg.get("hedge_execution_mode")
-                # If multiple configs exist, force-lock to simulation
-                if len(registry.all_configs()) > 1:
-                    if exec_mode and exec_mode != "simulation":
-                        logger.warning(
-                            f"[Config] Forcing execution_mode=simulation "
-                            f"({len(registry.all_configs())} configs > 1; "
-                            f"demo/live spot execution requires single-config mode)"
-                        )
-                        exec_mode = "simulation"
+                if exec_mode is not None and exec_mode not in ("simulation", "demo", "demo_only"):
+                    return await _err(
+                        f"Unsupported spot execution_mode: {exec_mode}. "
+                        "Use simulation, demo, or demo_only."
+                    )
+                if hedge_mode is not None and hedge_mode not in ("simulation", "testnet", "live"):
+                    return await _err(
+                        f"Unsupported hedge_execution_mode: {hedge_mode}. "
+                        "Use simulation, testnet, or live."
+                    )
                 if exec_mode is not None:
                     registry.update_shared("execution_mode", exec_mode)
                 if hedge_mode is not None:
@@ -2353,7 +2412,38 @@ class DashboardServer:
                 save_registry(registry)
                 # Reconcile — super-primary's bundle rebuilds with new mode
                 await orch.reconcile_components()
-                await _ack()
+                self._sync_selected_bundle_refs()
+                sp_bundle = self._sync_demo_fetcher_target()
+                requested_exec = registry.shared.get("execution_mode", "simulation")
+                effective_exec = sp_bundle.execution_mode if sp_bundle else None
+                demo_executor_ready = bool(sp_bundle and sp_bundle.demo_executor)
+                if requested_exec in ("demo", "demo_only") and not demo_executor_ready:
+                    logger.warning(
+                        "[Config] Spot execution mode saved as %s, but no demo "
+                        "executor is active. Configure demo/testnet API keys and "
+                        "restart before expecting demo orders.",
+                        requested_exec,
+                    )
+                logger.info(
+                    "[Config] Shared execution mode updated: spot=%s "
+                    "(effective=%s, demo_executor=%s), hedge=%s",
+                    requested_exec,
+                    effective_exec,
+                    "ready" if demo_executor_ready else "none",
+                    registry.shared.get("hedge_execution_mode", "simulation"),
+                )
+                await _ack({
+                    "execution_mode": requested_exec,
+                    "effective_execution_mode": effective_exec,
+                    "hedge_execution_mode": registry.shared.get(
+                        "hedge_execution_mode", "simulation"
+                    ),
+                    "effective_hedge_execution_mode": (
+                        sp_bundle.hedge_mode if sp_bundle else None
+                    ),
+                    "super_primary_config_id": registry.super_primary_id,
+                    "demo_executor_ready": demo_executor_ready,
+                })
 
             elif msg_type == "config_request_settings":
                 # Returns a single config's full settings blob (for copy/paste)
@@ -5419,6 +5509,31 @@ class DashboardServer:
                 fallback=fallback,
             )
             try:
+                prices_per_exchange = (
+                    bundle.monitor._get_per_exchange_prices()
+                    if bundle.monitor else None
+                )
+            except Exception:
+                prices_per_exchange = None
+            try:
+                no_hedge_value = bundle.balance.get_portfolio_value(
+                    global_prices,
+                    hedge_pnl_usd=0.0,
+                    prices_per_exchange=prices_per_exchange,
+                )
+            except Exception:
+                no_hedge_value = max(0.0, portfolio_value - bundle_hedge_pnl)
+            bnb_price = float(global_prices.get("BNBUSDT", 0.0) or 0.0)
+            futures_reserve_value = float(
+                getattr(bundle.balance, "binance_futures_usdt", 0.0) or 0.0
+            )
+            if bnb_price > 0:
+                futures_reserve_value += (
+                    float(getattr(bundle.balance, "binance_futures_bnb", 0.0) or 0.0)
+                    * bnb_price
+                )
+            spot_value = max(0.0, float(no_hedge_value) - futures_reserve_value)
+            try:
                 profit_stats = bundle.monitor.get_net_profit_stats()
                 net_pnl = float(profit_stats.get("net_profit", 0.0))
                 hourly_rate = float(profit_stats.get("hourly_rate", 0.0))
@@ -5509,6 +5624,7 @@ class DashboardServer:
             # configs stayed locked at startup-time trade_amount even when
             # their portfolio doubled. For "Maximize Profits" configs that
             # rely on trade_amount_pct, this defeated the entire feature.
+            initial_capital = float(group.initial_capital)
             try:
                 bundle_pct = float(cfg.settings.get("trade_amount_pct", 0.0))
                 if bundle_pct > 0 and bundle.balance and bundle.balance.initialized:
@@ -5530,7 +5646,6 @@ class DashboardServer:
                 drawdown_pct = float(getattr(bundle.monitor._anomaly, "_current_drawdown_pct", 0.0))
             except Exception:
                 drawdown_pct = 0.0
-            initial_capital = float(group.initial_capital)
             # Trades-per-minute, transfers, skipped — same fields as the
             # global Stats bar (computed from per-config monitor + balance)
             try:
@@ -5600,6 +5715,9 @@ class DashboardServer:
                 "execution_mode": bundle.execution_mode,
                 "hedge_mode": bundle.hedge_mode,
                 "portfolio_value": float(portfolio_value),
+                "spot_value": float(spot_value),
+                "futures_reserve_value": float(futures_reserve_value),
+                "hedge_pnl_value": float(bundle_hedge_pnl),
                 "initial_capital": initial_capital,
                 "net_pnl": net_pnl,
                 "hourly_rate": hourly_rate,
@@ -5752,9 +5870,14 @@ class DashboardServer:
         df = self._demo_fetcher
         if not df:
             return {}
+        bundle = self._get_super_primary_bundle()
+        monitor = bundle.monitor if bundle else self._monitor
+        balance = bundle.balance if bundle else self._balance
         execution_mode = str(
-            getattr(
-                self._monitor,
+            bundle.execution_mode
+            if bundle
+            else getattr(
+                monitor,
                 "_execution_mode",
                 self._settings.get("execution_mode", "simulation"),
             )
@@ -5764,23 +5887,28 @@ class DashboardServer:
                 "enabled": False,
                 "reason": f"execution_mode={execution_mode}",
             }
+        if bundle and not bundle.demo_executor:
+            return {
+                "enabled": False,
+                "reason": "demo executor unavailable (missing demo/testnet API keys or restart required)",
+            }
 
         # Only include symbols the sim actually holds (qty > 0).
         # Active symbols with 0 holdings have pre-loaded testnet crypto, not ours.
         sim_held = set()
-        for ex in self._balance._exchanges:
-            for sym, qty in self._balance.crypto[ex].items():
+        for ex in balance._exchanges:
+            for sym, qty in balance.crypto[ex].items():
                 if qty > 0:
                     sim_held.add(sym)
-        prices = self._get_prices(self._balance._exchanges, list(sim_held))
+        prices = self._get_prices(balance._exchanges, list(sim_held))
 
         comparisons: dict[str, Any] = {}
         for ex_name, demo_bal in df.latest_balances.items():
             # Simulation side
-            sim_usdt = self._balance.usdt.get(ex_name, 0.0)
+            sim_usdt = balance.usdt.get(ex_name, 0.0)
             sim_crypto: dict[str, Any] = {}
             sim_total = sim_usdt
-            for sym, qty in self._balance.crypto.get(ex_name, {}).items():
+            for sym, qty in balance.crypto.get(ex_name, {}).items():
                 if qty > 0:
                     p = prices.get(sym, 0.0)
                     val = qty * p
@@ -5803,7 +5931,7 @@ class DashboardServer:
                     qty_delta = qty - baseline_qty
                     p = prices.get(sym, 0.0)
                     # Show sim_qty + delta as the adjusted demo qty
-                    sim_qty = self._balance.crypto.get(ex_name, {}).get(sym, 0.0)
+                    sim_qty = balance.crypto.get(ex_name, {}).get(sym, 0.0)
                     adjusted_qty = sim_qty + qty_delta
                     val = adjusted_qty * p
                     demo_total += val
@@ -5836,11 +5964,11 @@ class DashboardServer:
         # (current demo balance - first-fetch baseline, at current prices).
         # When no demo trades have executed, deltas are ~0 and demo ≈ sim.
         # When Phase 2 starts, deltas capture real P&L vs simulated P&L.
-        all_prices = self._get_prices(self._balance._exchanges, list(set(self._balance._symbols) | sim_held))
-        if self._balance.initialized:
-            sim_total = self._balance.get_portfolio_value(all_prices)
+        all_prices = self._get_prices(balance._exchanges, list(set(balance._symbols) | sim_held))
+        if balance.initialized:
+            sim_total = balance.get_portfolio_value(all_prices)
         else:
-            sim_total = self._balance._initial_investment
+            sim_total = balance._initial_investment
         total_delta = df.get_total_delta(all_prices)
         demo_portfolio_total = sim_total + total_delta
 

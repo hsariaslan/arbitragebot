@@ -137,6 +137,16 @@ class DemoPortfolioFetcher:
         """Set which exchanges have active demo executors."""
         self._demo_exchanges = exchanges
 
+    def set_tracking_targets(
+        self,
+        balance_tracker: "BalanceTracker",
+        fee_manager: "FeeManager | None" = None,
+    ) -> None:
+        """Point comparisons at the currently active super-primary bundle."""
+        self._balance = balance_tracker
+        if fee_manager is not None:
+            self._fee_manager = fee_manager
+
     @property
     def enabled(self) -> bool:
         return any(self._configured.values())

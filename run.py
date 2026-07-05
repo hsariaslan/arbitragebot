@@ -363,6 +363,11 @@ async def main() -> None:
     default_bundle = orchestrator.get_bundle(registry.default_config.id) if registry.default_config else None
     if default_bundle is None:
         raise RuntimeError("No default config — cannot start dashboard")
+    super_primary_bundle = (
+        orchestrator.get_bundle(registry.super_primary_id)
+        if registry.super_primary_id
+        else None
+    ) or default_bundle
 
     # Build a flat settings dict for legacy callers
     from settings import load_settings
@@ -410,10 +415,10 @@ async def main() -> None:
     # ── Demo portfolio fetcher (compares super-primary balance vs demo accounts) ─
     from demo_fetcher import DemoPortfolioFetcher
     demo_fetcher = DemoPortfolioFetcher(
-        balance_tracker=default_bundle.balance,
+        balance_tracker=super_primary_bundle.balance,
         fetchers=fetchers,
         poll_interval=15.0,
-        fee_manager=default_bundle.fee_manager,
+        fee_manager=super_primary_bundle.fee_manager,
     )
     if legacy_state and "demo_fetcher" in legacy_state:
         demo_fetcher.from_state_dict(legacy_state["demo_fetcher"])
@@ -424,21 +429,26 @@ async def main() -> None:
             for cfg in registry.iter_configs()
         )
     )
-    if demo_fetcher_active:
+    if demo_fetcher.enabled:
         dashboard.set_demo_fetcher(demo_fetcher)
+    if demo_fetcher_active:
+        logger.info("[DemoCompare] Enabled for active demo spot execution")
     else:
         reason = (
             "no API keys configured in .env"
             if not demo_fetcher.enabled
             else "execution_mode=simulation"
         )
-        logger.info(f"[DemoCompare] Disabled ({reason})")
+        status = "Disabled" if not demo_fetcher.enabled else "Standby"
+        logger.info(f"[DemoCompare] {status} ({reason})")
 
     # ── Demo executor reconciliation (super-primary only) ─────────────
-    if default_bundle.demo_executor:
+    if super_primary_bundle.demo_executor:
         try:
-            await default_bundle.demo_executor.recover_pending_orders()
-            await default_bundle.demo_executor.reconcile_balances(default_bundle.balance)
+            await super_primary_bundle.demo_executor.recover_pending_orders()
+            await super_primary_bundle.demo_executor.reconcile_balances(
+                super_primary_bundle.balance
+            )
         except Exception as e:
             logger.error(f"[Reconcile] Startup reconciliation failed: {e}")
 
@@ -459,14 +469,14 @@ async def main() -> None:
                 default_bundle.balance,
                 default_bundle.monitor,
                 default_bundle.optimizer,
-                demo_fetcher if demo_fetcher_active else None,
+                demo_fetcher if demo_fetcher.enabled else None,
                 fee_manager=default_bundle.fee_manager,
                 hedge_manager=default_bundle.hedge_manager,
             )
         except Exception as e:
             logger.warning(f"[State] legacy save during shutdown failed: {e}")
         state_mgr.stop()
-        if demo_fetcher_active:
+        if demo_fetcher.enabled:
             demo_fetcher.stop()
         for fetcher in fetchers:
             fetcher.stop()
@@ -503,11 +513,11 @@ async def main() -> None:
         default_bundle.balance,
         default_bundle.monitor,
         default_bundle.optimizer,
-        demo_fetcher if demo_fetcher_active else None,
+        demo_fetcher if demo_fetcher.enabled else None,
         fee_manager=default_bundle.fee_manager,
         hedge_manager=default_bundle.hedge_manager,
     )))
-    if demo_fetcher_active:
+    if demo_fetcher.enabled:
         tasks.append(asyncio.create_task(demo_fetcher.run()))
 
     try:
@@ -520,7 +530,7 @@ async def main() -> None:
                 default_bundle.balance,
                 default_bundle.monitor,
                 default_bundle.optimizer,
-                demo_fetcher if demo_fetcher_active else None,
+                demo_fetcher if demo_fetcher.enabled else None,
                 fee_manager=default_bundle.fee_manager,
                 hedge_manager=default_bundle.hedge_manager,
             )
