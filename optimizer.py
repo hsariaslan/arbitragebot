@@ -474,6 +474,7 @@ class SymbolOptimizer:
         # this condition holds indefinitely and the log otherwise fires
         # every tick.
         self._last_overflow_blocked_log: float = 0.0
+        self._last_execution_floor_block_log: float = 0.0
         self._tick_count: int = 0
         self._session_start: float = time.time()
 
@@ -710,6 +711,9 @@ class SymbolOptimizer:
                 def _qualifies(s) -> tuple[bool, str, float]:
                     """Return (qualifies_for_exit, path_kind, required_elapsed_seconds)."""
                     if s.score < self._get_activation_threshold(s.symbol):
+                        return False, "", min_time_std
+                    floor_ok, _, _ = self._passes_execution_net_floor(s)
+                    if not floor_ok:
                         return False, "", min_time_std
                     # Standard path always wins if eligible
                     if s.total_ticks >= min_ticks_std:
@@ -1358,6 +1362,12 @@ class SymbolOptimizer:
             status = "NEW" if is_new else "WATCH"
             act_thresh = self._get_activation_threshold(s.symbol)
             fee_adj = self._compute_fee_threshold_adjustment(s.symbol)
+            floor_ok, floor_reason, floor_pct = self._passes_execution_net_floor(s)
+            floor_msg = (
+                f" floor={floor_pct:.4f}%"
+                if floor_ok
+                else f" floor={floor_pct:.4f}% block=execution_floor({floor_reason})"
+            )
             # Per-tick WATCH logs at 48 configs × ~5 candidates each = ~240
             # log lines/sec going through file I/O + dashboard buffer +
             # WebSocket broadcast — directly contributes to capacity warnings.
@@ -1374,6 +1384,7 @@ class SymbolOptimizer:
                 f"ticks={s.profitable_ticks}/{s.total_ticks} "
                 f"trend={trend} phase=discovery "
                 f"threshold={act_thresh:.4f}(fee_adj={fee_adj:+.4f})"
+                f"{floor_msg}"
             )
 
         # Drop watchlist entries that fell below threshold
@@ -1781,9 +1792,11 @@ class SymbolOptimizer:
         # Filter out symbols with declining scores or fading profitable frequency
         tradeable_symbols: list[str] = []
         rejected_declining: list[str] = []
+        rejected_execution_floor: list[str] = []
         now = time.time()
         evd_exchanges = self._event_driven_exchanges
         for sym in tradeable_symbols_raw:
+            score_obj = self._scores.get(sym)
             # Check 1: Recent profitable frequency — are ticks STILL profitable?
             # Look at recent tick data. If frequency dropped to near-zero,
             # the opportunity was transient and has already closed.
@@ -1854,6 +1867,20 @@ class SymbolOptimizer:
             # than trading on a marginal pair. The demotion system handles
             # bad symbols within 15-30 min. The gate remains active for
             # expansion/rotation where there IS a cost to switch.
+            #
+            # The execution floor IS applied here because activation itself
+            # buys spot inventory. If the observed net edge cannot clear the
+            # same realized-profit floor that monitor execution enforces, the
+            # capital would sit as idle crypto while every route is rejected
+            # as REALIZED_NET_SKIP.
+            if score_obj is not None:
+                floor_ok, floor_reason, floor_pct = self._passes_execution_net_floor(score_obj)
+                if not floor_ok:
+                    rejected_execution_floor.append(
+                        f"{sym.replace('USDT', '')}("
+                        f"{floor_reason}, floor={floor_pct:.4f}%)"
+                    )
+                    continue
 
             tradeable_symbols.append(sym)
 
@@ -1866,6 +1893,20 @@ class SymbolOptimizer:
                 logger.info(
                     f"[Candidate] REJECTED at activation (unstable): "
                     + ", ".join(rejected_declining)
+                )
+        if rejected_execution_floor:
+            should_log_rejection = True
+            if from_fast_track:
+                should_log_rejection = now - self._last_execution_floor_block_log >= 30.0
+            if should_log_rejection:
+                self._last_execution_floor_block_log = now
+                logger.info(
+                    f"[Candidate] REJECTED at activation (execution floor): "
+                    + ", ".join(rejected_execution_floor[:8])
+                    + (
+                        f" +{len(rejected_execution_floor)-8} more"
+                        if len(rejected_execution_floor) > 8 else ""
+                    )
                 )
 
         if tradeable_symbols:
@@ -1893,6 +1934,7 @@ class SymbolOptimizer:
             top_10 = ", ".join(
                 f"{s.symbol.replace('USDT', '')}({s.score:.6f} "
                 f"prof={s.profitable_ticks}/{s.total_ticks} "
+                f"avg={s.avg_profitable_net:.4f}% "
                 f"best={s.best_net_pct:+.4f}%)"
                 for s in ranked_symbols[:10]
             ) if ranked_symbols else "no data"
@@ -2272,6 +2314,14 @@ class SymbolOptimizer:
 
             threshold = self._get_activation_threshold(sym)
             if score_obj.score >= threshold and score_obj.score > 0:
+                floor_ok, floor_reason, floor_pct = self._passes_execution_net_floor(score_obj)
+                if not floor_ok:
+                    if sym in self._watchlist:
+                        removed_candidates.append(
+                            f"{sym}(execution_floor: {floor_reason}, floor={floor_pct:.4f}%)"
+                        )
+                    self._watchlist.pop(sym, None)
+                    continue
                 is_new = sym not in self._watchlist
                 if is_new:
                     self._watchlist[sym] = WatchlistEntry(
@@ -2870,6 +2920,49 @@ class SymbolOptimizer:
 
         return threshold
 
+    def _execution_min_net_floor_pct(self) -> float:
+        """Current realized-net floor used by the execution monitor."""
+        monitor = self._monitor
+        if monitor is None:
+            return 0.0
+        try:
+            fn = getattr(monitor, "_effective_min_net_profit_pct", None)
+            if callable(fn):
+                return max(0.0, float(fn()))
+        except Exception:
+            pass
+        try:
+            return max(0.0, float(getattr(monitor, "_min_net_profit_pct", 0.0) or 0.0))
+        except Exception:
+            return 0.0
+
+    def _passes_execution_net_floor(self, score: SymbolScore) -> tuple[bool, str, float]:
+        """True when a candidate can plausibly execute under monitor floors.
+
+        Score thresholds decide whether a symbol is statistically interesting.
+        This guard checks the separate per-trade realized-net threshold so
+        activation does not buy inventory for symbols whose observed net edge
+        is below the exact floor execution will enforce a few ticks later.
+        """
+        floor = self._execution_min_net_floor_pct()
+        if floor <= 0:
+            return True, "disabled", floor
+        avg_net = float(score.avg_profitable_net)
+        best_net = float(score.best_net_pct)
+        if avg_net + 1e-12 < floor:
+            return (
+                False,
+                f"avg_net={avg_net:.4f}% < min_net={floor:.4f}%",
+                floor,
+            )
+        if not math.isfinite(best_net) or best_net + 1e-12 < floor:
+            return (
+                False,
+                f"best_net={best_net:+.4f}% < min_net={floor:.4f}%",
+                floor,
+            )
+        return True, "ok", floor
+
     def _get_dominant_buyer_seller(self, symbol: str) -> tuple[str, str]:
         """Return (top_buyer, top_seller) for a symbol.
 
@@ -3396,20 +3489,37 @@ class SymbolOptimizer:
         avg_fee_rate = self._average_active_fee_rate()
         expansion_cost = self._trade_amount * 2 * avg_fee_rate * 1.5
 
-        expansion_candidates = sorted(
-            [
-                s for s in self._scores.values()
-                if s.symbol not in active_set
-                and s.symbol not in cooldown_set_now
-                and s.score >= self._get_activation_threshold(s.symbol)
-                and s.total_ticks >= self._samples_for_seconds(30.0)
-                and s.est_hourly_profit > expansion_cost * self._safety_multiplier
-            ],
+        now = time.time()
+        expansion_candidates: list[SymbolScore] = []
+        floor_blocked: list[str] = []
+        for s in self._scores.values():
+            if (
+                s.symbol in active_set
+                or s.symbol in cooldown_set_now
+                or s.score < self._get_activation_threshold(s.symbol)
+                or s.total_ticks < self._samples_for_seconds(30.0)
+                or s.est_hourly_profit <= expansion_cost * self._safety_multiplier
+            ):
+                continue
+            floor_ok, floor_reason, floor_pct = self._passes_execution_net_floor(s)
+            if not floor_ok:
+                floor_blocked.append(
+                    f"{s.symbol.replace('USDT', '')}({floor_reason}, floor={floor_pct:.4f}%)"
+                )
+                continue
+            expansion_candidates.append(s)
+        expansion_candidates.sort(
             key=lambda s: s.score * (1.0 if self._is_symbol_on_bitfinex(s.symbol) else 0.7),
             reverse=True,
         )
-
-        now = time.time()
+        if floor_blocked and now - self._last_execution_floor_block_log >= 60.0:
+            self._last_execution_floor_block_log = now
+            logger.info(
+                f"[Candidate] {('RECOVERY_' if deficit_recovery else '')}EXPAND_BLOCKED "
+                f"execution_floor: "
+                + ", ".join(floor_blocked[:6])
+                + (f" +{len(floor_blocked)-6} more" if len(floor_blocked) > 6 else "")
+            )
         recovery_cost_cap = (
             self._deficit_recovery_setup_cost_cap() if deficit_recovery else None
         )
@@ -3693,6 +3803,7 @@ class SymbolOptimizer:
                     for e in self._watchlist.values()
                     if e.confirmed and e.symbol not in active_set
                     and e.symbol not in cooldown_set and e.symbol in self._scores
+                    and self._passes_execution_net_floor(self._scores[e.symbol])[0]
                 ],
                 key=lambda s: s.score,
                 reverse=True,

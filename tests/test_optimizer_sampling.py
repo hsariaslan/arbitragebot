@@ -4,7 +4,7 @@ from collections import defaultdict, deque
 
 os.environ.setdefault("DASHBOARD_PASSWORD", "test")
 
-from optimizer import SymbolOptimizer, SymbolTick
+from optimizer import SymbolOptimizer, SymbolScore, SymbolTick
 
 
 class OptimizerSamplingTests(unittest.TestCase):
@@ -58,6 +58,52 @@ class OptimizerSamplingTests(unittest.TestCase):
         self.assertEqual(len(opt._ticks["ARBUSDT"]), 0)
         self.assertEqual(opt._agg_total["ARBUSDT"], 0)
         self.assertEqual(opt._agg_prof_profit_sum["ARBUSDT"], 0.0)
+
+    def test_execution_floor_blocks_candidates_below_monitor_min_net(self) -> None:
+        class MonitorStub:
+            def _effective_min_net_profit_pct(self) -> float:
+                return 0.065
+
+        opt = object.__new__(SymbolOptimizer)
+        opt._monitor = MonitorStub()
+
+        below_avg = SymbolScore(
+            symbol="ZECUSDT",
+            score=0.05,
+            avg_net_pct=0.04,
+            avg_profitable_net=0.059,
+            profitable_ticks=10,
+            total_ticks=10,
+            frequency=1.0,
+            best_net_pct=0.08,
+            est_hourly_profit=1.0,
+        )
+        below_best = SymbolScore(
+            symbol="ZECUSDT",
+            score=0.05,
+            avg_net_pct=0.04,
+            avg_profitable_net=0.07,
+            profitable_ticks=10,
+            total_ticks=10,
+            frequency=1.0,
+            best_net_pct=0.064,
+            est_hourly_profit=1.0,
+        )
+        tradable = SymbolScore(
+            symbol="ZECUSDT",
+            score=0.05,
+            avg_net_pct=0.04,
+            avg_profitable_net=0.07,
+            profitable_ticks=10,
+            total_ticks=10,
+            frequency=1.0,
+            best_net_pct=0.08,
+            est_hourly_profit=1.0,
+        )
+
+        self.assertFalse(opt._passes_execution_net_floor(below_avg)[0])
+        self.assertFalse(opt._passes_execution_net_floor(below_best)[0])
+        self.assertTrue(opt._passes_execution_net_floor(tradable)[0])
 
 
 if __name__ == "__main__":
