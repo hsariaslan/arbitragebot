@@ -10,6 +10,20 @@ Do not add current-version or release-history notes to `CLAUDE.md`. Keep runtime
 
 ## Version History
 
+### v0.35.3-beta — Demo Mode, Session Docs & Session 35 Noise Fixes
+
+- Fixed the multi-config dashboard/runtime path that prevented the super-primary spot execution mode from switching to demo/demo-only execution.
+- Rebound demo comparison state to the current super-primary bundle so dashboard controls, demo fetcher wiring, restored balance state, and config acknowledgements stay synchronized.
+- Updated dashboard/header/wallet portfolio fields to use consistent backend payload data for multi-config portfolio display.
+- Preserved one super-primary execution target while allowing non-primary configs to remain safely simulated.
+- Added config-registry and dashboard demo-state regression tests for the super-primary execution-mode flow.
+- Bounded optimizer score retention and sampling behavior to reduce long-run memory/sweep pressure on the 30-config batch.
+- Throttled repeated Binance futures BNB top-up and fee-discount skip diagnostics while keeping reserve-health status logs visible.
+- Reduced the default/configured Binance futures BNB fee-reserve target from `5%` to `1%` to avoid unnecessary reserve churn.
+- Slowed and throttled MEXC no-initial-depth reconnect diagnostics so unstable depth streams do not flood bot logs.
+- Tuned all 30 local configs with higher hedge dust floors, `5%` hedge-adjust drift, and `180s` periodic hedge checks to reduce futures-fee churn.
+- Moved session documentation into `documentations/sessions/` and added the detailed Session #35 continuation report.
+
 ### v0.35.2-beta — Low-Edge Rebalance, Hedge Churn & MEXC Depth Fixes
 
 - Fixed MEXC spot depth subscriptions to use the official partial-depth protobuf channel format: `spot@public.limit.depth.v3.api.pb@{symbol}@20`.
