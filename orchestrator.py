@@ -1168,7 +1168,7 @@ class ConfigFactory:
                 s.get("binance_futures_bnb_auto_topup_enabled", True)
             ),
             futures_bnb_min_usd=float(s.get("binance_futures_bnb_min_usd", 5.0)),
-            futures_bnb_target_pct=float(s.get("binance_futures_bnb_target_pct", 0.05)),
+            futures_bnb_target_pct=float(s.get("binance_futures_bnb_target_pct", 0.01)),
             futures_bnb_transfer_min_usd=float(
                 s.get("binance_futures_bnb_transfer_min_usd", 5.0)
             ),

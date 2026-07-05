@@ -48,6 +48,51 @@ class RebalanceAndHedgeGuardTests(unittest.TestCase):
         self.assertTrue(should_adjust)
         self.assertEqual(reason, "ok")
 
+    def test_bnb_topup_skip_log_is_throttled(self) -> None:
+        manager = object.__new__(HedgeManager)
+        manager._last_bnb_topup_skip_log_ts = 0.0
+        manager._last_bnb_topup_skip_signature = ""
+
+        with self.assertLogs("hedge_manager", level="INFO") as first:
+            manager._log_bnb_topup_skip(
+                1000.0,
+                futures_value=0.0,
+                target_usd=10.0,
+                spot_value=5.0,
+                spot_floor_usd=5.0,
+                transfer_min_usd=5.0,
+                transferable_usd=0.0,
+            )
+
+        with self.assertLogs("hedge_manager", level="DEBUG") as second:
+            manager._log_bnb_topup_skip(
+                1010.0,
+                futures_value=0.0,
+                target_usd=10.0,
+                spot_value=5.0,
+                spot_floor_usd=5.0,
+                transfer_min_usd=5.0,
+                transferable_usd=0.0,
+            )
+
+        self.assertIn("FUTURES_BNB_TOPUP_SKIPPED", first.output[0])
+        self.assertIn("throttled", second.output[0])
+
+    def test_futures_bnb_discount_skip_log_is_throttled(self) -> None:
+        manager = object.__new__(HedgeManager)
+        manager._bnb_fee_reserve_status = {"futures_value_usd": 0.0}
+        manager._last_futures_bnb_discount_skip_log_ts = 0.0
+        manager._last_futures_bnb_discount_skip_signature = ""
+
+        with self.assertLogs("hedge_manager", level="INFO") as first:
+            manager._log_futures_bnb_discount_skip(1000.0, "ADAUSDT", 0.0123)
+
+        with self.assertLogs("hedge_manager", level="DEBUG") as second:
+            manager._log_futures_bnb_discount_skip(1010.0, "ADAUSDT", 0.0123)
+
+        self.assertIn("Futures BNB fee discount skipped", first.output[0])
+        self.assertIn("reserve=$0.00", second.output[0])
+
 
 if __name__ == "__main__":
     unittest.main()

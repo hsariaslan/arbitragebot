@@ -36,6 +36,8 @@ from fetchers.base import BaseFetcher, PriceState
 
 logger = logging.getLogger(__name__)
 MEXC_DEPTH_LEVEL = 20
+MEXC_DEPTH_INITIAL_TIMEOUT_SECONDS = 90.0
+MEXC_DEPTH_NO_INITIAL_LOG_SECONDS = 300.0
 
 
 def _depth_channel(symbol: str) -> str:
@@ -546,6 +548,8 @@ class _MEXCDepthSubFetcher:
         self._last_data_time: float = 0.0
         self._connect_count: int = 0
         self._connected_at: float = 0.0
+        self._no_initial_depth_count: int = 0
+        self._last_no_initial_depth_log_ts: float = 0.0
 
     async def run(self) -> None:
         from config import RECONNECT_INITIAL_DELAY, RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY
@@ -635,6 +639,12 @@ class _MEXCDepthSubFetcher:
                     continue
 
                 now = time.time()
+                if self._last_data_time <= 0 and self._no_initial_depth_count > 0:
+                    logger.info(
+                        f"[{self._parent.exchange_name}] Depth sub-connection recovered "
+                        f"after {self._no_initial_depth_count} no-initial reconnects"
+                    )
+                    self._no_initial_depth_count = 0
                 existing = self._parent._state[symbol]
 
                 # Merge depth into existing state (preserve bookTicker fields)
@@ -672,14 +682,34 @@ class _MEXCDepthSubFetcher:
             ref_time = self._last_data_time or self._connected_at
             if ref_time <= 0:
                 continue
-            stale = time.time() - ref_time
-            if stale < self._parent.STALENESS_RECONNECT_SECONDS:
+            now = time.time()
+            stale = now - ref_time
+            timeout = (
+                MEXC_DEPTH_INITIAL_TIMEOUT_SECONDS
+                if self._last_data_time <= 0
+                else self._parent.STALENESS_RECONNECT_SECONDS
+            )
+            if stale < timeout:
                 continue
             if self._last_data_time <= 0:
-                logger.warning(
-                    f"[{self._parent.exchange_name}] Depth sub-connection received "
-                    f"no initial depth data for {stale:.0f}s, reconnecting"
+                self._no_initial_depth_count += 1
+                should_log = (
+                    self._no_initial_depth_count in (1, 3, 10)
+                    or self._no_initial_depth_count % 50 == 0
+                    or now - self._last_no_initial_depth_log_ts
+                    >= MEXC_DEPTH_NO_INITIAL_LOG_SECONDS
                 )
+                message = (
+                    f"[{self._parent.exchange_name}] Depth sub-connection received "
+                    f"no initial depth data for {stale:.0f}s "
+                    f"({len(self._symbols)} symbols, attempts={self._no_initial_depth_count}), "
+                    f"reconnecting"
+                )
+                if should_log:
+                    self._last_no_initial_depth_log_ts = now
+                    logger.warning(message)
+                else:
+                    logger.debug(message)
             elif self._connect_count <= 1:
                 logger.warning(
                     f"[{self._parent.exchange_name}] Depth sub-connection stale "

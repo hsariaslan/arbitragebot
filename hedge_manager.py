@@ -143,7 +143,7 @@ class HedgeManager:
         futures_referral_cashback_pct: float = 0.10,
         futures_bnb_auto_topup_enabled: bool = True,
         futures_bnb_min_usd: float = 5.0,
-        futures_bnb_target_pct: float = 0.05,
+        futures_bnb_target_pct: float = 0.01,
         futures_bnb_transfer_min_usd: float = 5.0,
         spot_bnb_min_usd: float = 5.0,
         spot_bnb_auto_buy_enabled: bool = True,
@@ -204,6 +204,10 @@ class HedgeManager:
         self._last_bnb_reserve_status_signature: str = ""
         self._last_spot_bnb_skip_log_ts: float = 0.0
         self._last_spot_bnb_skip_signature: str = ""
+        self._last_bnb_topup_skip_log_ts: float = 0.0
+        self._last_bnb_topup_skip_signature: str = ""
+        self._last_futures_bnb_discount_skip_log_ts: float = 0.0
+        self._last_futures_bnb_discount_skip_signature: str = ""
         self._sync_balance_bnb_reserve_floor()
 
         # Per-symbol shadow state
@@ -317,9 +321,10 @@ class HedgeManager:
             fee = self._futures_fee_components(notional_usd, bnb_discount_available=True)
             bnb_fee_usd = fee.get("bnb_fee_payment_usd", 0.0)
             if bnb_fee_usd > 0 and not self._can_pay_futures_bnb_fee(bnb_fee_usd):
-                logger.warning(
-                    f"[Hedge] Futures BNB fee discount skipped for {shadow.spot_symbol}: "
-                    f"reserve below estimated fee ${bnb_fee_usd:.4f}"
+                self._log_futures_bnb_discount_skip(
+                    time.time(),
+                    shadow.spot_symbol,
+                    bnb_fee_usd,
                 )
                 fee = self._futures_fee_components(
                     notional_usd,
@@ -879,6 +884,68 @@ class HedgeManager:
             logger.warning(message)
         else:
             logger.info(message)
+
+    def _log_bnb_topup_skip(
+        self,
+        now: float,
+        *,
+        futures_value: float,
+        target_usd: float,
+        spot_value: float,
+        spot_floor_usd: float,
+        transfer_min_usd: float,
+        transferable_usd: float,
+    ) -> None:
+        """Keep BNB top-up diagnostics without flooding logs every sweep."""
+        reason = f"transferable_below_min:${transferable_usd:.2f}<${transfer_min_usd:.2f}"
+        signature = (
+            f"{reason}|fut={futures_value:.2f}|target={target_usd:.2f}|"
+            f"spot={spot_value:.2f}|floor={spot_floor_usd:.2f}"
+        )
+        if (
+            signature == self._last_bnb_topup_skip_signature
+            and now - self._last_bnb_topup_skip_log_ts < 300.0
+        ):
+            logger.debug(f"[Hedge] FUTURES_BNB_TOPUP_SKIPPED throttled: {reason}")
+            return
+        self._last_bnb_topup_skip_signature = signature
+        self._last_bnb_topup_skip_log_ts = now
+        logger.info(
+            f"[Hedge] FUTURES_BNB_TOPUP_SKIPPED futures=${futures_value:.2f} "
+            f"target=${target_usd:.2f} spot=${spot_value:.2f} "
+            f"spot_floor=${spot_floor_usd:.2f} transferable=${transferable_usd:.2f} "
+            f"transfer_min=${transfer_min_usd:.2f}"
+        )
+
+    def _log_futures_bnb_discount_skip(
+        self,
+        now: float,
+        spot_symbol: str,
+        bnb_fee_usd: float,
+    ) -> None:
+        """Throttle repeated estimated-fee discount skip notices."""
+        status = (
+            self._bnb_fee_reserve_status
+            if isinstance(self._bnb_fee_reserve_status, dict)
+            else {}
+        )
+        reserve = float(status.get("futures_value_usd", 0.0) or 0.0)
+        signature = f"{spot_symbol}|reserve=${reserve:.2f}|fee=${bnb_fee_usd:.4f}"
+        if (
+            signature == self._last_futures_bnb_discount_skip_signature
+            and now - self._last_futures_bnb_discount_skip_log_ts < 300.0
+        ):
+            logger.debug(
+                f"[Hedge] Futures BNB fee discount skipped for {spot_symbol}: "
+                f"reserve=${reserve:.2f} estimated_fee=${bnb_fee_usd:.4f}"
+            )
+            return
+        self._last_futures_bnb_discount_skip_signature = signature
+        self._last_futures_bnb_discount_skip_log_ts = now
+        logger.info(
+            f"[Hedge] Futures BNB fee discount skipped for {spot_symbol}: "
+            f"reserve=${reserve:.2f} below estimated fee ${bnb_fee_usd:.4f}"
+        )
 
     # ── Sizing primitives ─────────────────────────────────────────────
 
@@ -1560,10 +1627,14 @@ class HedgeManager:
                     f"spot_bnb_transferable=${transferable_usd:.2f} "
                     f"below_min=${amounts['transfer_min_usd']:.2f}"
                 )
-                logger.warning(
-                    f"[Hedge] FUTURES_BNB_TOPUP_SKIPPED futures=${futures_value:.2f} "
-                    f"target=${amounts['target_usd']:.2f} spot=${spot_value:.2f} "
-                    f"spot_floor=${amounts['spot_min_usd']:.2f}"
+                self._log_bnb_topup_skip(
+                    now,
+                    futures_value=futures_value,
+                    target_usd=amounts["target_usd"],
+                    spot_value=spot_value,
+                    spot_floor_usd=amounts["spot_min_usd"],
+                    transfer_min_usd=amounts["transfer_min_usd"],
+                    transferable_usd=transferable_usd,
                 )
 
         self._bnb_fee_reserve_status = self._make_bnb_fee_reserve_status(
@@ -2077,6 +2148,10 @@ class HedgeManager:
             "_last_bnb_reserve_status_signature": self._last_bnb_reserve_status_signature,
             "_last_spot_bnb_skip_log_ts": self._last_spot_bnb_skip_log_ts,
             "_last_spot_bnb_skip_signature": self._last_spot_bnb_skip_signature,
+            "_last_bnb_topup_skip_log_ts": self._last_bnb_topup_skip_log_ts,
+            "_last_bnb_topup_skip_signature": self._last_bnb_topup_skip_signature,
+            "_last_futures_bnb_discount_skip_log_ts": self._last_futures_bnb_discount_skip_log_ts,
+            "_last_futures_bnb_discount_skip_signature": self._last_futures_bnb_discount_skip_signature,
             "_close_failure_backoff": {
                 sym: {
                     "retry_at": retry_at,
@@ -2121,6 +2196,18 @@ class HedgeManager:
         )
         self._last_spot_bnb_skip_signature = str(
             data.get("_last_spot_bnb_skip_signature", "")
+        )
+        self._last_bnb_topup_skip_log_ts = float(
+            data.get("_last_bnb_topup_skip_log_ts", 0.0)
+        )
+        self._last_bnb_topup_skip_signature = str(
+            data.get("_last_bnb_topup_skip_signature", "")
+        )
+        self._last_futures_bnb_discount_skip_log_ts = float(
+            data.get("_last_futures_bnb_discount_skip_log_ts", 0.0)
+        )
+        self._last_futures_bnb_discount_skip_signature = str(
+            data.get("_last_futures_bnb_discount_skip_signature", "")
         )
         self._close_failure_backoff = {}
         now = time.time()
